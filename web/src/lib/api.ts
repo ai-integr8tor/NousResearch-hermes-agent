@@ -1666,7 +1666,6 @@ export interface MemoryResponse {
   provider: string;
   provider_label: string;
   directory: string;
-  note: string;
   stores: {
     user: MemoryStoreResponse;
     memory: MemoryStoreResponse;
