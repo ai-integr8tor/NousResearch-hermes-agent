@@ -223,7 +223,7 @@ class GatewaySlashCommandsMixin:
 
         # Resolve session config info to surface to the user
         try:
-            session_info = self._format_session_info()
+            session_info = self._format_session_info(platform=source.platform)
         except Exception:
             session_info = ""
 
@@ -1114,7 +1114,7 @@ class GatewaySlashCommandsMixin:
           /model <name> --provider <provider> — switch provider + model
           /model --provider <provider>        — switch to provider, auto-detect model
         """
-        from gateway.run import _hermes_home, _load_gateway_config
+        from gateway.run import _hermes_home, _load_gateway_config, _get_platform_model_overrides
         import yaml
         from hermes_cli.model_switch import (
             switch_model as _switch_model, parse_model_flags,
@@ -1152,6 +1152,7 @@ class GatewaySlashCommandsMixin:
         user_provs = None
         custom_provs = None
         config_path = _hermes_home / "config.yaml"
+        cfg = None
         try:
             cfg = _load_gateway_config()
             if cfg:
@@ -1169,8 +1170,21 @@ class GatewaySlashCommandsMixin:
         except Exception:
             pass
 
-        # Check for session override
+        # Check for platform override (before session override — lower priority)
         source = event.source
+        platform_override = _get_platform_model_overrides(
+            cfg, platform=source.platform if source else None,
+        )
+        if platform_override.get("model"):
+            current_model = platform_override["model"]
+        if platform_override.get("provider"):
+            current_provider = platform_override["provider"]
+        if platform_override.get("base_url"):
+            current_base_url = platform_override["base_url"]
+        if platform_override.get("api_key"):
+            current_api_key = platform_override["api_key"]
+
+        # Check for session override
         # Normalize the source the same way a normal message turn does
         # (Telegram DM topic recovery) before deriving the override key, so
         # the override is stored under the key the next message turn reads
