@@ -950,6 +950,7 @@ class TestCheckpoint:
             s.watcher_user_id = "u123"
             s.watcher_user_name = "alice"
             s.watcher_thread_id = "42"
+            s.conversation_session_id = "sess-old"
             s.watcher_interval = 60
             registry._running[s.id] = s
             registry._write_checkpoint()
@@ -961,6 +962,7 @@ class TestCheckpoint:
             assert data[0]["watcher_user_id"] == "u123"
             assert data[0]["watcher_user_name"] == "alice"
             assert data[0]["watcher_thread_id"] == "42"
+            assert data[0]["conversation_session_id"] == "sess-old"
             assert data[0]["watcher_interval"] == 60
 
     def test_recover_enqueues_watchers(self, registry, tmp_path):
@@ -976,6 +978,7 @@ class TestCheckpoint:
             "watcher_user_id": "u123",
             "watcher_user_name": "alice",
             "watcher_thread_id": "42",
+            "conversation_session_id": "sess-old",
             "watcher_interval": 60,
         }]))
         with patch("tools.process_registry.CHECKPOINT_PATH", checkpoint):
@@ -989,6 +992,7 @@ class TestCheckpoint:
             assert w["user_id"] == "u123"
             assert w["user_name"] == "alice"
             assert w["thread_id"] == "42"
+            assert w["conversation_session_id"] == "sess-old"
             assert w["check_interval"] == 60
 
     def test_recover_skips_watcher_when_no_interval(self, registry, tmp_path):

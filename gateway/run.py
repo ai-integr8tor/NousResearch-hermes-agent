@@ -14419,6 +14419,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             user_id=str(context.source.user_id) if context.source.user_id else "",
             user_name=str(context.source.user_name) if context.source.user_name else "",
             session_key=context.session_key,
+            session_id=context.session_id,
             message_id=str(context.source.message_id) if context.source.message_id else "",
             profile=getattr(context.source, "profile", "") or "",
             async_delivery=_async_delivery,
@@ -14833,12 +14834,52 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             user_name=str(evt.get("user_name") or "").strip() or None,
         )
 
+    def _is_stale_process_notification(self, payload: dict) -> bool:
+        """Return True when a background-process event belongs to a superseded session."""
+        session_key = str(payload.get("session_key") or "").strip()
+        event_session_id = str(payload.get("conversation_session_id") or "").strip()
+        if not session_key or not event_session_id:
+            return False
+
+        try:
+            self.session_store._ensure_loaded()
+            entry = self.session_store._entries.get(session_key)
+        except Exception:
+            entry = None
+        current_session_id = str(getattr(entry, "session_id", "") or "").strip()
+        if current_session_id and current_session_id != event_session_id:
+            # Compression rotates the physical session id while preserving the
+            # same conversation. A process spawned before compression should
+            # still notify the live continuation, but a process from a true
+            # /new or /resume boundary must be dropped.
+            try:
+                session_db = getattr(self, "_session_db", None)
+                db = getattr(session_db, "_db", session_db)
+                get_tip = getattr(db, "get_compression_tip", None)
+                if callable(get_tip):
+                    event_tip = str(get_tip(event_session_id) or event_session_id).strip()
+                    current_tip = str(get_tip(current_session_id) or current_session_id).strip()
+                    if event_tip and event_tip == current_tip:
+                        return False
+            except Exception:
+                pass
+            logger.info(
+                "Dropping stale process notification for %s: event session=%s current session=%s",
+                session_key[:40],
+                event_session_id,
+                current_session_id,
+            )
+            return True
+        return False
+
     async def _inject_watch_notification(self, synth_text: str, evt: dict) -> None:
         """Inject a watch-pattern notification as a synthetic message event.
 
         Routing must come from the queued watch event itself, not from whatever
         foreground message happened to be active when the queue was drained.
         """
+        if self._is_stale_process_notification(evt):
+            return
         source = self._build_process_event_source(evt)
         if not source:
             logger.warning(
@@ -15025,6 +15066,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     })
                     if not synth_text:
                         break
+                    if self._is_stale_process_notification(watcher):
+                        logger.info(
+                            "Process %s finished after session boundary changed for %s — dropping stale agent notification",
+                            session_id,
+                            session_key[:40],
+                        )
+                        break
                     source = self._build_process_event_source({
                         "session_id": session_id,
                         "session_key": session_key,
@@ -15033,6 +15081,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         "thread_id": thread_id,
                         "user_id": user_id,
                         "user_name": user_name,
+                        "conversation_session_id": watcher.get("conversation_session_id", ""),
                     })
                     if not source:
                         logger.warning(
@@ -15074,6 +15123,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     or (notify_mode == "error" and session.exit_code not in {0, None})
                 )
                 if should_notify:
+                    if self._is_stale_process_notification(watcher):
+                        logger.info(
+                            "Process %s finished after session boundary changed for %s — dropping stale text notification",
+                            session_id,
+                            session_key[:40],
+                        )
+                        break
                     new_output = session.output_buffer[-1000:] if session.output_buffer else ""
                     if new_output:
                         from agent.redact import redact_terminal_output
@@ -15102,6 +15158,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 break
 
             elif has_new_output and notify_mode == "all" and not agent_notify:
+                if self._is_stale_process_notification(watcher):
+                    logger.info(
+                        "Process %s emitted output after session boundary changed for %s — dropping stale text notification",
+                        session_id,
+                        session_key[:40],
+                    )
+                    break
                 # New output available -- deliver status update (only in "all" mode)
                 # Skip periodic updates for agent_notify watchers (they only care about completion)
                 new_output = session.output_buffer[-500:] if session.output_buffer else ""

@@ -65,6 +65,31 @@ def _watcher_dict(session_id="proc_test", thread_id=""):
     return d
 
 
+def test_set_session_env_exposes_physical_session_id(monkeypatch, tmp_path):
+    """Gateway-bound tools must see the physical session id, not just session_key."""
+    from gateway.session import SessionContext, SessionSource
+    from gateway.session_context import clear_session_vars, get_session_env
+
+    runner = _build_runner(monkeypatch, tmp_path, "all")
+    ctx = SessionContext(
+        source=SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="123",
+            chat_type="dm",
+        ),
+        connected_platforms=[Platform.TELEGRAM],
+        home_channels={},
+        session_key="agent:main:telegram:dm:123",
+        session_id="sess-current",
+    )
+
+    tokens = runner._set_session_env(ctx)
+    try:
+        assert get_session_env("HERMES_SESSION_ID") == "sess-current"
+    finally:
+        clear_session_vars(tokens)
+
+
 # ---------------------------------------------------------------------------
 # _load_background_notifications_mode unit tests
 # ---------------------------------------------------------------------------
@@ -203,7 +228,6 @@ async def test_run_process_watcher_respects_notification_mode(
         sent_message = adapter.send.await_args.args[1]
         assert expected_fragment in sent_message
 
-
 @pytest.mark.asyncio
 async def test_thread_id_passed_to_send(monkeypatch, tmp_path):
     """thread_id from watcher dict is forwarded as metadata to adapter.send()."""
@@ -224,7 +248,6 @@ async def test_thread_id_passed_to_send(monkeypatch, tmp_path):
     assert adapter.send.await_count == 1
     _, kwargs = adapter.send.call_args
     assert kwargs["metadata"] == {"thread_id": "42"}
-
 
 @pytest.mark.asyncio
 async def test_no_thread_id_sends_no_metadata(monkeypatch, tmp_path):
@@ -247,7 +270,90 @@ async def test_no_thread_id_sends_no_metadata(monkeypatch, tmp_path):
     _, kwargs = adapter.send.call_args
     assert kwargs["metadata"] is None
 
+@pytest.mark.asyncio
+async def test_run_process_watcher_drops_stale_text_completion_after_reset(monkeypatch, tmp_path):
+    import tools.process_registry as pr_module
 
+    sessions = [SimpleNamespace(output_buffer="done\n", exited=True, exit_code=0)]
+    monkeypatch.setattr(pr_module, "process_registry", _FakeRegistry(sessions))
+
+    async def _instant_sleep(*_a, **_kw):
+        pass
+    monkeypatch.setattr(asyncio, "sleep", _instant_sleep)
+
+    runner = _build_runner(monkeypatch, tmp_path, "all")
+    adapter = runner.adapters[Platform.TELEGRAM]
+    session_key = "agent:main:telegram:dm:123"
+    runner.session_store._entries[session_key] = SimpleNamespace(session_id="sess-new")
+
+    watcher = _watcher_dict()
+    watcher.update({
+        "session_key": session_key,
+        "conversation_session_id": "sess-old",
+    })
+
+    await runner._run_process_watcher(watcher)
+
+    adapter.send.assert_not_awaited()
+
+@pytest.mark.asyncio
+async def test_run_process_watcher_keeps_text_completion_for_compression_continuation(monkeypatch, tmp_path):
+    import tools.process_registry as pr_module
+
+    sessions = [SimpleNamespace(output_buffer="done\n", exited=True, exit_code=0)]
+    monkeypatch.setattr(pr_module, "process_registry", _FakeRegistry(sessions))
+
+    async def _instant_sleep(*_a, **_kw):
+        pass
+    monkeypatch.setattr(asyncio, "sleep", _instant_sleep)
+
+    runner = _build_runner(monkeypatch, tmp_path, "all")
+    adapter = runner.adapters[Platform.TELEGRAM]
+    session_key = "agent:main:telegram:dm:123"
+    runner.session_store._entries[session_key] = SimpleNamespace(session_id="sess-new")
+    runner._session_db = SimpleNamespace(
+        _db=SimpleNamespace(
+            get_compression_tip=lambda sid: {
+                "sess-old": "sess-new",
+                "sess-new": "sess-new",
+            }.get(sid, sid)
+        )
+    )
+
+    watcher = _watcher_dict()
+    watcher.update({
+        "session_key": session_key,
+        "conversation_session_id": "sess-old",
+    })
+
+    await runner._run_process_watcher(watcher)
+
+    adapter.send.assert_awaited_once()
+@pytest.mark.asyncio
+async def test_run_process_watcher_drops_stale_text_running_update_after_reset(monkeypatch, tmp_path):
+    import tools.process_registry as pr_module
+
+    sessions = [SimpleNamespace(output_buffer="building...\n", exited=False, exit_code=None)]
+    monkeypatch.setattr(pr_module, "process_registry", _FakeRegistry(sessions))
+
+    async def _instant_sleep(*_a, **_kw):
+        pass
+    monkeypatch.setattr(asyncio, "sleep", _instant_sleep)
+
+    runner = _build_runner(monkeypatch, tmp_path, "all")
+    adapter = runner.adapters[Platform.TELEGRAM]
+    session_key = "agent:main:telegram:dm:123"
+    runner.session_store._entries[session_key] = SimpleNamespace(session_id="sess-new")
+
+    watcher = _watcher_dict()
+    watcher.update({
+        "session_key": session_key,
+        "conversation_session_id": "sess-old",
+    })
+
+    await runner._run_process_watcher(watcher)
+
+    adapter.send.assert_not_awaited()
 @pytest.mark.asyncio
 async def test_inject_watch_notification_routes_from_session_store_origin(monkeypatch, tmp_path):
     from gateway.session import SessionSource
@@ -281,7 +387,6 @@ async def test_inject_watch_notification_routes_from_session_store_origin(monkey
     assert synth_event.source.thread_id == "42"
     assert synth_event.source.user_id == "123"
     assert synth_event.source.user_name == "Emiliyan"
-
 
 @pytest.mark.asyncio
 async def test_agent_notification_carries_message_id_reply_anchor(monkeypatch, tmp_path):
@@ -322,7 +427,6 @@ async def test_agent_notification_carries_message_id_reply_anchor(monkeypatch, t
     assert synth_event.message_id == "555"
     assert synth_event.source.thread_id == "24296"
 
-
 @pytest.mark.asyncio
 async def test_agent_notification_no_message_id_is_tolerated(monkeypatch, tmp_path):
     """A watcher dict without message_id (CLI spawn, pre-upgrade checkpoint)
@@ -355,7 +459,6 @@ async def test_agent_notification_no_message_id_is_tolerated(monkeypatch, tmp_pa
     adapter.handle_message.assert_awaited_once()
     synth_event = adapter.handle_message.await_args.args[0]
     assert synth_event.message_id is None
-
 
 @pytest.mark.asyncio
 async def test_inject_watch_notification_carries_message_id_reply_anchor(monkeypatch, tmp_path):
@@ -445,7 +548,6 @@ def test_build_process_event_source_uses_cached_live_source_before_session_key_p
     assert source.user_id == "proc_owner"
     assert source.user_name == "alice"
 
-
 @pytest.mark.asyncio
 async def test_inject_watch_notification_ignores_foreground_event_source(monkeypatch, tmp_path):
     """Negative test: watch notification must NOT route to the foreground thread."""
@@ -479,6 +581,96 @@ async def test_inject_watch_notification_ignores_foreground_event_source(monkeyp
     # Must route to thread 42 (process origin), NOT some other thread
     assert synth_event.source.thread_id == "42"
     assert synth_event.source.user_id == "proc_owner"
+
+@pytest.mark.asyncio
+async def test_inject_watch_notification_drops_stale_boundary_after_reset(monkeypatch, tmp_path):
+    from gateway.session import SessionSource
+
+    runner = _build_runner(monkeypatch, tmp_path, "all")
+    adapter = runner.adapters[Platform.TELEGRAM]
+
+    runner.session_store._entries["agent:main:telegram:group:-100:42"] = SimpleNamespace(
+        session_id="sess-new",
+        origin=SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="-100",
+            chat_type="group",
+            thread_id="42",
+            user_id="proc_owner",
+            user_name="alice",
+        ),
+    )
+
+    evt = {
+        "session_id": "proc_stale_watch",
+        "session_key": "agent:main:telegram:group:-100:42",
+        "conversation_session_id": "sess-old",
+    }
+
+    await runner._inject_watch_notification("[SYSTEM: stale watch match]", evt)
+
+    adapter.handle_message.assert_not_awaited()
+
+@pytest.mark.asyncio
+async def test_inject_watch_notification_keeps_compression_continuation(monkeypatch, tmp_path):
+    from gateway.session import SessionSource
+
+    runner = _build_runner(monkeypatch, tmp_path, "all")
+    adapter = runner.adapters[Platform.TELEGRAM]
+    runner.session_store._entries["agent:main:telegram:group:-100:42"] = SimpleNamespace(
+        session_id="sess-new",
+        origin=SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="-100",
+            chat_type="group",
+            thread_id="42",
+        ),
+    )
+    runner._session_db = SimpleNamespace(
+        _db=SimpleNamespace(
+            get_compression_tip=lambda sid: {
+                "sess-old": "sess-new",
+                "sess-new": "sess-new",
+            }.get(sid, sid)
+        )
+    )
+
+    evt = {
+        "session_id": "proc_compression",
+        "session_key": "agent:main:telegram:group:-100:42",
+        "conversation_session_id": "sess-old",
+    }
+
+    await runner._inject_watch_notification("[SYSTEM: compression continuation watch]", evt)
+
+    adapter.handle_message.assert_awaited_once()
+@pytest.mark.asyncio
+async def test_run_process_watcher_drops_completion_for_reset_session_boundary(monkeypatch, tmp_path):
+    import tools.process_registry as pr_module
+
+    sessions = [SimpleNamespace(output_buffer="done\n", exited=True, exit_code=0, command="echo hi")]
+    monkeypatch.setattr(pr_module, "process_registry", _FakeRegistry(sessions))
+
+    async def _instant_sleep(*_a, **_kw):
+        pass
+    monkeypatch.setattr(asyncio, "sleep", _instant_sleep)
+
+    runner = _build_runner(monkeypatch, tmp_path, "all")
+    adapter = runner.adapters[Platform.TELEGRAM]
+    runner.session_store._entries["agent:main:telegram:group:-100:42"] = SimpleNamespace(
+        session_id="sess-new",
+    )
+
+    watcher = _watcher_dict(session_id="proc_done")
+    watcher.update({
+        "session_key": "agent:main:telegram:group:-100:42",
+        "notify_on_complete": True,
+        "conversation_session_id": "sess-old",
+    })
+
+    await runner._run_process_watcher(watcher)
+
+    adapter.handle_message.assert_not_awaited()
 
 
 def test_build_process_event_source_returns_none_for_empty_evt(monkeypatch, tmp_path):
