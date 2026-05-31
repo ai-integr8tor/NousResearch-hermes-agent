@@ -92,6 +92,7 @@ from gateway.platforms.base import (
     MessageEvent,
     MessageType,
     SendResult,
+    cache_image_from_bytes,
     cache_media_from_bytes,
 )
 from gateway.config import Platform
