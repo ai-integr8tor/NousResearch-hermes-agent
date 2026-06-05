@@ -21,6 +21,7 @@ test runner at ``scripts/run_tests.sh``.
 
 import asyncio
 import os
+
 import sys
 from pathlib import Path
 
@@ -548,23 +549,35 @@ def pytest_configure(config):  # noqa: D401 — pytest hook
     )
     config.addinivalue_line(
         "markers",
-        "require_symlinks: skip test if the environment does not support symlinks "
-        "(e.g. Windows without admin/dev-mode)",
+        "require_symlinks: skip the test if symbolic links cannot be created in the current environment.",
     )
 
 
+_symlink_supported_cache = None
+
+def _check_symlink_support() -> bool:
+    global _symlink_supported_cache
+    if _symlink_supported_cache is not None:
+        return _symlink_supported_cache
+
+    import tempfile
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / "src"
+            src.touch()
+            lnk = Path(d) / "lnk"
+            lnk.symlink_to(src)
+            _symlink_supported_cache = True
+            return True
+    except OSError:
+        _symlink_supported_cache = False
+        return False
+
+
 def pytest_runtest_setup(item):
-    if item.get_closest_marker("require_symlinks") is not None:
-        import tempfile
-        from pathlib import Path
-        with tempfile.TemporaryDirectory() as tmpdir:
-            link = Path(tmpdir) / "link"
-            target = Path(tmpdir) / "target"
-            target.write_text("ok", encoding="utf-8")
-            try:
-                link.symlink_to(target)
-            except OSError:
-                pytest.skip("Environment does not support symlinks (requires admin or Developer Mode on Windows)")
+    if item.get_closest_marker("require_symlinks"):
+        if not _check_symlink_support():
+            pytest.skip("Environment does not support symbolic links (requires admin/developer mode on Windows)")
 
     # The pyproject addopts pin ``--timeout-method=signal`` relies on
     # ``signal.SIGALRM``, which does not exist on Windows — pytest-timeout
@@ -676,7 +689,7 @@ def _live_system_guard(request, monkeypatch):
                 return real_killpg(pgid, sig, *args, **kwargs)
             raise RuntimeError(
                 f"tests/conftest.py live-system guard: blocked "
-                f"os.killpg({pgid}, {sig}) — PGID is outside the test "
+                f"os.killpg({pgid}, {sig}) — PGID is outside the test "  # windows-footgun: ok
                 "process group. See _live_system_guard for the why."
             )
 
