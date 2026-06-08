@@ -88,6 +88,65 @@ def test_kill_process_group_falls_back_when_psutil_access_denied():
     assert proc.killed
 
 
+def test_kill_process_group_falls_back_when_parent_terminate_access_denied():
+    import psutil
+
+    class DummyProc:
+        pid = 123456
+
+        def __init__(self):
+            self.killed = False
+
+        def kill(self):
+            self.killed = True
+
+    class DummyParent:
+        def children(self, recursive=True):
+            return []
+
+        def terminate(self):
+            raise psutil.AccessDenied(pid=123456)
+
+    proc = DummyProc()
+    with patch("psutil.Process", return_value=DummyParent()):
+        _kill_process_group(proc)
+
+    assert proc.killed
+
+
+def test_kill_process_group_falls_back_when_parent_kill_access_denied():
+    import psutil
+    import subprocess
+
+    class DummyProc:
+        pid = 123456
+
+        def __init__(self):
+            self.killed = False
+
+        def kill(self):
+            self.killed = True
+
+        def wait(self, timeout=None):
+            raise subprocess.TimeoutExpired(cmd="dummy", timeout=timeout)
+
+    class DummyParent:
+        def children(self, recursive=True):
+            return []
+
+        def terminate(self):
+            return None
+
+        def kill(self):
+            raise psutil.AccessDenied(pid=123456)
+
+    proc = DummyProc()
+    with patch("psutil.Process", return_value=DummyParent()):
+        _kill_process_group(proc, escalate=True)
+
+    assert proc.killed
+
+
 class TestSandboxRequirements(unittest.TestCase):
     def test_available_on_posix(self):
         if sys.platform != "win32":

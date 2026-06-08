@@ -1527,8 +1527,14 @@ def _kill_process_group(proc, escalate: bool = False):
                 pass
         try:
             parent.terminate()
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
+        except psutil.NoSuchProcess:
             pass
+        except psutil.AccessDenied as e:
+            logger.debug("Could not terminate parent process via psutil: %s", e, exc_info=True)
+            try:
+                proc.kill()
+            except Exception as e2:
+                logger.debug("Could not kill process: %s", e2, exc_info=True)
     except psutil.NoSuchProcess:
         pass
     except (psutil.AccessDenied, PermissionError, OSError) as e:
@@ -1552,8 +1558,14 @@ def _kill_process_group(proc, escalate: bool = False):
                         pass
                 try:
                     parent.kill()
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                except psutil.NoSuchProcess:
                     pass
+                except psutil.AccessDenied as e:
+                    logger.debug("Could not kill parent process via psutil: %s", e, exc_info=True)
+                    try:
+                        proc.kill()
+                    except Exception as e2:
+                        logger.debug("Could not kill process: %s", e2, exc_info=True)
             except psutil.NoSuchProcess:
                 pass
             except (psutil.AccessDenied, PermissionError, OSError) as e:
