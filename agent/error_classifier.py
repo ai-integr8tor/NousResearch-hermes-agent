@@ -913,6 +913,25 @@ def _classify_by_status(
                 FailoverReason.overloaded,
                 retryable=True,
             )
+        # Most 429s are ordinary throttling (transient — resets on a timer), but
+        # some providers return a 429 for a HARD billing / account wall
+        # ("Insufficient balance … please recharge", "payment required",
+        # "credits exhausted") that will NOT clear by waiting. Treating those as
+        # transient makes a kanban worker probe the wall every cooldown forever
+        # and burn paid requests (#41805, #31273). Disambiguate the same way 402
+        # does (see _classify_402): explicit billing vocabulary → billing;
+        # everything else stays rate_limit. We do NOT route bare
+        # "usage limit"/"quota" 429s to billing — those are commonly periodic
+        # windows that reset, so the transient cooldown path is correct for them.
+        # Checked before the OpenRouter-upstream branch so a hard billing wall
+        # wrapped in an aggregator error isn't retried against a depleted balance.
+        if any(p in error_msg for p in _BILLING_PATTERNS):
+            return result_fn(
+                FailoverReason.billing,
+                retryable=False,
+                should_rotate_credential=True,
+                should_fallback=True,
+            )
         # Distinguish an OpenRouter-aggregator upstream 429 (an upstream model
         # like DeepSeek rate-limited OpenRouter's aggregate traffic) from an
         # account-level 429 (the user's key is actually throttled). OpenRouter
