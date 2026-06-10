@@ -731,6 +731,8 @@ compression:
   protect_last_n: 20                                # Min recent messages to keep uncompressed
   protect_first_n: 3                                # Non-system head messages pinned across compactions (0 = pin nothing)
   hygiene_hard_message_limit: 400                   # Gateway safety valve — see below
+  defer_while_aux_inflight: false                   # Postpone auto-compression while other auxiliary calls run — see below
+  defer_hard_ceiling: 0.95                          # Fraction of context past which a deferred compression fires anyway
 
 # The summarization model/provider is configured under auxiliary:
 auxiliary:
@@ -747,6 +749,10 @@ Older configs with `compression.summary_model`, `compression.summary_provider`, 
 `hygiene_hard_message_limit` is a gateway-only **pre-compression safety valve**. Runaway sessions with thousands of messages can hit model context limits before the normal percent-of-context threshold fires; when message count crosses this ceiling, Hermes forces compression regardless of token usage. Default `400` — raise it for platforms where very long sessions are normal, lower it to force more aggressive compression. Editing this value on a running gateway takes effect on the next message (see below).
 
 `protect_first_n` controls how many **non-system** head messages are pinned across every compaction. Default `3` — the opening user/assistant exchange survives every summarizer pass so the original goal stays visible. On long-running rolling-compaction sessions where the opening turn is no longer relevant, set `protect_first_n: 0` to pin nothing but the system prompt + summary + tail. The system prompt itself is always preserved regardless of this setting.
+
+`defer_while_aux_inflight` is an opt-in **contention guard for local deployments**. When the compression summarizer runs on the same accelerator as the other auxiliary models (web_extract, vision, ...), a large compression prefill time-slices the GPU with whatever else is in flight and can push those calls past their timeouts. With this flag on, auto-compression is postponed while any other auxiliary call is in flight — including another session's compression — and re-checked on the next turn. The deferral is bounded twice: `defer_hard_ceiling` (once the context grows past this fraction of the window, default `0.95`, compression fires regardless — running out of context is worse than contention) and a maximum of 3 consecutively deferred checks, so sustained auxiliary traffic on a busy gateway cannot starve compression indefinitely. Manual `/compress` is never deferred. Leave the flag off (default) on cloud providers, where the contention doesn't exist.
+
+The gate is **best-effort**: it reduces contention windows but cannot eliminate them — an auxiliary call that starts *after* the check still overlaps the compression that follows. It counts auxiliary calls across all sessions of the current process; separate OS processes (e.g. kanban workers) each have their own view. It applies to the built-in compression engine only — plugin context engines don't implement it. Note that with a low `threshold` the deferral lets the context drift toward the ceiling before compressing; if your auxiliary traffic is sustained, prefer a higher `threshold` so the drift window stays small.
 
 :::tip Gateway hot-reload of compression and context length
 As of recent releases, editing `model.context_length` or any `compression.*` key in `config.yaml` on a running gateway takes effect on the next message — no gateway restart, no `/reset`, no session rotation required. The cached-agent signature includes these keys, so the gateway transparently rebuilds the agent when it sees a change. API keys and tool/skill config still require the usual reload paths.
