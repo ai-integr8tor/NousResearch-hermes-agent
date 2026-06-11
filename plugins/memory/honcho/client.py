@@ -388,7 +388,11 @@ class HonchoClientConfig:
         """Create config from environment variables (fallback)."""
         resolved_host = host or resolve_active_host()
         api_key = os.environ.get("HONCHO_API_KEY")
-        base_url = os.environ.get("HONCHO_BASE_URL", "").strip() or None
+        base_url = (
+            os.environ.get("HONCHO_BASE_URL", "").strip()
+            or os.environ.get("HONCHO_ENDPOINT", "").strip()
+            or None
+        )
         timeout = _resolve_optional_float(os.environ.get("HONCHO_TIMEOUT"))
         return cls(
             host=resolved_host,
@@ -451,10 +455,16 @@ class HonchoClientConfig:
             or raw.get("environment", "production")
         )
 
+        _base_url_native = (
+            (raw.get("endpoint") or {}).get("baseUrl")
+            if isinstance(raw.get("endpoint"), dict) else None
+        )
         base_url = (
-            raw.get("baseUrl")
+            _base_url_native
+            or raw.get("baseUrl")
             or raw.get("base_url")
             or os.environ.get("HONCHO_BASE_URL", "").strip()
+            or os.environ.get("HONCHO_ENDPOINT", "").strip()
             or None
         )
         timeout = _resolve_optional_float(

@@ -248,6 +248,14 @@ class TestSubdirectoryHintTracker:
         )
         assert result is None
 
+    def test_expanduser_runtime_error_does_not_crash(self, project):
+        """If expanduser() raises a RuntimeError (e.g. for non-existent users like ~nonexistent),
+        it should be caught and not crash the tracker.
+        """
+        tracker = SubdirectoryHintTracker(working_dir=str(project))
+        result = tracker.check_tool_call("read_file", {"path": "~nonexistent_user_abc123/file.py"})
+        assert result is None
+
 
 class TestPermissionErrorHandling:
     """Regression tests for PermissionError in filesystem checks (ref #6214)."""

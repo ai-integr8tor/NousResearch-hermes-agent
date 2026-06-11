@@ -259,6 +259,7 @@ class TestBackendSelection:
         "TOOL_GATEWAY_SCHEME",
         "TOOL_GATEWAY_USER_TOKEN",
         "TAVILY_API_KEY",
+        "ANYSEARCH_API_KEY",
     )
 
     def setup_method(self):
@@ -581,6 +582,7 @@ class TestCheckWebApiKey:
         "TOOL_GATEWAY_SCHEME",
         "TOOL_GATEWAY_USER_TOKEN",
         "TAVILY_API_KEY",
+        "ANYSEARCH_API_KEY",
     )
 
     def setup_method(self):
@@ -606,6 +608,11 @@ class TestCheckWebApiKey:
 
     def test_exa_key_only(self):
         with patch.dict(os.environ, {"EXA_API_KEY": "exa-test"}):
+            from tools.web_tools import check_web_api_key
+            assert check_web_api_key() is True
+
+    def test_anysearch_key_only(self):
+        with patch.dict(os.environ, {"ANYSEARCH_API_KEY": "anysearch-test"}):
             from tools.web_tools import check_web_api_key
             assert check_web_api_key() is True
 
@@ -709,3 +716,4 @@ def test_web_requires_env_includes_exa_key():
     from tools.web_tools import _web_requires_env
 
     assert "EXA_API_KEY" in _web_requires_env()
+    assert "ANYSEARCH_API_KEY" in _web_requires_env()

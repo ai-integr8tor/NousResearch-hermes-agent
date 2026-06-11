@@ -1,7 +1,7 @@
 """Tests for tools/file_operations.py — deny list, result dataclasses, helpers."""
-
 import os
 import re
+import sys
 import pytest
 import subprocess
 from pathlib import Path
@@ -642,6 +642,7 @@ class TestSearchPathValidation:
         assert "search failed" in result.error.lower() or "Search error" in result.error
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Requires POSIX find utility")
 class TestSearchFilesFallbackHiddenPaths:
     def _make_env(self):
         env = MagicMock()

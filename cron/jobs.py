@@ -624,6 +624,7 @@ def create_job(
     script: Optional[str] = None,
     context_from: Optional[Union[str, List[str]]] = None,
     enabled_toolsets: Optional[List[str]] = None,
+    session_name: Optional[str] = None,
     workdir: Optional[str] = None,
     no_agent: bool = False,
 ) -> Dict[str, Any]:
@@ -756,6 +757,7 @@ def create_job(
         "deliver": deliver,
         "origin": origin,  # Tracks where job was created for "origin" delivery
         "enabled_toolsets": normalized_toolsets,
+        "session_name": session_name,
         "workdir": normalized_workdir,
     }
 

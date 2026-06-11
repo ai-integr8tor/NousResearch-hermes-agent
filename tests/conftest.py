@@ -534,6 +534,25 @@ def pytest_configure(config):  # noqa: D401 — pytest hook
         "(only for tests that genuinely need real os.kill / subprocess "
         "behaviour — e.g. PTY tests that signal their own child).",
     )
+    config.addinivalue_line(
+        "markers",
+        "require_symlinks: skip test if the environment does not support symlinks "
+        "(e.g. Windows without admin/dev-mode)",
+    )
+
+
+def pytest_runtest_setup(item):
+    if item.get_closest_marker("require_symlinks") is not None:
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmpdir:
+            link = Path(tmpdir) / "link"
+            target = Path(tmpdir) / "target"
+            target.write_text("ok", encoding="utf-8")
+            try:
+                link.symlink_to(target)
+            except OSError:
+                pytest.skip("Environment does not support symlinks (requires admin or Developer Mode on Windows)")
 
     # The pyproject addopts pin ``--timeout-method=signal`` relies on
     # ``signal.SIGALRM``, which does not exist on Windows — pytest-timeout

@@ -1135,6 +1135,12 @@ def skill_view(
         _outside_skills_dir = True
         _trusted_dirs = [SKILLS_DIR.resolve()]
         try:
+            env_home = os.environ.get("HERMES_HOME")
+            if env_home:
+                _trusted_dirs.append(Path(env_home).resolve() / "skills")
+        except Exception:
+            pass
+        try:
             _trusted_dirs.extend(d.resolve() for d in all_dirs[1:])
         except Exception:
             pass
