@@ -1048,10 +1048,10 @@ def _run_cleanup(*, notify_session_finalize: bool = True):
 
 
 def _should_emit_cleanup_session_finalize(session_id: str | None) -> bool:
+    if not session_id:
+        return False
     if not _single_query_finalize_attempted_session_ids:
         return True
-    if session_id is None:
-        return False
     return session_id not in _single_query_finalize_attempted_session_ids
 
 
@@ -6148,8 +6148,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         if self.agent and self.conversation_history:
             # Trigger memory extraction on the old session before session_id rotates.
             self.agent.commit_memory_session(self.conversation_history)
-            self._notify_session_boundary("on_session_finalize")
-        elif self.agent:
+            if self.agent.session_id:
+                self._notify_session_boundary("on_session_finalize")
+        elif self.agent and self.agent.session_id:
             # First session or empty history — still finalize the old session
             self._notify_session_boundary("on_session_finalize")
 
