@@ -757,39 +757,27 @@ def _manifest_name(plugin_dir: Path) -> Optional[str]:
     return manifest_name if isinstance(manifest_name, str) and manifest_name else None
 
 
-def _resolve_plugin_config_key(name: str) -> Optional[str]:
-    """Resolve a CLI/dashboard plugin argument to the key used by list/status."""
-    # Installed user plugins: directory name wins first so users can refer to
-    # the clone path, but config stores the manifest/list name when available.
-    user_dir = _plugins_dir()
-    if user_dir.is_dir():
-        candidate = user_dir / name
-        if candidate.is_dir():
-            return _manifest_name(candidate) or name
-        for child in user_dir.iterdir():
-            if not child.is_dir():
-                continue
-            manifest_name = _manifest_name(child)
-            if manifest_name == name:
-                return manifest_name
+def _resolve_plugin_key(name: str) -> Optional[str]:
+    """Resolve a user-supplied plugin identifier to its canonical registry key."""
+    entries = _discover_all_plugins()
 
-    # Bundled plugins: keep the same directory-name flexibility while also
-    # accepting manifest names when they differ from the on-disk directory.
-    from hermes_cli.plugins import get_bundled_plugins_dir
-    repo_plugins = get_bundled_plugins_dir()
-    if repo_plugins.is_dir():
-        candidate = repo_plugins / name
-        if candidate.is_dir() and _manifest_file(candidate):
-            return _manifest_name(candidate) or name
-        for child in repo_plugins.iterdir():
-            if not child.is_dir():
-                continue
-            manifest_name = _manifest_name(child)
-            if manifest_name == name:
-                return manifest_name
+    for entry_name, _version, _description, _source, dir_path, key in entries:
+        if name == key or name == entry_name:
+            return key
 
+    dir_matches = [
+        key
+        for _entry_name, _version, _description, _source, dir_path, key in entries
+        if name == Path(dir_path).name
+    ]
+    if len(dir_matches) == 1:
+        return dir_matches[0]
+
+    leaf_matches = [key for _name, _version, _description, _source, _dir_path, key in entries
+                    if name == key.split("/")[-1]]
+    if len(leaf_matches) == 1:
+        return leaf_matches[0]
     return None
-
 
 def _resolve_plugin_key_and_source(name: str) -> Optional[tuple]:
     """Resolve *name* to ``(canonical_key, source)`` or ``None`` if no match.
@@ -810,6 +798,17 @@ def _resolve_plugin_key_and_source(name: str) -> Optional[tuple]:
     if len(leaf_matches) == 1:
         return leaf_matches[0]
     return None
+
+
+def _plugin_aliases(key: str) -> set[str]:
+    """Return legacy and canonical config aliases for a plugin key."""
+    aliases = {key, key.split("/")[-1]}
+    for entry_name, _version, _description, _source, dir_path, entry_key in _discover_all_plugins():
+        if entry_key == key:
+            aliases.add(entry_name)
+            aliases.add(Path(dir_path).name)
+            break
+    return {alias for alias in aliases if alias}
 
 
 def _set_plugin_entry_flag(plugin_id: str, key: str, value: bool) -> None:
@@ -855,8 +854,7 @@ def cmd_enable(name: str, allow_tool_override: Optional[bool] = None) -> None:
 
     enabled = _get_enabled_set()
     disabled = _get_disabled_set()
-    bare = key.split("/")[-1]
-    aliases = {name, key, bare}
+    aliases = _plugin_aliases(key)
 
     if (
         key in enabled
@@ -927,14 +925,14 @@ def cmd_disable(name: str) -> None:
     from rich.console import Console
 
     console = Console()
-    plugin_key = _resolve_plugin_config_key(name)
+    plugin_key = _resolve_plugin_key(name)
     if plugin_key is None:
         console.print(f"[red]Plugin '{name}' is not installed or bundled.[/red]")
         sys.exit(1)
 
     enabled = _get_enabled_set()
     disabled = _get_disabled_set()
-    aliases = {name, plugin_key}
+    aliases = _plugin_aliases(plugin_key)
 
     if (
         aliases.isdisjoint(enabled)
@@ -957,7 +955,7 @@ def cmd_disable(name: str) -> None:
 
 def _plugin_exists(name: str) -> bool:
     """Return True if a plugin with *name* is installed (user) or bundled."""
-    return _resolve_plugin_config_key(name) is not None
+    return _resolve_plugin_key(name) is not None
 
 
 def _read_manifest_info(d: Path, prefix: str):
@@ -1823,13 +1821,13 @@ def dashboard_set_agent_plugin_enabled(name: str, *, enabled: bool) -> dict[str,
     For plugins that provide tools (toolsets), also toggles the toolset in
     ``platform_toolsets`` so the agent actually sees the tools in sessions.
     """
-    plugin_key = _resolve_plugin_config_key(name)
+    plugin_key = _resolve_plugin_key(name)
     if plugin_key is None:
         return {"ok": False, "error": f"Plugin '{name}' is not installed or bundled."}
 
     en = _get_enabled_set()
     dis = _get_disabled_set()
-    aliases = {name, plugin_key}
+    aliases = _plugin_aliases(plugin_key)
 
     if enabled:
         if (
