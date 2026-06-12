@@ -167,7 +167,7 @@ class TestSourceLinesAreGuarded:
     def _read_file(rel_path: str) -> str:
         import os
         base = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-        with open(os.path.join(base, rel_path)) as f:
+        with open(os.path.join(base, rel_path), encoding="utf-8") as f:
             return f.read()
 
     def test_mixture_of_agents_reference_model_guarded(self):
@@ -266,3 +266,16 @@ class TestExtractContentOrReasoning:
         """When both content and reasoning exist, content wins."""
         response = _make_response("Actual answer", reasoning="Internal reasoning")
         assert extract_content_or_reasoning(response) == "Actual answer"
+
+    def test_missing_choices_returns_empty(self):
+        """Verify that when the response object is missing choices attribute, it returns empty."""
+        class FakeResponse:
+            pass
+        assert extract_content_or_reasoning(FakeResponse()) == ""
+
+    def test_empty_choices_returns_empty(self):
+        """Verify that when choices list is empty, it returns empty."""
+        class FakeResponse:
+            choices = []
+        assert extract_content_or_reasoning(FakeResponse()) == ""
+

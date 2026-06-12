@@ -746,6 +746,10 @@ def _maybe_rewrite_image_url(image_url: Optional[str]) -> Optional[str]:
     if image_url.startswith(("http://", "https://", "data:")):
         return image_url
 
+    # Must be an absolute path (or pseudo-absolute with drive letter) to rewrite
+    if not _looks_like_absolute_file_path(os.path.expanduser(image_url)):
+        return image_url
+
     try:
         # Check both config key and environment variable (precedence: env > config)
         # We don't use load_config() directly here to avoid triggering plugin discovery

@@ -557,7 +557,7 @@ def cronjob(
                 script=_normalize_optional_job_value(script),
                 context_from=context_from,
                 enabled_toolsets=enabled_toolsets or None,
-                session_name=session_name,
+                session_name=_normalize_optional_job_value(session_name),
                 workdir=_normalize_optional_job_value(workdir),
                 no_agent=_no_agent,
             )
@@ -694,7 +694,7 @@ def cronjob(
             if enabled_toolsets is not None:
                 updates["enabled_toolsets"] = enabled_toolsets or None
             if session_name is not None:
-                updates["session_name"] = session_name
+                updates["session_name"] = _normalize_optional_job_value(session_name)
             if workdir is not None:
                 # Empty string clears the field (restores old behaviour);
                 # otherwise pass raw — update_job() validates / normalizes.
@@ -851,7 +851,7 @@ Important safety rule: cron-run sessions should not recursively schedule more cr
             },
             "session_name": {
                 "type": "string",
-                "description": "Optional named session to run the job in, making it resumable across runs."
+                "description": "Optional named session to run the job in, making it resumable across runs. On update, pass an empty string to clear."
             },
             "workdir": {
                 "type": "string",

@@ -397,12 +397,13 @@ def _make_callback_handler() -> tuple[type, dict]:
 # ---------------------------------------------------------------------------
 
 
-async def _redirect_handler(authorization_url: str) -> None:
+async def _redirect_handler(authorization_url: str, port: int | None = None) -> None:
     """Show the authorization URL to the user.
 
     Opens the browser automatically when possible; always prints the URL
     as a fallback for headless/SSH/gateway environments.
     """
+    resolved_port = port if port is not None else _oauth_port
     msg = (
         f"\n  MCP OAuth: authorization required.\n"
         f"  Open this URL in your browser:\n\n"
@@ -416,10 +417,10 @@ async def _redirect_handler(authorization_url: str) -> None:
     # opened.  Two ways out: paste the redirect URL back (default fallback,
     # offered by _wait_for_callback on interactive TTYs), or set up an SSH
     # port forward so the redirect tunnels through.
-    if _oauth_port and (os.getenv("SSH_CLIENT") or os.getenv("SSH_TTY")):
+    if resolved_port and (os.getenv("SSH_CLIENT") or os.getenv("SSH_TTY")):
         print(
             f"  Remote session detected. After you authorize, the provider redirects to\n"
-            f"    http://127.0.0.1:{_oauth_port}/callback\n"
+            f"    http://127.0.0.1:{resolved_port}/callback\n"
             f"  which only the listener on THIS machine can receive. Two options:\n"
             f"\n"
             f"    1. Easiest — when your browser shows a connection error after\n"
@@ -428,7 +429,7 @@ async def _redirect_handler(authorization_url: str) -> None:
             f"       enough to complete the flow.\n"
             f"\n"
             f"    2. Or forward the port first in a separate terminal:\n"
-            f"         ssh -N -L {_oauth_port}:127.0.0.1:{_oauth_port} <user>@<this-host>\n"
+            f"         ssh -N -L {resolved_port}:127.0.0.1:{resolved_port} <user>@<this-host>\n"
             f"       then open the URL above and let it redirect normally.\n"
             f"\n"
             f"  See: https://hermes-agent.nousresearch.com/docs/guides/oauth-over-ssh\n",
@@ -448,12 +449,10 @@ async def _redirect_handler(authorization_url: str) -> None:
         print("  (Headless environment detected — open the URL manually.)\n", file=sys.stderr)
 
 
-async def _wait_for_callback() -> tuple[str, str | None]:
+async def _wait_for_callback(port: int | None = None) -> tuple[str, str | None]:
     """Wait for the OAuth callback to arrive on the local callback server.
 
-    Uses the module-level ``_oauth_port`` which is set by ``build_oauth_auth``
-    before this is ever called.  Polls for the result without blocking the
-    event loop.
+    Polls for the result without blocking the event loop.
 
     On an interactive TTY, races the HTTP listener against a stdin paste
     fallback so users without an SSH tunnel can copy the redirect URL (or
@@ -464,11 +463,10 @@ async def _wait_for_callback() -> tuple[str, str | None]:
     Raises:
         OAuthNonInteractiveError: If the callback times out (no user present
             to complete the browser auth).
-        RuntimeError: If ``_oauth_port`` has not been set, which would indicate
-            that ``build_oauth_auth`` was skipped — the asserting form below
-            was a silent bug when running Python with ``-O``/``-OO``.
+        RuntimeError: If the port is not set.
     """
-    if _oauth_port is None:
+    resolved_port = port if port is not None else _oauth_port
+    if resolved_port is None:
         raise RuntimeError(
             "OAuth callback port not set — build_oauth_auth must be called "
             "before _wait_for_oauth_callback"
@@ -478,9 +476,12 @@ async def _wait_for_callback() -> tuple[str, str | None]:
     # We just need to poll for the result.
     handler_cls, result = _make_callback_handler()
 
+    class _ReuseHTTPServer(HTTPServer):
+        allow_reuse_address = True
+
     # Start a temporary server on the known port
     try:
-        server = HTTPServer(("127.0.0.1", _oauth_port), handler_cls)
+        server = _ReuseHTTPServer(("127.0.0.1", resolved_port), handler_cls)
     except OSError:
         # Port already in use — the server from build_oauth_auth is running.
         # Fall back to polling the server started by build_oauth_auth.
@@ -766,11 +767,12 @@ def build_oauth_auth(
     client_metadata = _build_client_metadata(cfg)
     _maybe_preregister_client(storage, cfg, client_metadata)
 
+    port = cfg["_resolved_port"]
     return OAuthClientProvider(
         server_url=server_url,
         client_metadata=client_metadata,
         storage=storage,
-        redirect_handler=_redirect_handler,
-        callback_handler=_wait_for_callback,
+        redirect_handler=lambda url: _redirect_handler(url, port),
+        callback_handler=lambda: _wait_for_callback(port),
         timeout=float(cfg.get("timeout", 300)),
     )

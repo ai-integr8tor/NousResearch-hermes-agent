@@ -922,6 +922,33 @@ def _discover_all_plugins() -> list:
         (_plugins_dir(), "user", set()),
     ):
         _scan_level(base, source, skip, "", 0, seen)
+
+    # Pip / entry-point plugins
+    try:
+        import importlib.metadata
+        from pathlib import Path
+        eps = importlib.metadata.entry_points()
+        if hasattr(eps, "select"):
+            group_eps = eps.select(group="hermes_agent.plugins")
+        elif isinstance(eps, dict):
+            group_eps = eps.get("hermes_agent.plugins", [])
+        else:
+            group_eps = [ep for ep in eps if ep.group == "hermes_agent.plugins"]
+
+        for ep in group_eps:
+            name = ep.name
+            version = ""
+            description = "Python entry-point plugin"
+            if ep.dist:
+                version = ep.dist.version or ""
+                if ep.dist.metadata:
+                    description = ep.dist.metadata.get("Summary") or description
+            key = name
+            if key not in seen:
+                seen[key] = (name, version, description, "pip", Path(""), key)
+    except Exception:
+        pass
+
     return list(seen.values())
 
 

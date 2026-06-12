@@ -5655,6 +5655,8 @@ def extract_content_or_reasoning(response) -> str:
     """
     import re
 
+    if not hasattr(response, "choices") or not response.choices:
+        return ""
     msg = response.choices[0].message
     content = (msg.content or "").strip()
 
