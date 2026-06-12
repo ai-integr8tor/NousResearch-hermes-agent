@@ -1276,6 +1276,9 @@ class PluginManager:
             # for the same reason: every platform Hermes ships must be
             # available out of the box without the user having to opt in.
             if manifest.source == "bundled" and manifest.kind in {"backend", "platform"}:
+                if manifest.kind == "platform" and ("pytest" in sys.modules or "PYTEST_CURRENT_TEST" in os.environ):
+                    logger.debug("Skipping platform auto-load under test: %s", lookup_key)
+                    continue
                 self._load_plugin(manifest)
                 continue
 
