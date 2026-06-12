@@ -1348,7 +1348,8 @@ class TestSummaryFailureTrackingForGatewayWarning:
         fallback = next(m["content"] for m in result if "Summary generation was unavailable" in m.get("content", ""))
         assert len(fallback) <= 8300
         assert "deterministic fallback" in fallback
-        assert "important detail" in fallback
+        assert "1 compacted message(s)" in fallback
+        assert "ASSISTANT: head assistant" in fallback
 
     def test_compress_clears_fallback_flag_on_subsequent_success(self):
         mock_response = MagicMock()
@@ -2756,6 +2757,3 @@ class TestPreflightSentinelGuard:
         compressor.last_prompt_tokens = 50_000
         result = self._seed(compressor.last_prompt_tokens, 10_000)
         assert result == 50_000
-            result = c.context_length
-            assert result == 200_000
->>>>>>> ae7056c7f (perf(agent): defer synchronous httpx.post out of AIAgent.__init__ (#32221))
