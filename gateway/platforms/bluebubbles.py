@@ -9,10 +9,12 @@ downloading from PR #4588 (YuhangLin).
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import re
+import time
 import uuid
 from collections import OrderedDict
 from datetime import datetime
@@ -26,6 +28,7 @@ from gateway.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
     MessageType,
+    ProcessingOutcome,
     SendResult,
     cache_image_from_bytes,
     cache_audio_from_bytes,
@@ -65,7 +68,21 @@ _TAPBACK_REMOVED = {
 
 # Webhook event types that carry user messages
 _MESSAGE_EVENTS = {"new-message", "message", "updated-message"}
-
+# Subscribe to update events too, but classify receipt/status updates below
+# instead of treating them as conversational messages. This preserves
+# BlueBubbles delivery/read-receipt visibility without reintroducing duplicate
+# agent replies for metadata-only updated-message webhooks.
+_DEFAULT_WEBHOOK_EVENTS = ["new-message", "updated-message"]
+_VALID_WEBHOOK_EVENTS = {
+    "new-message",
+    "updated-message",
+    "message-send-error",
+    "group-name-change",
+    "participant-added",
+    "participant-removed",
+}
+_DEDUP_TTL_SECONDS = 60.0
+_DEDUP_MAX_ENTRIES = 1000
 # Log redaction patterns
 _PHONE_RE = re.compile(r"\+?\d{7,15}")
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+")
@@ -100,6 +117,14 @@ def _normalize_server_url(raw: str) -> str:
     if not re.match(r"^https?://", value, flags=re.I):
         value = f"http://{value}"
     return value.rstrip("/")
+
+
+def _bool_setting(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 
@@ -150,6 +175,40 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         self._private_api_enabled: Optional[bool] = None
         self._helper_connected: bool = False
         self._guid_cache: OrderedDict[str, str] = OrderedDict()
+        self.webhook_events = self._configured_webhook_events(extra)
+        self.typing_indicators = _bool_setting(
+            extra.get("typing_indicators")
+            if "typing_indicators" in extra
+            else os.getenv("BLUEBUBBLES_TYPING_INDICATORS"),
+            default=False,
+        )
+        self.auto_react = _bool_setting(
+            extra.get("auto_react")
+            if "auto_react" in extra
+            else os.getenv("BLUEBUBBLES_AUTO_REACT"),
+            default=True,
+        )
+        self.auto_react_type = str(
+            extra.get("auto_react_type")
+            or os.getenv("BLUEBUBBLES_AUTO_REACT_TYPE", "like")
+        )
+        self.delayed_ack = _bool_setting(
+            extra.get("delayed_ack")
+            if "delayed_ack" in extra
+            else os.getenv("BLUEBUBBLES_DELAYED_ACK"),
+            default=True,
+        )
+        self.delayed_ack_delay_seconds = float(
+            extra.get("delayed_ack_delay_seconds")
+            or os.getenv("BLUEBUBBLES_DELAYED_ACK_DELAY_SECONDS", "2.0")
+        )
+        self.delayed_ack_text = str(
+            extra.get("delayed_ack_text")
+            or os.getenv("BLUEBUBBLES_DELAYED_ACK_TEXT", "One sec")
+        )
+        self._delayed_ack_tasks: Dict[str, asyncio.Task] = {}
+        self._seen_inbound_messages: OrderedDict[str, float] = OrderedDict()
+        self._owns_webhook_listener = False
 
     # ------------------------------------------------------------------
     # API helpers
@@ -215,6 +274,121 @@ class BlueBubblesAdapter(BasePlatformAdapter):
                 return cleaned or text
         return text
 
+    @staticmethod
+    def _configured_webhook_events(extra: Dict[str, Any]) -> List[str]:
+        raw = extra.get("webhook_events") or os.getenv("BLUEBUBBLES_WEBHOOK_EVENTS")
+        if raw is None:
+            return list(_DEFAULT_WEBHOOK_EVENTS)
+        if isinstance(raw, str):
+            candidates = [item.strip() for item in raw.split(",")]
+        elif isinstance(raw, (list, tuple, set)):
+            candidates = [str(item).strip() for item in raw]
+        else:
+            logger.warning(
+                "[bluebubbles] invalid webhook_events config %r; using default %s",
+                raw,
+                _DEFAULT_WEBHOOK_EVENTS,
+            )
+            return list(_DEFAULT_WEBHOOK_EVENTS)
+
+        events: List[str] = []
+        for event in candidates:
+            if not event:
+                continue
+            if event not in _VALID_WEBHOOK_EVENTS:
+                logger.warning("[bluebubbles] ignoring unsupported webhook event: %s", event)
+                continue
+            if event not in events:
+                events.append(event)
+        return events or list(_DEFAULT_WEBHOOK_EVENTS)
+
+    @staticmethod
+    def _message_dedup_key(payload: Dict[str, Any], record: Dict[str, Any], text: str) -> str:
+        message_guid = BlueBubblesAdapter._value(
+            record.get("guid"),
+            record.get("messageGuid"),
+            record.get("id"),
+            payload.get("messageGuid"),
+        )
+        chat_guid = BlueBubblesAdapter._value(
+            record.get("chatGuid"),
+            payload.get("chatGuid"),
+            record.get("chat_guid"),
+            payload.get("chat_guid"),
+        )
+        if not chat_guid:
+            chats = record.get("chats") or []
+            if chats and isinstance(chats[0], dict):
+                chat_guid = chats[0].get("guid") or chats[0].get("chatGuid")
+        date_created = BlueBubblesAdapter._value(
+            str(record.get("dateCreated")) if record.get("dateCreated") is not None else None,
+            str(record.get("date_created")) if record.get("date_created") is not None else None,
+        )
+        text_hash = hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()
+        if message_guid:
+            return f"guid:{message_guid}:{text_hash}"
+        return f"fallback:{chat_guid or ''}:{date_created or ''}:{text_hash}"
+
+    @staticmethod
+    def _message_content_dedup_key(payload: Dict[str, Any], record: Dict[str, Any], text: str) -> str:
+        """Best-effort duplicate key for BlueBubbles' duplicate DM webhooks."""
+        chat_guid = BlueBubblesAdapter._value(
+            record.get("chatGuid"),
+            payload.get("chatGuid"),
+            record.get("chat_guid"),
+            payload.get("chat_guid"),
+        )
+        chats = record.get("chats") or []
+        chat_identifier = BlueBubblesAdapter._value(
+            record.get("chatIdentifier"),
+            record.get("identifier"),
+            payload.get("chatIdentifier"),
+            payload.get("identifier"),
+        )
+        if not chat_guid and chats and isinstance(chats[0], dict):
+            chat_guid = chats[0].get("guid") or chats[0].get("chatGuid")
+            chat_identifier = chat_identifier or chats[0].get("chatIdentifier")
+        sender = (
+            BlueBubblesAdapter._value(
+                record.get("handle", {}).get("address")
+                if isinstance(record.get("handle"), dict)
+                else None,
+                record.get("sender"),
+                record.get("from"),
+                record.get("address"),
+            )
+            or chat_identifier
+            or chat_guid
+        )
+        is_group = bool(record.get("isGroup")) or (";+;" in (chat_guid or ""))
+        canonical_chat = chat_guid if is_group else (chat_identifier or sender or chat_guid or "")
+        text_hash = hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()
+        return f"recent:{'group' if is_group else 'dm'}:{canonical_chat}:{sender or ''}:{text_hash}"
+
+    def _is_duplicate_inbound_message(self, *keys: str) -> bool:
+        now = time.monotonic()
+        while self._seen_inbound_messages:
+            _, seen_at = next(iter(self._seen_inbound_messages.items()))
+            if now - seen_at <= _DEDUP_TTL_SECONDS and len(self._seen_inbound_messages) <= _DEDUP_MAX_ENTRIES:
+                break
+            self._seen_inbound_messages.popitem(last=False)
+
+        duplicate = False
+        for key in keys:
+            if not key:
+                continue
+            if key in self._seen_inbound_messages:
+                seen_at = self._seen_inbound_messages[key]
+                self._seen_inbound_messages.move_to_end(key)
+                self._seen_inbound_messages[key] = now
+                duplicate = duplicate or (now - seen_at <= _DEDUP_TTL_SECONDS)
+            else:
+                self._seen_inbound_messages[key] = now
+
+        while len(self._seen_inbound_messages) > _DEDUP_MAX_ENTRIES:
+            self._seen_inbound_messages.popitem(last=False)
+        return duplicate
+
     async def _api_get(self, path: str) -> Dict[str, Any]:
         assert self.client is not None
         res = await self.client.get(self._api_url(path))
@@ -263,6 +437,20 @@ class BlueBubblesAdapter(BasePlatformAdapter):
                 self.client = None
             return False
 
+        listener_started = await self._start_webhook_listener(web)
+        self._owns_webhook_listener = listener_started
+        self._mark_connected()
+
+        if listener_started:
+            # Register webhook with BlueBubbles server only when this adapter owns
+            # the local listener. One-shot outbound senders may run while the
+            # gateway already owns the same webhook host/port; those senders can
+            # still deliver via REST and should not fail on EADDRINUSE.
+            await self._register_webhook()
+
+        return True
+
+    async def _start_webhook_listener(self, web) -> bool:
         app = web.Application()
         app.router.add_get("/health", lambda _: web.Response(text="ok"))
         app.router.add_post(self.webhook_path, self._handle_webhook)
@@ -271,25 +459,37 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         # aiohttp access logs write that request target to agent.log.
         self._runner = web.AppRunner(app, access_log=None)
         await self._runner.setup()
-        site = web.TCPSite(self._runner, self.webhook_host, self.webhook_port)
-        await site.start()
-        self._mark_connected()
+        try:
+            site = web.TCPSite(self._runner, self.webhook_host, self.webhook_port)
+            await site.start()
+        except OSError as exc:
+            await self._runner.cleanup()
+            self._runner = None
+            if getattr(exc, "errno", None) == 98 or "address already in use" in str(exc).lower():
+                logger.warning(
+                    "[bluebubbles] webhook listener already in use on %s:%s; "
+                    "continuing in outbound-only mode",
+                    self.webhook_host,
+                    self.webhook_port,
+                )
+                return False
+            raise
         logger.info(
             "[bluebubbles] webhook listening on http://%s:%s%s",
             self.webhook_host,
             self.webhook_port,
             self.webhook_path,
         )
-
-        # Register webhook with BlueBubbles server
-        # This is required for the server to know where to send events
-        await self._register_webhook()
-
         return True
 
     async def disconnect(self) -> None:
-        # Unregister webhook before cleaning up
-        await self._unregister_webhook()
+        # Unregister webhook only when this adapter owns the local listener.
+        # Outbound-only one-shot senders may reuse the REST client while the
+        # long-running gateway owns the listener; they must not remove that
+        # gateway's webhook registration during cleanup.
+        if self._owns_webhook_listener:
+            await self._unregister_webhook()
+            self._owns_webhook_listener = False
 
         if self.client:
             await self.client.aclose()
@@ -364,7 +564,7 @@ class BlueBubblesAdapter(BasePlatformAdapter):
 
         payload = {
             "url": webhook_url,
-            "events": ["new-message", "updated-message"],
+            "events": self.webhook_events,
         }
 
         try:
@@ -685,6 +885,8 @@ class BlueBubblesAdapter(BasePlatformAdapter):
     # ------------------------------------------------------------------
 
     async def send_typing(self, chat_id: str, metadata=None) -> None:
+        if not self.typing_indicators:
+            return
         if not self._private_api_enabled or not self._helper_connected or not self.client:
             return
         try:
@@ -694,10 +896,12 @@ class BlueBubblesAdapter(BasePlatformAdapter):
                 await self.client.post(
                     self._api_url(f"/api/v1/chat/{encoded}/typing"), timeout=5
                 )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("[bluebubbles] send_typing failed: %s", exc)
 
     async def stop_typing(self, chat_id: str) -> None:
+        if not self.typing_indicators:
+            return
         if not self._private_api_enabled or not self._helper_connected or not self.client:
             return
         try:
@@ -707,8 +911,8 @@ class BlueBubblesAdapter(BasePlatformAdapter):
                 await self.client.delete(
                     self._api_url(f"/api/v1/chat/{encoded}/typing"), timeout=5
                 )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("[bluebubbles] stop_typing failed: %s", exc)
 
     # ------------------------------------------------------------------
     # Read receipts
@@ -730,8 +934,58 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         return False
 
     # ------------------------------------------------------------------
-    # Tapback reactions
+    # Tapback reactions and processing UX
     # ------------------------------------------------------------------
+
+    async def _send_reaction(self, chat_id: str, message_id: Optional[str], reaction: str) -> bool:
+        if not self.client or not chat_id or not message_id:
+            return False
+        try:
+            guid = await self._resolve_chat_guid(chat_id)
+            if not guid:
+                return False
+            payload = {
+                "chatGuid": guid,
+                "selectedMessageGuid": message_id,
+                "reaction": reaction,
+                "partIndex": 0,
+            }
+            await self._api_post("/api/v1/message/react", payload)
+            return True
+        except Exception as exc:
+            logger.debug("[bluebubbles] reaction failed: %s", exc)
+            return False
+
+    def _delayed_ack_key(self, event: MessageEvent) -> str:
+        return f"{getattr(event.source, 'chat_id', '')}:{getattr(event, 'message_id', '')}"
+
+    async def _send_delayed_ack(self, key: str, chat_id: str, reply_to: Optional[str]) -> None:
+        try:
+            delay = max(0.0, float(self.delayed_ack_delay_seconds))
+            await asyncio.sleep(delay)
+            await self.send(chat_id, self.delayed_ack_text, reply_to=reply_to)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.debug("[bluebubbles] delayed ack failed: %s", exc)
+        finally:
+            self._delayed_ack_tasks.pop(key, None)
+
+    async def on_processing_start(self, event: MessageEvent) -> None:
+        chat_id = getattr(event.source, "chat_id", "")
+        message_id = getattr(event, "message_id", None)
+        if self.auto_react:
+            await self._send_reaction(chat_id, message_id, self.auto_react_type)
+        if self.delayed_ack and self.delayed_ack_text and chat_id:
+            key = self._delayed_ack_key(event)
+            task = asyncio.create_task(self._send_delayed_ack(key, chat_id, message_id))
+            self._delayed_ack_tasks[key] = task
+
+    async def on_processing_complete(self, event: MessageEvent, outcome: ProcessingOutcome) -> None:
+        key = self._delayed_ack_key(event)
+        task = self._delayed_ack_tasks.pop(key, None)
+        if task and not task.done():
+            task.cancel()
 
     # ------------------------------------------------------------------
     # Chat info
@@ -896,6 +1150,8 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         # Only process message events; silently acknowledge everything else
         if event_type and event_type not in _MESSAGE_EVENTS:
             return web.Response(text="ok")
+        if event_type and event_type not in self.webhook_events:
+            return web.Response(text="ok")
 
         record = self._extract_payload_record(payload) or {}
         is_from_me = bool(
@@ -920,6 +1176,18 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             )
             or ""
         )
+
+        if event_type == "updated-message":
+            has_edit = bool(record.get("dateEdited") or record.get("date_edited"))
+            has_retraction = bool(
+                record.get("dateRetracted") or record.get("date_retracted")
+            )
+            # BlueBubbles also emits updated-message for delivery/read receipts
+            # and other status-only metadata changes. Those should keep the
+            # webhook subscription alive for receipt visibility, but must not be
+            # routed to the agent as duplicate user messages.
+            if not has_edit and not has_retraction:
+                return web.Response(text="ok")
 
         # --- Inbound attachment handling ---
         attachments = record.get("attachments") or []
@@ -956,6 +1224,12 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         if not text and media_urls:
             text = "(attachment)"
         # --- End attachment handling ---
+
+        dedup_key = self._message_dedup_key(payload, record, text)
+        content_dedup_key = self._message_content_dedup_key(payload, record, text)
+        if self._is_duplicate_inbound_message(dedup_key, content_dedup_key):
+            logger.info("[bluebubbles] duplicate inbound webhook ignored")
+            return web.Response(text="ok")
 
         chat_guid = self._value(
             record.get("chatGuid"),
