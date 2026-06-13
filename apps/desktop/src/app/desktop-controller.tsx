@@ -56,6 +56,7 @@ import {
   $gatewayState,
   $messages,
   $messagingSessions,
+  $newChatWorkspaceTargetGeneration,
   $resumeFailedSessionId,
   $resumeExhaustedSessionId,
   $selectedStoredSessionId,
@@ -77,6 +78,7 @@ import {
   setMessagingPlatformTotals,
   setMessagingSessions,
   setMessagingTruncated,
+  setNewChatWorkspaceTarget,
   setSessionProfileTotals,
   setSessions,
   setSessionsLoading,
@@ -792,25 +794,37 @@ export function DesktopController() {
 
   const startSessionInWorkspace = useCallback(
     (path: null | string) => {
-      startFreshSessionDraft()
+      const target = path?.trim() || null
 
-      const target = path?.trim()
+      startFreshSessionDraft({ workspaceTarget: target })
 
       if (!target) {
         return
       }
+
+      const workspaceGeneration = $newChatWorkspaceTargetGeneration.get()
 
       // The next message creates the backend session in $currentCwd, so seed
       // it (and the branch) from the workspace the user clicked the + on.
       setCurrentCwd(target)
       void requestGateway<{ branch?: string; cwd?: string }>('config.get', { key: 'project', cwd: target })
         .then(info => {
-          setCurrentCwd(info.cwd || target)
+          if ($newChatWorkspaceTargetGeneration.get() !== workspaceGeneration || activeSessionIdRef.current) {
+            return
+          }
+
+          const cwd = info.cwd || target
+          setCurrentCwd(cwd)
+          setNewChatWorkspaceTarget(cwd)
           setCurrentBranch(info.branch || '')
         })
-        .catch(() => undefined)
+        .catch(() => {
+          if ($newChatWorkspaceTargetGeneration.get() === workspaceGeneration && !activeSessionIdRef.current) {
+            setCurrentBranch('')
+          }
+        })
     },
-    [requestGateway, startFreshSessionDraft]
+    [activeSessionIdRef, requestGateway, startFreshSessionDraft]
   )
 
   const handleSkinCommand = useSkinCommand()
