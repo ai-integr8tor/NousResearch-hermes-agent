@@ -191,6 +191,10 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             extra.get("auto_react_type")
             or os.getenv("BLUEBUBBLES_AUTO_REACT_TYPE", "like")
         )
+        self.split_paragraph_replies = _bool_setting(
+            extra.get("split_paragraph_replies"),
+            default=False,
+        )
         self._seen_inbound_messages: OrderedDict[str, float] = OrderedDict()
         self._owns_webhook_listener = False
 
@@ -690,16 +694,22 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         text = self.format_message(content)
         if not text:
             return SendResult(success=False, error="BlueBubbles send requires text")
-        # Split on paragraph breaks first (double newlines) so each thought
-        # becomes its own iMessage bubble, then truncate any that are still
-        # too long.
-        paragraphs = [p.strip() for p in re.split(r'\n\s*\n', text) if p.strip()]
-        chunks: List[str] = []
-        for para in (paragraphs or [text]):
-            if len(para) <= self.MAX_MESSAGE_LENGTH:
-                chunks.append(para)
-            else:
-                chunks.extend(self.truncate_message(para, max_length=self.MAX_MESSAGE_LENGTH))
+        # Send normal replies as one iMessage bubble by default. Splitting on
+        # blank lines makes one assistant response look like several/duplicate
+        # replies in BlueBubbles. Users who prefer paragraph bubbles can opt in
+        # with split_paragraph_replies=true.
+        if self.split_paragraph_replies:
+            paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+            chunks: List[str] = []
+            for para in (paragraphs or [text]):
+                if len(para) <= self.MAX_MESSAGE_LENGTH:
+                    chunks.append(para)
+                else:
+                    chunks.extend(self.truncate_message(para, max_length=self.MAX_MESSAGE_LENGTH))
+        elif len(text) <= self.MAX_MESSAGE_LENGTH:
+            chunks = [text]
+        else:
+            chunks = self.truncate_message(text, max_length=self.MAX_MESSAGE_LENGTH)
         last = SendResult(success=True)
         for chunk in chunks:
             guid = await self._resolve_chat_guid(chat_id)

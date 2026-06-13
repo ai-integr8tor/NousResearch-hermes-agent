@@ -56,6 +56,41 @@ class TestBlueBubblesConfigLoading:
         assert hc is not None
         assert hc.chat_id == "user@example.com"
 
+    def test_yaml_bluebubbles_options_bridge_to_platform_extra(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("BLUEBUBBLES_SERVER_URL", "http://localhost:1234")
+        monkeypatch.setenv("BLUEBUBBLES_PASSWORD", "secret")
+        (tmp_path / "config.yaml").write_text(
+            """
+bluebubbles:
+  enabled: true
+  auto_react: false
+  auto_react_type: loved
+  send_read_receipts: false
+  split_paragraph_replies: true
+  typing_indicators: true
+  webhook_events:
+    - new-message
+    - updated-message
+  webhook_host: 0.0.0.0
+  webhook_path: custom-bluebubbles-hook
+  webhook_port: 9876
+""".strip()
+        )
+        from gateway.config import load_gateway_config
+
+        config = load_gateway_config()
+        extra = config.platforms[Platform.BLUEBUBBLES].extra
+        assert extra["auto_react"] is False
+        assert extra["auto_react_type"] == "loved"
+        assert extra["send_read_receipts"] is False
+        assert extra["split_paragraph_replies"] is True
+        assert extra["typing_indicators"] is True
+        assert extra["webhook_events"] == ["new-message", "updated-message"]
+        assert extra["webhook_host"] == "0.0.0.0"
+        assert extra["webhook_path"] == "custom-bluebubbles-hook"
+        assert extra["webhook_port"] == 9876
+
     def test_not_connected_without_password(self, monkeypatch):
         monkeypatch.setenv("BLUEBUBBLES_SERVER_URL", "http://localhost:1234")
         monkeypatch.delenv("BLUEBUBBLES_PASSWORD", raising=False)
@@ -86,8 +121,28 @@ class TestBlueBubblesHelpers:
         assert all("(" not in chunk for chunk in chunks)
 
     @pytest.mark.asyncio
-    async def test_send_splits_paragraphs_into_multiple_bubbles(self, monkeypatch):
+    async def test_send_keeps_paragraphs_in_single_bubble_by_default(self, monkeypatch):
         adapter = _make_adapter(monkeypatch)
+        sent = []
+
+        async def fake_resolve_chat_guid(chat_id):
+            return "iMessage;-;user@example.com"
+
+        async def fake_api_post(path, payload):
+            sent.append(payload["message"])
+            return {"data": {"guid": f"msg-{len(sent)}"}}
+
+        monkeypatch.setattr(adapter, "_resolve_chat_guid", fake_resolve_chat_guid)
+        monkeypatch.setattr(adapter, "_api_post", fake_api_post)
+
+        result = await adapter.send("user@example.com", "first thought\n\nsecond thought")
+
+        assert result.success is True
+        assert sent == ["first thought\n\nsecond thought"]
+
+    @pytest.mark.asyncio
+    async def test_send_can_split_paragraphs_when_configured(self, monkeypatch):
+        adapter = _make_adapter(monkeypatch, split_paragraph_replies=True)
         sent = []
 
         async def fake_resolve_chat_guid(chat_id):
@@ -176,6 +231,7 @@ class TestBlueBubblesHelpers:
         adapter = _make_adapter(monkeypatch)
         assert adapter.auto_react is True
         assert adapter.auto_react_type == "like"
+        assert adapter.split_paragraph_replies is False
         assert not hasattr(adapter, "delayed_ack")
         assert not hasattr(adapter, "delayed_ack_text")
         assert not hasattr(adapter, "_delayed_ack_tasks")
