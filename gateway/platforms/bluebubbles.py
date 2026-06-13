@@ -28,7 +28,6 @@ from gateway.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
     MessageType,
-    ProcessingOutcome,
     SendResult,
     cache_image_from_bytes,
     cache_audio_from_bytes,
@@ -192,21 +191,6 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             extra.get("auto_react_type")
             or os.getenv("BLUEBUBBLES_AUTO_REACT_TYPE", "like")
         )
-        self.delayed_ack = _bool_setting(
-            extra.get("delayed_ack")
-            if "delayed_ack" in extra
-            else os.getenv("BLUEBUBBLES_DELAYED_ACK"),
-            default=True,
-        )
-        self.delayed_ack_delay_seconds = float(
-            extra.get("delayed_ack_delay_seconds")
-            or os.getenv("BLUEBUBBLES_DELAYED_ACK_DELAY_SECONDS", "2.0")
-        )
-        self.delayed_ack_text = str(
-            extra.get("delayed_ack_text")
-            or os.getenv("BLUEBUBBLES_DELAYED_ACK_TEXT", "One sec")
-        )
-        self._delayed_ack_tasks: Dict[str, asyncio.Task] = {}
         self._seen_inbound_messages: OrderedDict[str, float] = OrderedDict()
         self._owns_webhook_listener = False
 
@@ -956,36 +940,11 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             logger.debug("[bluebubbles] reaction failed: %s", exc)
             return False
 
-    def _delayed_ack_key(self, event: MessageEvent) -> str:
-        return f"{getattr(event.source, 'chat_id', '')}:{getattr(event, 'message_id', '')}"
-
-    async def _send_delayed_ack(self, key: str, chat_id: str, reply_to: Optional[str]) -> None:
-        try:
-            delay = max(0.0, float(self.delayed_ack_delay_seconds))
-            await asyncio.sleep(delay)
-            await self.send(chat_id, self.delayed_ack_text, reply_to=reply_to)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            logger.debug("[bluebubbles] delayed ack failed: %s", exc)
-        finally:
-            self._delayed_ack_tasks.pop(key, None)
-
     async def on_processing_start(self, event: MessageEvent) -> None:
         chat_id = getattr(event.source, "chat_id", "")
         message_id = getattr(event, "message_id", None)
         if self.auto_react:
             await self._send_reaction(chat_id, message_id, self.auto_react_type)
-        if self.delayed_ack and self.delayed_ack_text and chat_id:
-            key = self._delayed_ack_key(event)
-            task = asyncio.create_task(self._send_delayed_ack(key, chat_id, message_id))
-            self._delayed_ack_tasks[key] = task
-
-    async def on_processing_complete(self, event: MessageEvent, outcome: ProcessingOutcome) -> None:
-        key = self._delayed_ack_key(event)
-        task = self._delayed_ack_tasks.pop(key, None)
-        if task and not task.done():
-            task.cancel()
 
     # ------------------------------------------------------------------
     # Chat info

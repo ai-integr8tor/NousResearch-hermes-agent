@@ -5,7 +5,7 @@ import json
 import pytest
 
 from gateway.config import Platform, PlatformConfig
-from gateway.platforms.base import MessageEvent, ProcessingOutcome
+from gateway.platforms.base import MessageEvent
 
 
 def _make_adapter(monkeypatch, **extra):
@@ -172,12 +172,13 @@ class TestBlueBubblesHelpers:
         adapter = _make_adapter(monkeypatch)
         assert adapter.typing_indicators is False
 
-    def test_auto_react_and_delayed_ack_default_on(self, monkeypatch):
+    def test_auto_react_default_on_without_delayed_ack(self, monkeypatch):
         adapter = _make_adapter(monkeypatch)
         assert adapter.auto_react is True
         assert adapter.auto_react_type == "like"
-        assert adapter.delayed_ack is True
-        assert adapter.delayed_ack_text == "One sec"
+        assert not hasattr(adapter, "delayed_ack")
+        assert not hasattr(adapter, "delayed_ack_text")
+        assert not hasattr(adapter, "_delayed_ack_tasks")
 
     def test_webhook_events_env_parses_comma_list(self, monkeypatch):
         monkeypatch.setenv("BLUEBUBBLES_WEBHOOK_EVENTS", "new-message,updated-message")
@@ -212,40 +213,27 @@ class TestBlueBubblesHelpers:
         assert posts == []
 
     @pytest.mark.asyncio
-    async def test_processing_start_reacts_and_schedules_delayed_ack(self, monkeypatch):
-        adapter = _make_adapter(monkeypatch, delayed_ack_delay_seconds=30)
+    async def test_processing_start_reacts_without_sending_ack_message(self, monkeypatch):
+        adapter = _make_adapter(monkeypatch)
         source = adapter.build_source(chat_id="iMessage;-;user@example.com", user_id="user@example.com")
         event = MessageEvent(text="hello", source=source, message_id="msg-1")
         reactions = []
+        sent = []
 
         async def fake_reaction(chat_id, message_id, reaction):
             reactions.append((chat_id, message_id, reaction))
             return True
 
+        async def fake_send(chat_id, content, reply_to=None, metadata=None):
+            sent.append((chat_id, content, reply_to))
+
         monkeypatch.setattr(adapter, "_send_reaction", fake_reaction)
+        monkeypatch.setattr(adapter, "send", fake_send)
 
         await adapter.on_processing_start(event)
 
         assert reactions == [("iMessage;-;user@example.com", "msg-1", "like")]
-        assert adapter._delayed_ack_key(event) in adapter._delayed_ack_tasks
-        await adapter.on_processing_complete(event, ProcessingOutcome.SUCCESS)
-        assert adapter._delayed_ack_tasks == {}
-
-    @pytest.mark.asyncio
-    async def test_delayed_ack_sends_when_not_cancelled(self, monkeypatch):
-        adapter = _make_adapter(monkeypatch, delayed_ack_delay_seconds=0, delayed_ack_text="One sec")
-        sent = []
-
-        async def fake_send(chat_id, content, reply_to=None, metadata=None):
-            sent.append((chat_id, content, reply_to))
-            from gateway.platforms.base import SendResult
-            return SendResult(success=True)
-
-        monkeypatch.setattr(adapter, "send", fake_send)
-
-        await adapter._send_delayed_ack("key", "chat-1", "msg-1")
-
-        assert sent == [("chat-1", "One sec", "msg-1")]
+        assert sent == []
 
     @pytest.mark.asyncio
     async def test_webhook_listener_port_conflict_enters_outbound_only_mode(self, monkeypatch):
