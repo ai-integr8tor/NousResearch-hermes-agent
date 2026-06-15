@@ -1,0 +1,40 @@
+# Nous-approved MCP catalog entry.
+# Presence in this directory = approval. Merged via PR review.
+#
+# Schema version 1.
+manifest_version: 1
+
+name: keenable
+description: Web search and page-to-markdown fetch via Keenable's search API.
+source: https://docs.keenable.ai/mcp-server
+
+# Keenable hosts a remote Streamable-HTTP MCP server. Hermes's MCP client
+# connects directly — nothing to install locally.
+transport:
+  type: http
+  url: https://api.keenable.ai/mcp
+
+# Free tier works without credentials, so the catalog entry needs no auth to
+# connect. An API key only raises rate limits, and the catalog's HTTP path
+# does not inject an api-key header (it wires OAuth or nothing). For
+# authenticated/higher-limit use, run the Keenable CLI (`keenable login`)
+# or call the REST API directly with X-API-Key — see the `keenable-cli` skill.
+auth:
+  type: none
+
+# Keenable's MCP exposes a small surface: web search + page fetch. Both are
+# read-only, so the default pre-checks everything.
+tools:
+  default_enabled:
+    - search_web_pages
+    - fetch_page_content
+
+post_install: |
+  Keenable's MCP works on a free tier with no credentials. Searches and
+  fetches are rate-limited until you authenticate.
+
+  To raise limits, sign up at https://keenable.ai/signup for an API key and
+  use it via the Keenable CLI (`keenable login`) or the REST API
+  (X-API-Key header). The optional `keenable-cli` skill covers both.
+
+  Start a new Hermes session to load the Keenable tools.
