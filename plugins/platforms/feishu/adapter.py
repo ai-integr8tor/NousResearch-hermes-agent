@@ -160,6 +160,9 @@ _MARKDOWN_TABLE_RE = re.compile(r"^\|.*\|\n\|[-|: ]+\|", re.MULTILINE)
 _MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
 _MARKDOWN_FENCE_OPEN_RE = re.compile(r"^```([^\n`]*)\s*$")
 _MARKDOWN_FENCE_CLOSE_RE = re.compile(r"^```\s*$")
+
+# Max interactive card JSON size (bytes); above this we degrade to plain text.
+_MAX_CARD_JSON_BYTES = 100 * 1024
 _MENTION_RE = re.compile(r"@_user_\d+")
 _MULTISPACE_RE = re.compile(r"[ \t]{2,}")
 _POST_CONTENT_INVALID_RE = re.compile(r"content format of the post type is incorrect", re.IGNORECASE)
@@ -556,6 +559,20 @@ def _build_markdown_post_payload(content: str) -> str:
                 "content": rows,
             }
         },
+        ensure_ascii=False,
+    )
+
+
+def _build_markdown_card_payload(content: str) -> str:
+    """Build a Feishu Interactive Card (JSON 2.0) with a single markdown element.
+
+    The Card 2.0 ``tag: "markdown"`` element renders full CommonMark (headings,
+    lists, code blocks, blockquotes, GFM tables with alignment) — unlike the
+    post-type ``tag: "md"`` element which is a stripped renderer. Tables are
+    passed through as GFM syntax and rendered natively (no parsing needed).
+    """
+    return json.dumps(
+        {"schema": "2.0", "body": {"elements": [{"tag": "markdown", "content": content}]}},
         ensure_ascii=False,
     )
 
@@ -1428,6 +1445,10 @@ class FeishuAdapter(BasePlatformAdapter):
 
         self._settings = self._load_settings(config.extra or {})
         self._apply_settings(self._settings)
+        # Feature flag: render outbound markdown via Card 2.0 interactive cards.
+        # Default True; set ``feishu_interactive_cards: false`` in platform extras
+        # to fall back to the legacy text/post behavior.
+        self._use_interactive_cards = bool((config.extra or {}).get("feishu_interactive_cards", True))
         self._client: Optional[Any] = None
         self._ws_client: Optional[Any] = None
         self._ws_future: Optional[asyncio.Future] = None
@@ -1798,9 +1819,12 @@ class FeishuAdapter(BasePlatformAdapter):
                         metadata=metadata,
                     )
                 except Exception as exc:
-                    if msg_type != "post" or not _POST_CONTENT_INVALID_RE.search(str(exc)):
+                    if msg_type == "interactive":
+                        logger.warning("[Feishu] interactive card rejected; falling back to text: %s", exc)
+                    elif msg_type != "post" or not _POST_CONTENT_INVALID_RE.search(str(exc)):
                         raise
-                    logger.warning("[Feishu] Invalid post payload rejected by API; falling back to plain text")
+                    else:
+                        logger.warning("[Feishu] Invalid post payload rejected by API; falling back to plain text")
                     response = await self._feishu_send_with_retry(
                         chat_id=chat_id,
                         msg_type="text",
@@ -1847,8 +1871,10 @@ class FeishuAdapter(BasePlatformAdapter):
             request = self._build_update_message_request(message_id=message_id, request_body=body)
             response = await asyncio.to_thread(self._client.im.v1.message.update, request)
             result = self._finalize_send_result(response, "update failed")
-            if not result.success and msg_type == "post" and _POST_CONTENT_INVALID_RE.search(result.error or ""):
-                logger.warning("[Feishu] Invalid post update payload rejected by API; falling back to plain text")
+            if not result.success and msg_type in ("interactive", "post") and (
+                msg_type == "interactive" or _POST_CONTENT_INVALID_RE.search(result.error or "")
+            ):
+                logger.warning("[Feishu] %s update payload rejected by API; falling back to plain text", msg_type)
                 fallback_body = self._build_update_message_body(
                     msg_type="text",
                     content=json.dumps({"text": _strip_markdown_to_plain_text(content)}, ensure_ascii=False),
@@ -4374,16 +4400,26 @@ class FeishuAdapter(BasePlatformAdapter):
     # =========================================================================
 
     def _build_outbound_payload(self, content: str) -> tuple[str, str]:
-        # Feishu post-type 'md' elements do not render markdown tables; sending
-        # table content as post causes the message to appear blank on the client.
-        # Force plain text for anything that looks like a markdown table.
-        if _MARKDOWN_TABLE_RE.search(content):
-            text_payload = {"text": content}
-            return "text", json.dumps(text_payload, ensure_ascii=False)
-        if _MARKDOWN_HINT_RE.search(content):
-            return "post", _build_markdown_post_payload(content)
-        text_payload = {"text": content}
-        return "text", json.dumps(text_payload, ensure_ascii=False)
+        if not self._use_interactive_cards:
+            # Legacy behavior: tables → text (post 'md' can't render them),
+            # other markdown → post, plain text → text.
+            if _MARKDOWN_TABLE_RE.search(content):
+                return "text", json.dumps({"text": content}, ensure_ascii=False)
+            if _MARKDOWN_HINT_RE.search(content):
+                return "post", _build_markdown_post_payload(content)
+            return "text", json.dumps({"text": content}, ensure_ascii=False)
+        # Card 2.0 path: route ALL content through a single markdown element so
+        # send() and edit_message() always agree on msg_type (no streaming drift).
+        # Tables render via GFM syntax; plain text rides in the same element.
+        try:
+            payload = _build_markdown_card_payload(content)
+        except Exception:
+            logger.warning("[Feishu] card build failed; falling back to text", exc_info=True)
+            return "text", json.dumps({"text": content}, ensure_ascii=False)
+        if len(payload.encode("utf-8")) > _MAX_CARD_JSON_BYTES:
+            logger.warning("[Feishu] card payload exceeds %d bytes; falling back to text", _MAX_CARD_JSON_BYTES)
+            return "text", json.dumps({"text": content}, ensure_ascii=False)
+        return "interactive", payload
 
     async def _send_uploaded_file_message(
         self,
