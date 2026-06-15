@@ -3,7 +3,7 @@
 Subclasses :class:`agent.web_search_provider.WebSearchProvider`. Two
 capabilities, both sync (the underlying call is ``httpx``):
 
-- ``supports_search()``  -> True (Keenable ``POST /v1/search``)
+- ``supports_search()``  -> True (Keenable ``GET /v1/search``)
 - ``supports_extract()`` -> True (Keenable ``GET /v1/fetch``, one URL per call)
 
 Config keys this provider responds to::
@@ -57,14 +57,17 @@ def _keenable_headers() -> Dict[str, str]:
 
 
 def _normalize_search_results(response: Dict[str, Any]) -> Dict[str, Any]:
-    """Map Keenable ``/v1/search`` response to ``{success, data: {web: [...]}}``."""
+    """Map Keenable ``/v1/search`` response to ``{success, data: {web: [...]}}``.
+
+    Each ``SearchResultDTO`` has ``id``, ``title``, ``url``, ``description``.
+    """
     web_results = []
     for i, result in enumerate(response.get("results", []) or []):
         web_results.append(
             {
                 "title": result.get("title", ""),
                 "url": result.get("url", ""),
-                "description": result.get("description") or result.get("snippet", ""),
+                "description": result.get("description", ""),
                 "position": i + 1,
             }
         )
@@ -93,7 +96,7 @@ class KeenableWebSearchProvider(WebSearchProvider):
         return True
 
     def search(self, query: str, limit: int = 5) -> Dict[str, Any]:
-        """Execute a Keenable search (``POST /v1/search``)."""
+        """Execute a Keenable search (``GET /v1/search?query=&count=``)."""
         try:
             from tools.interrupt import is_interrupted
 
@@ -103,17 +106,14 @@ class KeenableWebSearchProvider(WebSearchProvider):
             import httpx
 
             logger.info("Keenable search: '%s' (limit=%d)", query, limit)
-            response = httpx.post(
+            response = httpx.get(
                 f"{_keenable_base_url()}/v1/search",
                 headers=_keenable_headers(),
-                json={"query": query},
+                params={"query": query, "count": limit},
                 timeout=60,
             )
             response.raise_for_status()
-            data = _normalize_search_results(response.json())
-            # Keenable returns a ranked list; honor the caller's limit locally.
-            data["data"]["web"] = data["data"]["web"][:limit]
-            return data
+            return _normalize_search_results(response.json())
         except ValueError as exc:
             return {"success": False, "error": str(exc)}
         except Exception as exc:  # noqa: BLE001 — including httpx errors
@@ -133,7 +133,6 @@ class KeenableWebSearchProvider(WebSearchProvider):
 
         import httpx
 
-        max_chars = kwargs.get("max_chars")
         base_url = _keenable_base_url()
         documents: List[Dict[str, Any]] = []
 
@@ -142,32 +141,33 @@ class KeenableWebSearchProvider(WebSearchProvider):
         except ValueError as exc:
             return [{"url": u, "title": "", "content": "", "error": str(exc)} for u in urls]
 
+        # /v1/fetch takes a single ``url`` query param (no batch, no max_chars).
         for url in urls:
             if is_interrupted():
                 documents.append({"url": url, "title": "", "content": "", "error": "Interrupted"})
                 continue
-            params: Dict[str, str] = {"url": url}
-            if max_chars is not None:
-                params["max_chars"] = str(max_chars)
             try:
                 logger.info("Keenable fetch: %s", url)
                 response = httpx.get(
                     f"{base_url}/v1/fetch",
                     headers=headers,
-                    params=params,
+                    params={"url": url},
                     timeout=60,
                 )
                 response.raise_for_status()
                 payload = response.json()
                 title = payload.get("title", "")
                 content = payload.get("content", "")
+                metadata = {"sourceURL": url, "title": title}
+                if isinstance(payload.get("metadata"), dict):
+                    metadata.update(payload["metadata"])
                 documents.append(
                     {
-                        "url": url,
+                        "url": payload.get("url", url),
                         "title": title,
                         "content": content,
                         "raw_content": content,
-                        "metadata": {"sourceURL": url, "title": title},
+                        "metadata": metadata,
                     }
                 )
             except Exception as exc:  # noqa: BLE001
