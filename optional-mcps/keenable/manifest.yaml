@@ -7,8 +7,6 @@ source: https://docs.keenable.ai/mcp-server
 transport:
   type: http
   url: https://api.keenable.ai/mcp
-  headers:
-    X-Keenable-Title: Hermes
 
 # Free tier needs no auth, and the catalog's HTTP path can't inject an api-key
 # header anyway — higher-limit use goes through the keenable-cli skill.
