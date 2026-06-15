@@ -3617,6 +3617,14 @@ OPTIONAL_ENV_VARS = {
         "password": False,
         "category": "setting",
     },
+    "KEENABLE_API_KEY": {
+        "description": "Keenable API key for low-latency web search and page fetch",
+        "prompt": "Keenable API key",
+        "url": "https://keenable.ai/signup",
+        "tools": ["web_search", "web_extract"],
+        "password": True,
+        "category": "tool",
+    },
 }
 
 # Tool Gateway env vars are always visible — they're useful for
@@ -6035,6 +6043,7 @@ def show_config():
         ("BROWSERBASE_API_KEY", "Browserbase"),
         ("BROWSER_USE_API_KEY", "Browser Use"),
         ("FAL_KEY", "FAL"),
+        ("KEENABLE_API_KEY", "Keenable"),
     ]
     
     for env_key, name in keys:
@@ -6241,7 +6250,7 @@ def set_config_value(key: str, value: str):
         'FAL_KEY', 'TELEGRAM_BOT_TOKEN', 'DISCORD_BOT_TOKEN',
         'TERMINAL_SSH_HOST', 'TERMINAL_SSH_USER', 'TERMINAL_SSH_KEY',
         'SUDO_PASSWORD', 'SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN',
-        'GITHUB_TOKEN', 'HONCHO_API_KEY',
+        'GITHUB_TOKEN', 'HONCHO_API_KEY', 'KEENABLE_API_KEY',
     ]
     
     if key.upper() in api_keys or key.upper().endswith(('_API_KEY', '_TOKEN')) or key.upper().startswith('TERMINAL_SSH'):
