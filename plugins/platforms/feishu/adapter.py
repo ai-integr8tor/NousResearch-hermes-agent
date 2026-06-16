@@ -161,8 +161,21 @@ _MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
 _MARKDOWN_FENCE_OPEN_RE = re.compile(r"^```([^\n`]*)\s*$")
 _MARKDOWN_FENCE_CLOSE_RE = re.compile(r"^```\s*$")
 
-# Max interactive card JSON size (bytes); above this we degrade to plain text.
-_MAX_CARD_JSON_BYTES = 100 * 1024
+# Mermaid code block detection
+_MERMAID_BLOCK_RE = re.compile(r"^```mermaid\s*$", re.MULTILINE)
+
+
+def _count_gfm_tables(content: str) -> int:
+    """Count GFM tables (header + separator row pattern) in *content*."""
+    return len(_MARKDOWN_TABLE_RE.findall(content))
+
+
+# Max interactive card JSON size (bytes); Feishu hard limit is 30 KB.
+_MAX_CARD_JSON_BYTES = 30 * 1024
+
+# Feishu card limits (per card): max GFM + native tables combined.
+_MAX_TABLES_PER_CARD = 5
+_MAX_TABLES_PER_ELEMENT = 4  # GFM tables per single markdown element
 _MENTION_RE = re.compile(r"@_user_\d+")
 _MULTISPACE_RE = re.compile(r"[ \t]{2,}")
 _POST_CONTENT_INVALID_RE = re.compile(r"content format of the post type is incorrect", re.IGNORECASE)
