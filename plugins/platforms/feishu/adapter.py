@@ -590,6 +590,262 @@ def _build_markdown_card_payload(content: str) -> str:
     )
 
 
+def _build_markdown_card_payload_with_header(content: str, title: str, template: str = "blue") -> str:
+    """Build a Card 2.0 with a header title, used for split card parts."""
+    return json.dumps(
+        {
+            "schema": "2.0",
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "title": {"tag": "plain_text", "content": title},
+                "template": template,
+            },
+            "body": {"elements": [{"tag": "markdown", "content": content}]},
+        },
+        ensure_ascii=False,
+    )
+
+
+def _inject_card_header(payload_json: str, index: int, total: int) -> str:
+    """Inject a sequential header into an existing card payload."""
+    try:
+        card = json.loads(payload_json)
+        header = card.get("header") or {"title": {"tag": "plain_text", "content": ""}, "template": "blue"}
+        if not isinstance(header, dict):
+            header = {"title": {"tag": "plain_text", "content": ""}, "template": "blue"}
+        title_obj = header.get("title", {})
+        existing = title_obj.get("content", "") if isinstance(title_obj, dict) else ""
+        # Preserve existing header text, append pagination
+        new_title = existing if existing else "Hermes"
+        new_title = f"{new_title}（{index + 1}/{total}）"
+        card["header"] = {
+            "title": {"tag": "plain_text", "content": new_title},
+            "template": header.get("template", "blue"),
+        }
+        return json.dumps(card, ensure_ascii=False)
+    except Exception:
+        return payload_json
+
+
+# ---------------------------------------------------------------------------
+# Card splitting: break oversized markdown into multiple Feishu cards
+# ---------------------------------------------------------------------------
+
+@dataclass
+class _MarkdownBlock:
+    """A unit of markdown content that should not be split further."""
+    type: str  # "table", "code", "mermaid", "paragraph"
+    text: str
+    table_count: int = 0
+
+
+def _split_markdown_blocks(content: str) -> list[_MarkdownBlock]:
+    """Parse *content* into typed blocks.
+
+    Tables and fenced code blocks (including mermaid) are atomic units;
+    everything else is grouped into paragraph blocks.
+    """
+    blocks: list[_MarkdownBlock] = []
+    lines = content.split("\n")
+    current_para: list[str] = []
+    in_code_block = False
+    code_lang = ""
+    code_lines: list[str] = []
+
+    def _flush_para() -> None:
+        nonlocal current_para
+        text = "\n".join(current_para).strip()
+        if text:
+            blocks.append(_MarkdownBlock(type="paragraph", text=text, table_count=_count_gfm_tables(text)))
+        current_para = []
+
+    i = 0
+    while i < len(lines):
+        stripped = lines[i].strip()
+
+        # --- Code block boundary ---
+        is_fence_open = bool(_MARKDOWN_FENCE_OPEN_RE.match(stripped))
+        is_fence_close = bool(_MARKDOWN_FENCE_CLOSE_RE.match(stripped)) if in_code_block else False
+
+        if in_code_block:
+            if is_fence_close:
+                code_lines.append(lines[i])
+                block_text = "\n".join(code_lines)
+                block_type = "mermaid" if code_lang.strip().lower() == "mermaid" else "code"
+                blocks.append(_MarkdownBlock(type=block_type, text=block_text))
+                in_code_block = False
+                code_lines = []
+                code_lang = ""
+            else:
+                code_lines.append(lines[i])
+            i += 1
+            continue
+
+        if is_fence_open:
+            _flush_para()
+            in_code_block = True
+            code_lang = stripped[3:].strip()  # language after ```
+            code_lines = [lines[i]]
+            i += 1
+            continue
+
+        # --- Table block: lines starting with | ---
+        if stripped.startswith("|"):
+            _flush_para()
+            table_lines: list[str] = []
+            while i < len(lines) and lines[i].strip().startswith("|"):
+                table_lines.append(lines[i])
+                i += 1
+            table_text = "\n".join(table_lines)
+            blocks.append(_MarkdownBlock(
+                type="table",
+                text=table_text,
+                table_count=_count_gfm_tables(table_text),
+            ))
+            continue
+
+        # --- Regular paragraph line ---
+        current_para.append(lines[i])
+        i += 1
+
+    _flush_para()
+
+    # Flush any unclosed code block
+    if in_code_block:
+        blocks.append(_MarkdownBlock(type="code", text="\n".join(code_lines)))
+
+    return blocks
+
+
+def _split_oversized_table(table_text: str, max_bytes: int) -> list[str]:
+    """Split a table by rows, each slice keeps the header row."""
+    lines = table_text.split("\n")
+    if len(lines) <= 2:
+        return [table_text]
+
+    header = lines[0]
+    separator = lines[1]
+    data_rows = lines[2:]
+    parts: list[str] = []
+    current: list[str] = [header, separator]
+
+    for row in data_rows:
+        candidate = "\n".join(current + [row])
+        if len(candidate.encode("utf-8")) > max_bytes and len(current) > 2:
+            parts.append("\n".join(current))
+            current = [header, separator, row]
+        else:
+            current.append(row)
+
+    parts.append("\n".join(current))
+    return parts
+
+
+def _split_oversized_paragraph(text: str, max_bytes: int) -> list[str]:
+    """Split a long paragraph at \\n\\n → \\n → sentence boundaries."""
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return [text]
+
+    # Try paragraph breaks first
+    paragraphs = text.split("\n\n")
+    if len(paragraphs) > 1:
+        result: list[str] = []
+        buf: list[str] = []
+        for p in paragraphs:
+            candidate = "\n\n".join(buf + [p]) if buf else p
+            if len(candidate.encode("utf-8")) > max_bytes and buf:
+                result.append("\n\n".join(buf))
+                buf = [p]
+            else:
+                buf.append(p)
+        if buf:
+            result.append("\n\n".join(buf))
+        return result
+
+    # Try line breaks
+    lines_list = text.split("\n")
+    if len(lines_list) > 1:
+        result: list[str] = []  # type: ignore[no-redef]
+        buf: list[str] = []  # type: ignore[no-redef]
+        for ln in lines_list:
+            candidate = "\n".join(buf + [ln]) if buf else ln
+            if len(candidate.encode("utf-8")) > max_bytes and buf:
+                result.append("\n".join(buf))
+                buf = [ln]
+            else:
+                buf.append(ln)
+        if buf:
+            result.append("\n".join(buf))
+        return result
+
+    # Last resort: split at sentence boundaries (Chinese/English)
+    result: list[str] = []  # type: ignore[no-redef]
+    buf = ""
+    for char in text:
+        candidate = buf + char
+        if len(candidate.encode("utf-8")) > max_bytes:
+            result.append(buf)
+            buf = char
+        else:
+            buf = candidate
+    if buf:
+        result.append(buf)
+    return result if result else [text]
+
+
+def _pack_blocks_into_cards(blocks: list[_MarkdownBlock]) -> list[str]:
+    """Greedily pack blocks into cards respecting 30KB and ≤5 tables.
+
+    Returns a list of markdown strings, one per card.
+    """
+    if not blocks:
+        return [""]
+
+    cards: list[str] = []
+    current_blocks: list[_MarkdownBlock] = []
+    current_size = 0
+    current_tables = 0
+
+    def _flush() -> None:
+        nonlocal current_blocks, current_size, current_tables
+        if current_blocks:
+            text = "\n\n".join(b.text for b in current_blocks)
+            cards.append(text)
+            current_blocks = []
+            current_size = 0
+            current_tables = 0
+
+    budget = _MAX_CARD_JSON_BYTES - 200  # reserve 200B for card JSON overhead
+
+    for block in blocks:
+        block_bytes = len(block.text.encode("utf-8"))
+
+        # If a single block exceeds budget, split it first
+        if block_bytes > budget:
+            _flush()
+            if block.type == "table":
+                parts = _split_oversized_table(block.text, budget)
+            else:
+                parts = _split_oversized_paragraph(block.text, budget)
+            cards.extend(parts)
+            continue
+
+        # Would adding this block exceed budget or table limit?
+        new_size = current_size + block_bytes + 2  # +2 for "\n\n"
+        new_tables = current_tables + block.table_count
+
+        if new_size > budget or new_tables > _MAX_TABLES_PER_CARD:
+            _flush()
+
+        current_blocks.append(block)
+        current_size = new_size
+        current_tables = new_tables
+
+    _flush()
+    return cards if cards else [""]
+
+
 def _build_markdown_post_rows(content: str) -> List[List[Dict[str, str]]]:
     """Build Feishu post rows while isolating fenced code blocks.
 
@@ -1822,43 +2078,44 @@ class FeishuAdapter(BasePlatformAdapter):
 
         try:
             for chunk in chunks:
-                msg_type, payload = self._build_outbound_payload(chunk)
-                try:
-                    response = await self._feishu_send_with_retry(
-                        chat_id=chat_id,
-                        msg_type=msg_type,
-                        payload=payload,
-                        reply_to=reply_to,
-                        metadata=metadata,
-                    )
-                except Exception as exc:
-                    if msg_type == "interactive":
-                        logger.warning("[Feishu] interactive card rejected; falling back to text: %s", exc)
-                    elif msg_type != "post" or not _POST_CONTENT_INVALID_RE.search(str(exc)):
-                        raise
-                    else:
-                        logger.warning("[Feishu] Invalid post payload rejected by API; falling back to plain text")
-                    response = await self._feishu_send_with_retry(
-                        chat_id=chat_id,
-                        msg_type="text",
-                        payload=json.dumps({"text": _strip_markdown_to_plain_text(chunk)}, ensure_ascii=False),
-                        reply_to=reply_to,
-                        metadata=metadata,
-                    )
-                if (
-                    msg_type == "post"
-                    and not self._response_succeeded(response)
-                    and _POST_CONTENT_INVALID_RE.search(str(getattr(response, "msg", "") or ""))
-                ):
-                    logger.warning("[Feishu] Post payload rejected by API response; falling back to plain text")
-                    response = await self._feishu_send_with_retry(
-                        chat_id=chat_id,
-                        msg_type="text",
-                        payload=json.dumps({"text": _strip_markdown_to_plain_text(chunk)}, ensure_ascii=False),
-                        reply_to=reply_to,
-                        metadata=metadata,
-                    )
-                last_response = response
+                payloads = self._build_outbound_payloads(chunk)
+                for msg_type, payload in payloads:
+                    try:
+                        response = await self._feishu_send_with_retry(
+                            chat_id=chat_id,
+                            msg_type=msg_type,
+                            payload=payload,
+                            reply_to=reply_to,
+                            metadata=metadata,
+                        )
+                    except Exception as exc:
+                        if msg_type == "interactive":
+                            logger.warning("[Feishu] interactive card rejected; falling back to text: %s", exc)
+                        elif msg_type != "post" or not _POST_CONTENT_INVALID_RE.search(str(exc)):
+                            raise
+                        else:
+                            logger.warning("[Feishu] Invalid post payload rejected by API; falling back to plain text")
+                        response = await self._feishu_send_with_retry(
+                            chat_id=chat_id,
+                            msg_type="text",
+                            payload=json.dumps({"text": _strip_markdown_to_plain_text(chunk)}, ensure_ascii=False),
+                            reply_to=reply_to,
+                            metadata=metadata,
+                        )
+                    if (
+                        msg_type == "post"
+                        and not self._response_succeeded(response)
+                        and _POST_CONTENT_INVALID_RE.search(str(getattr(response, "msg", "") or ""))
+                    ):
+                        logger.warning("[Feishu] Post payload rejected by API response; falling back to plain text")
+                        response = await self._feishu_send_with_retry(
+                            chat_id=chat_id,
+                            msg_type="text",
+                            payload=json.dumps({"text": _strip_markdown_to_plain_text(chunk)}, ensure_ascii=False),
+                            reply_to=reply_to,
+                            metadata=metadata,
+                        )
+                    last_response = response
 
             return self._finalize_send_result(last_response, "send failed")
         except Exception as exc:
@@ -4421,9 +4678,8 @@ class FeishuAdapter(BasePlatformAdapter):
             if _MARKDOWN_HINT_RE.search(content):
                 return "post", _build_markdown_post_payload(content)
             return "text", json.dumps({"text": content}, ensure_ascii=False)
-        # Card 2.0 path: route ALL content through a single markdown element so
-        # send() and edit_message() always agree on msg_type (no streaming drift).
-        # Tables render via GFM syntax; plain text rides in the same element.
+        # Card 2.0 path (single card — used by edit_message / streaming).
+        # For multi-card splitting see _build_outbound_payloads().
         try:
             payload = _build_markdown_card_payload(content)
         except Exception:
@@ -4433,6 +4689,42 @@ class FeishuAdapter(BasePlatformAdapter):
             logger.warning("[Feishu] card payload exceeds %d bytes; falling back to text", _MAX_CARD_JSON_BYTES)
             return "text", json.dumps({"text": content}, ensure_ascii=False)
         return "interactive", payload
+
+    def _build_outbound_payloads(self, content: str) -> list[tuple[str, str]]:
+        """Build one or more (msg_type, payload) tuples for *content*.
+
+        If the content fits in a single card, returns a one-element list.
+        If it exceeds 30 KB or the 5-table limit, splits into multiple cards
+        with sequential headers.
+        """
+        if not self._use_interactive_cards:
+            msg_type, payload = self._build_outbound_payload(content)
+            return [(msg_type, payload)]
+
+        # Check if splitting is needed
+        single_payload = _build_markdown_card_payload(content)
+        table_count = _count_gfm_tables(content)
+
+        if (len(single_payload.encode("utf-8")) <= _MAX_CARD_JSON_BYTES
+                and table_count <= _MAX_TABLES_PER_CARD):
+            return [("interactive", single_payload)]
+
+        # Split into blocks and pack into cards
+        blocks = _split_markdown_blocks(content)
+        card_contents = _pack_blocks_into_cards(blocks)
+
+        if len(card_contents) == 1:
+            return [("interactive", _build_markdown_card_payload(card_contents[0]))]
+
+        # Multiple cards — add sequential headers
+        results: list[tuple[str, str]] = []
+        for i, card_text in enumerate(card_contents):
+            payload = _build_markdown_card_payload(card_text)
+            payload = _inject_card_header(payload, i, len(card_contents))
+            results.append(("interactive", payload))
+
+        logger.info("[Feishu] split content into %d cards", len(card_contents))
+        return results
 
     async def _send_uploaded_file_message(
         self,
