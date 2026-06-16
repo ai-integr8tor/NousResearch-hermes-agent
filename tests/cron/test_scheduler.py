@@ -1000,6 +1000,101 @@ class TestRunJobSessionPersistence:
         fake_db.close.assert_called_once()
         mock_agent.close.assert_called_once()
 
+    def test_run_job_reuses_named_cron_session_history(self, tmp_path):
+        job = {
+            "id": "test-job",
+            "name": "Health check",
+            "prompt": "hello",
+            "session": "gateway_health_monitor",
+        }
+        history = [{"role": "user", "content": "previous status was down"}]
+        fake_db = MagicMock()
+        fake_db.get_session.return_value = {
+            "id": "gateway_health_monitor",
+            "source": "cron",
+            "ended_at": 123.0,
+        }
+        fake_db.get_messages_as_conversation.return_value = history
+
+        with patch("cron.scheduler._hermes_home", tmp_path), \
+             patch("cron.scheduler._resolve_origin", return_value=None), \
+             patch("dotenv.load_dotenv"), \
+             patch("hermes_state.SessionDB", return_value=fake_db), \
+             patch(
+                 "hermes_cli.runtime_provider.resolve_runtime_provider",
+                 return_value={
+                     "api_key": "test-key",
+                     "base_url": "https://example.invalid/v1",
+                     "provider": "openrouter",
+                     "api_mode": "chat_completions",
+                 },
+             ), \
+             patch("run_agent.AIAgent") as mock_agent_cls:
+            mock_agent = MagicMock()
+            mock_agent.run_conversation.return_value = {"final_response": "ok"}
+            mock_agent_cls.return_value = mock_agent
+
+            success, output, final_response, error = run_job(job)
+
+        assert success is True
+        assert error is None
+        assert final_response == "ok"
+        assert "ok" in output
+
+        kwargs = mock_agent_cls.call_args.kwargs
+        assert kwargs["session_id"] == "gateway_health_monitor"
+        fake_db.get_messages_as_conversation.assert_called_once_with("gateway_health_monitor")
+        fake_db.reopen_session.assert_called_once_with("gateway_health_monitor")
+        mock_agent.run_conversation.assert_called_once()
+        assert mock_agent.run_conversation.call_args.kwargs["conversation_history"] == history
+        fake_db.set_session_title.assert_called_once_with("gateway_health_monitor", "Health check")
+        fake_db.end_session.assert_called_once_with("gateway_health_monitor", "cron_complete")
+
+    def test_run_job_reuses_existing_non_cron_session_without_lifecycle_mutation(self, tmp_path):
+        job = {
+            "id": "test-job",
+            "name": "Follow up",
+            "prompt": "hello",
+            "session": "existing_session",
+        }
+        history = [{"role": "assistant", "content": "context"}]
+        fake_db = MagicMock()
+        fake_db.get_session.return_value = {
+            "id": "existing_session",
+            "source": "cli",
+            "ended_at": 123.0,
+        }
+        fake_db.get_messages_as_conversation.return_value = history
+
+        with patch("cron.scheduler._hermes_home", tmp_path), \
+             patch("cron.scheduler._resolve_origin", return_value=None), \
+             patch("dotenv.load_dotenv"), \
+             patch("hermes_state.SessionDB", return_value=fake_db), \
+             patch(
+                 "hermes_cli.runtime_provider.resolve_runtime_provider",
+                 return_value={
+                     "api_key": "test-key",
+                     "base_url": "https://example.invalid/v1",
+                     "provider": "openrouter",
+                     "api_mode": "chat_completions",
+                 },
+             ), \
+             patch("run_agent.AIAgent") as mock_agent_cls:
+            mock_agent = MagicMock()
+            mock_agent.run_conversation.return_value = {"final_response": "ok"}
+            mock_agent_cls.return_value = mock_agent
+
+            success, _output, _final_response, error = run_job(job)
+
+        assert success is True
+        assert error is None
+        assert mock_agent_cls.call_args.kwargs["session_id"] == "existing_session"
+        assert mock_agent.run_conversation.call_args.kwargs["conversation_history"] == history
+        fake_db.reopen_session.assert_not_called()
+        fake_db.set_session_title.assert_not_called()
+        fake_db.end_session.assert_not_called()
+        fake_db.close.assert_called_once()
+
     def test_run_job_titles_cron_session_from_job_not_important_hint(self, tmp_path):
         # The cron session's first message is the injected "[IMPORTANT: …]"
         # hint, which used to surface as the sidebar/history row label. run_job

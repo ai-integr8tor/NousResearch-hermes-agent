@@ -264,6 +264,31 @@ class TestUnifiedCronjobTool:
         assert listing["jobs"][0]["name"] == "Server Check"
         assert listing["jobs"][0]["state"] == "scheduled"
 
+    def test_create_and_update_reusable_session(self):
+        created = json.loads(
+            cronjob(
+                action="create",
+                prompt="Check server status",
+                schedule="every 1h",
+                session="gateway_health_monitor",
+            )
+        )
+        assert created["success"] is True
+        assert created["job"]["session"] == "gateway_health_monitor"
+
+        listing = json.loads(cronjob(action="list"))
+        assert listing["jobs"][0]["session"] == "gateway_health_monitor"
+
+        updated = json.loads(
+            cronjob(
+                action="update",
+                job_id=created["job_id"],
+                session="",
+            )
+        )
+        assert updated["success"] is True
+        assert "session" not in updated["job"]
+
     def test_list_handles_partial_legacy_job_records(self):
         from cron.jobs import save_jobs
 
