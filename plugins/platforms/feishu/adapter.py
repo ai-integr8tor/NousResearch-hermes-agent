@@ -846,6 +846,73 @@ def _pack_blocks_into_cards(blocks: list[_MarkdownBlock]) -> list[str]:
     return cards if cards else [""]
 
 
+# ---------------------------------------------------------------------------
+# Mermaid rendering: code blocks → transparent PNG via mermaid.ink
+# ---------------------------------------------------------------------------
+
+def _extract_mermaid_blocks(content: str) -> list[tuple[str, int, int]]:
+    """Find all ```mermaid ...``` blocks in *content*.
+
+    Returns [(mermaid_code, start_char, end_char), ...] where start/end
+    are character offsets into *content* (inclusive of fences).
+    """
+    results: list[tuple[str, int, int]] = []
+    open_re = _MERMAID_BLOCK_RE
+    close_re = _MARKDOWN_FENCE_CLOSE_RE
+    for m in open_re.finditer(content):
+        start = m.start()
+        rest = content[m.end():]
+        close_m = close_re.search(rest)
+        if close_m:
+            end = m.end() + close_m.end()
+            code = rest[:close_m.start()].strip()
+            results.append((code, start, end))
+    return results
+
+
+def _render_mermaid_to_png(mermaid_code: str) -> Optional[bytes]:
+    """Render a mermaid diagram to transparent-background PNG bytes.
+
+    Flow: base64 → mermaid.ink ?type=png → Pillow de-white-background.
+    Returns PNG bytes on success, None on failure.
+    """
+    import urllib.request
+    import base64 as _base64
+
+    try:
+        encoded = _base64.urlsafe_b64encode(mermaid_code.encode("utf-8")).decode("ascii")
+        url = f"https://mermaid.ink/img/{encoded}?type=png"
+        req = urllib.request.Request(url, headers={"User-Agent": "Hermes/1.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            png_bytes = resp.read()
+        if len(png_bytes) < 100:
+            return None
+
+        # Remove white background: white pixels → transparent
+        try:
+            import io as _img_io
+            from PIL import Image
+            img = Image.open(_img_io.BytesIO(png_bytes)).convert("RGBA")
+            datas = img.getdata()
+            new_datas = []
+            for r, g, b, a in datas:
+                if r > 240 and g > 240 and b > 240:
+                    new_datas.append((255, 255, 255, 0))
+                else:
+                    new_datas.append((r, g, b, a))
+            img.putdata(new_datas)
+            buf = _img_io.BytesIO()
+            img.save(buf, format="PNG")
+            return buf.getvalue()
+        except ImportError:
+            # Pillow not available — return original PNG (white background)
+            return png_bytes
+    except Exception as exc:
+        logger.warning("[Feishu] mermaid.ink render failed: %s", exc)
+        return None
+
+
+
 def _build_markdown_post_rows(content: str) -> List[List[Dict[str, str]]]:
     """Build Feishu post rows while isolating fenced code blocks.
 
@@ -2078,7 +2145,7 @@ class FeishuAdapter(BasePlatformAdapter):
 
         try:
             for chunk in chunks:
-                payloads = self._build_outbound_payloads(chunk)
+                payloads = await self._build_outbound_payloads(chunk)
                 for msg_type, payload in payloads:
                     try:
                         response = await self._feishu_send_with_retry(
@@ -4690,16 +4757,65 @@ class FeishuAdapter(BasePlatformAdapter):
             return "text", json.dumps({"text": content}, ensure_ascii=False)
         return "interactive", payload
 
-    def _build_outbound_payloads(self, content: str) -> list[tuple[str, str]]:
+    async def _upload_mermaid_images(self, content: str) -> str:
+        """Replace ```mermaid blocks with rendered PNG images.
+
+        For each mermaid block: render → upload to Feishu → replace with
+        ![mermaid](image_key).  On failure, leaves the original block intact.
+        """
+        if not self._client or "mermaid" not in content:
+            return content
+
+        blocks = _extract_mermaid_blocks(content)
+        if not blocks:
+            return content
+
+        import io as _io
+
+        # Process from end to start so offsets stay valid
+        for mermaid_code, start, end in reversed(blocks):
+            png_bytes = _render_mermaid_to_png(mermaid_code)
+            if png_bytes is None:
+                continue
+
+            try:
+                image_file = _io.BytesIO(png_bytes)
+                image_file.name = "mermaid.png"
+                body = self._build_image_upload_body(
+                    image_type=_FEISHU_IMAGE_UPLOAD_TYPE,
+                    image=image_file,
+                )
+                request = self._build_image_upload_request(body)
+                upload_response = await asyncio.to_thread(
+                    self._client.im.v1.image.create, request,
+                )
+                image_key = self._extract_response_field(upload_response, "image_key")
+                if not image_key:
+                    continue
+
+                # Replace the mermaid code block with image reference
+                content = content[:start] + f"![mermaid]({image_key})" + content[end:]
+                logger.info("[Feishu] rendered mermaid block as image (%d bytes)", len(png_bytes))
+            except Exception as exc:
+                logger.warning("[Feishu] mermaid image upload failed: %s", exc)
+                continue
+
+        return content
+
+    async def _build_outbound_payloads(self, content: str) -> list[tuple[str, str]]:
         """Build one or more (msg_type, payload) tuples for *content*.
 
         If the content fits in a single card, returns a one-element list.
         If it exceeds 30 KB or the 5-table limit, splits into multiple cards
-        with sequential headers.
+        with sequential headers.  Mermaid blocks are rendered to PNG images
+        before splitting.
         """
         if not self._use_interactive_cards:
             msg_type, payload = self._build_outbound_payload(content)
             return [(msg_type, payload)]
+
+        # Render mermaid code blocks to PNG images
+        content = await self._upload_mermaid_images(content)
 
         # Check if splitting is needed
         single_payload = _build_markdown_card_payload(content)
