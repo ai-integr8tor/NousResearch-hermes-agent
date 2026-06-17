@@ -5050,3 +5050,76 @@ class TestChatLockEviction(unittest.TestCase):
                 held.release()
 
         asyncio.run(_run())
+
+
+class TestMermaidRendering(unittest.TestCase):
+    """Mermaid rendering uses a LOCAL renderer (mmdc) and falls back to a
+    code block when it is unavailable — it must never reach out to an
+    external rendering service."""
+
+    def test_extract_finds_mermaid_block_in_prose(self):
+        """The closing fence is matched across a multi-line remainder, so a
+        mermaid block embedded in prose is extracted (regression: the close
+        regex lacked MULTILINE and never matched -> blocks always empty)."""
+        import gateway.platforms.feishu as feishu_mod
+        content = "intro\n```mermaid\ngraph TD\n    A-->B\n```\noutro"
+        blocks = feishu_mod._extract_mermaid_blocks(content)
+        self.assertEqual(len(blocks), 1)
+        code, start, end = blocks[0]
+        self.assertIn("A-->B", code)
+        self.assertEqual(content[start:end].count("```mermaid"), 1)
+
+    def test_falls_back_to_external_when_local_unavailable(self):
+        """When the local renderer (mmdc) is missing, rendering falls back to
+        the external mermaid.ink service so Docker / minimal hosts still get
+        a diagram instead of a bare code block."""
+        import gateway.platforms.feishu as feishu_mod
+        with patch("shutil.which", return_value=None), \
+             patch("urllib.request.urlopen") as mock_urlopen:
+            mock_urlopen.return_value.__enter__.return_value.read.return_value = b"x" * 200
+            result = feishu_mod._render_mermaid_to_png("graph TD\nA-->B\n", allow_external=True)
+        self.assertIsNotNone(result)
+        mock_urlopen.assert_called()
+
+    def test_no_external_call_when_fallback_disabled(self):
+        """When the external fallback is disabled, a missing local renderer
+        yields None with zero network calls (privacy-strict mode)."""
+        import gateway.platforms.feishu as feishu_mod
+        with patch("shutil.which", return_value=None), \
+             patch("urllib.request.urlopen") as mock_urlopen:
+            result = feishu_mod._render_mermaid_to_png("graph TD\nA-->B\n", allow_external=False)
+        self.assertIsNone(result)
+        mock_urlopen.assert_not_called()
+
+    def test_mermaid_block_preserved_when_render_unavailable(self):
+        """When rendering yields nothing, the ```mermaid block is left
+        intact so it falls back to a syntax-highlighted code block."""
+        import gateway.platforms.feishu as feishu_mod
+        content = "intro\n```mermaid\ngraph TD\nA-->B\n```\noutro"
+        adapter = object.__new__(feishu_mod.FeishuAdapter)
+        adapter._client = Mock()
+        adapter._mermaid_external_fallback = True
+        with patch.object(feishu_mod, "_render_mermaid_to_png", return_value=None):
+            result = asyncio.run(adapter._upload_mermaid_images(content))
+        self.assertEqual(result, content)
+
+
+class TestCardTableSplitting(unittest.TestCase):
+    """Each card is a single 富文本/markdown element, which Feishu limits
+    to 4 GFM (Markdown) tables (official doc §三.1 / §二).  Oversized
+    content must split so no card carries more than 4 tables."""
+
+    def test_splits_when_more_than_four_markdown_tables(self):
+        import gateway.platforms.feishu as feishu_mod
+        # 5 small GFM tables — exceeds the 4-tables-per-element limit.
+        content = "\n\n".join(
+            f"| h{i}a | h{i}b |\n|---|---|\n| d{i}1 | d{i}2 |" for i in range(5)
+        )
+        blocks = feishu_mod._split_markdown_blocks(content)
+        cards = feishu_mod._pack_blocks_into_cards(blocks)
+        self.assertGreaterEqual(len(cards), 2)
+        for card in cards:
+            self.assertLessEqual(
+                feishu_mod._count_gfm_tables(card), 4,
+                "a card must not carry more than 4 GFM tables",
+            )

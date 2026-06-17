@@ -163,6 +163,9 @@ _MARKDOWN_FENCE_CLOSE_RE = re.compile(r"^```\s*$")
 
 # Mermaid code block detection
 _MERMAID_BLOCK_RE = re.compile(r"^```mermaid\s*$", re.MULTILINE)
+# Closing fence scanned across a multi-line remainder (must be MULTILINE so
+# ``^```` matches at each line start, not just the very beginning of the text).
+_MERMAID_CLOSE_RE = re.compile(r"^```\s*$", re.MULTILINE)
 
 
 def _count_gfm_tables(content: str) -> int:
@@ -173,9 +176,11 @@ def _count_gfm_tables(content: str) -> int:
 # Max interactive card JSON size (bytes); Feishu hard limit is 30 KB.
 _MAX_CARD_JSON_BYTES = 30 * 1024
 
-# Feishu card limits (per card): max GFM + native tables combined.
-_MAX_TABLES_PER_CARD = 5
-_MAX_TABLES_PER_ELEMENT = 4  # GFM tables per single markdown element
+# Feishu limits a single 富文本/markdown element to 4 GFM (Markdown) tables
+# (official card docs §三.1).  Each card we send is exactly one such element,
+# so this is also the per-card table limit.  (The docs' "5 tables per card"
+# applies to the native ``tag:"table"`` component, which this path does not use.)
+_MAX_TABLES_PER_ELEMENT = 4
 _MENTION_RE = re.compile(r"@_user_\d+")
 _MULTISPACE_RE = re.compile(r"[ \t]{2,}")
 _POST_CONTENT_INVALID_RE = re.compile(r"content format of the post type is incorrect", re.IGNORECASE)
@@ -835,7 +840,7 @@ def _pack_blocks_into_cards(blocks: list[_MarkdownBlock]) -> list[str]:
         new_size = current_size + block_bytes + 2  # +2 for "\n\n"
         new_tables = current_tables + block.table_count
 
-        if new_size > budget or new_tables > _MAX_TABLES_PER_CARD:
+        if new_size > budget or new_tables > _MAX_TABLES_PER_ELEMENT:
             _flush()
 
         current_blocks.append(block)
@@ -847,7 +852,7 @@ def _pack_blocks_into_cards(blocks: list[_MarkdownBlock]) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Mermaid rendering: code blocks → transparent PNG via mermaid.ink
+# Mermaid rendering: code blocks → transparent PNG via the local mmdc CLI
 # ---------------------------------------------------------------------------
 
 def _extract_mermaid_blocks(content: str) -> list[tuple[str, int, int]]:
@@ -858,7 +863,7 @@ def _extract_mermaid_blocks(content: str) -> list[tuple[str, int, int]]:
     """
     results: list[tuple[str, int, int]] = []
     open_re = _MERMAID_BLOCK_RE
-    close_re = _MARKDOWN_FENCE_CLOSE_RE
+    close_re = _MERMAID_CLOSE_RE
     for m in open_re.finditer(content):
         start = m.start()
         rest = content[m.end():]
@@ -870,46 +875,101 @@ def _extract_mermaid_blocks(content: str) -> list[tuple[str, int, int]]:
     return results
 
 
-def _render_mermaid_to_png(mermaid_code: str) -> Optional[bytes]:
-    """Render a mermaid diagram to transparent-background PNG bytes.
+# mmdc config: transparent theme background + natural (non-stretched) sizing
+# so rendered diagrams sit cleanly on the card instead of in a white box.
+_MERMAID_MMDC_CONFIG = {
+    "theme": "default",
+    "themeVariables": {"background": "transparent"},
+    "flowchart": {"useMaxWidth": False},
+    "sequence": {"useMaxWidth": False},
+    "gantt": {"useMaxWidth": False},
+}
 
-    Flow: base64 → mermaid.ink ?type=png → Pillow de-white-background.
-    Returns PNG bytes on success, None on failure.
+
+def _render_mermaid_local(mermaid_code: str) -> Optional[bytes]:
+    """Render via the local ``mmdc`` (mermaid-cli) CLI.
+
+    mermaid-cli drives a headless browser via puppeteer-core, which does not
+    bundle Chromium, so a Chrome/Chromium must be present.  Returns
+    transparent PNG bytes, or ``None`` when mmdc/browser is unavailable or
+    rendering fails.
     """
-    import urllib.request
+    import json as _json
+    import shutil
+    import subprocess
+    import tempfile
+
+    mmdc = shutil.which("mmdc")
+    if not mmdc:
+        return None
+
+    render_env = os.environ.copy()
+    browser = render_env.get("PUPPETEER_EXECUTABLE_PATH") or next(
+        (shutil.which(name) for name in ("chromium", "google-chrome-stable", "google-chrome", "chrome") if shutil.which(name)),
+        None,
+    )
+    if browser:
+        render_env["PUPPETEER_EXECUTABLE_PATH"] = browser
+
+    with tempfile.TemporaryDirectory() as tmp:
+        mmd_path = os.path.join(tmp, "diagram.mmd")
+        cfg_path = os.path.join(tmp, "config.json")
+        png_path = os.path.join(tmp, "diagram.png")
+        try:
+            with open(mmd_path, "w", encoding="utf-8") as fh:
+                fh.write(mermaid_code)
+            with open(cfg_path, "w", encoding="utf-8") as fh:
+                _json.dump(_MERMAID_MMDC_CONFIG, fh)
+            subprocess.run(
+                [mmdc, "-i", mmd_path, "-o", png_path, "-b", "transparent",
+                 "-c", cfg_path, "-s", "2", "-q"],
+                capture_output=True, timeout=30, check=True, env=render_env,
+            )
+            with open(png_path, "rb") as fh:
+                data = fh.read()
+            return data or None
+        except (subprocess.SubprocessError, OSError) as exc:
+            logger.warning("[Feishu] local mmdc render failed: %s", exc)
+            return None
+
+
+def _render_mermaid_via_ink(mermaid_code: str) -> Optional[bytes]:
+    """Fallback renderer using the external ``mermaid.ink`` service.
+
+    Used when no local browser is available (e.g. Docker / minimal hosts) so
+    diagrams still render.  Returns PNG bytes or ``None``.
+    """
     import base64 as _base64
+    import urllib.request
 
     try:
         encoded = _base64.urlsafe_b64encode(mermaid_code.encode("utf-8")).decode("ascii")
-        url = f"https://mermaid.ink/img/{encoded}?type=png"
+        url = f"https://mermaid.ink/img/{encoded}?type=png&bg=transparent"
         req = urllib.request.Request(url, headers={"User-Agent": "Hermes/1.0"})
         with urllib.request.urlopen(req, timeout=15) as resp:
-            png_bytes = resp.read()
-        if len(png_bytes) < 100:
-            return None
-
-        # Remove white background: white pixels → transparent
-        try:
-            import io as _img_io
-            from PIL import Image
-            img = Image.open(_img_io.BytesIO(png_bytes)).convert("RGBA")
-            datas = img.getdata()
-            new_datas = []
-            for r, g, b, a in datas:
-                if r > 240 and g > 240 and b > 240:
-                    new_datas.append((255, 255, 255, 0))
-                else:
-                    new_datas.append((r, g, b, a))
-            img.putdata(new_datas)
-            buf = _img_io.BytesIO()
-            img.save(buf, format="PNG")
-            return buf.getvalue()
-        except ImportError:
-            # Pillow not available — return original PNG (white background)
-            return png_bytes
+            data = resp.read()
+        return data if len(data) >= 100 else None
     except Exception as exc:
         logger.warning("[Feishu] mermaid.ink render failed: %s", exc)
         return None
+
+
+def _render_mermaid_to_png(mermaid_code: str, allow_external: bool = True) -> Optional[bytes]:
+    """Render a mermaid diagram to a transparent PNG.
+
+    Strategy (robust across hosts): try the **local** mmdc renderer first
+    (private, needs a Chromium/Chrome browser); if it is unavailable — common
+    in Docker or minimal hosts — fall back to the **external** mermaid.ink
+    service when *allow_external* is set.  Returns ``None`` only when both
+    fail, in which case callers keep the ```mermaid block as a code block.
+    """
+    png = _render_mermaid_local(mermaid_code)
+    if png is not None:
+        return png
+    if allow_external:
+        logger.info("[Feishu] local mermaid render unavailable; falling back to mermaid.ink")
+        return _render_mermaid_via_ink(mermaid_code)
+    return None
 
 
 
@@ -1785,6 +1845,13 @@ class FeishuAdapter(BasePlatformAdapter):
         # Default True; set ``feishu_interactive_cards: false`` in platform extras
         # to fall back to the legacy text/post behavior.
         self._use_interactive_cards = bool((config.extra or {}).get("feishu_interactive_cards", True))
+        # Mermaid diagrams render to PNG: local mmdc first (private), then fall
+        # back to the external mermaid.ink service when no local browser is
+        # available (Docker / minimal hosts).  Set
+        # ``feishu_mermaid_external_fallback: false`` to forbid the external call.
+        self._mermaid_external_fallback = bool(
+            (config.extra or {}).get("feishu_mermaid_external_fallback", True)
+        )
         self._client: Optional[Any] = None
         self._ws_client: Optional[Any] = None
         self._ws_future: Optional[asyncio.Future] = None
@@ -4774,7 +4841,12 @@ class FeishuAdapter(BasePlatformAdapter):
 
         # Process from end to start so offsets stay valid
         for mermaid_code, start, end in reversed(blocks):
-            png_bytes = _render_mermaid_to_png(mermaid_code)
+            # mmdc rendering is a (potentially slow) subprocess — run it off
+            # the event loop so a stuck/absent renderer never stalls the
+            # gateway.  On None the block is left intact (code-block fallback).
+            png_bytes = await asyncio.to_thread(
+                _render_mermaid_to_png, mermaid_code, self._mermaid_external_fallback,
+            )
             if png_bytes is None:
                 continue
 
@@ -4822,7 +4894,7 @@ class FeishuAdapter(BasePlatformAdapter):
         table_count = _count_gfm_tables(content)
 
         if (len(single_payload.encode("utf-8")) <= _MAX_CARD_JSON_BYTES
-                and table_count <= _MAX_TABLES_PER_CARD):
+                and table_count <= _MAX_TABLES_PER_ELEMENT):
             return [("interactive", single_payload)]
 
         # Split into blocks and pack into cards
