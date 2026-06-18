@@ -1107,7 +1107,7 @@ class MattermostAdapter(BasePlatformAdapter):
 
         action_id = secrets.token_urlsafe(16)
         actions = [
-            self._make_button(f"clarify{i}", choice[:20], action_id, {"choice_index": i})
+            self._make_button(f"clarify{i}", choice[:75], action_id, {"choice_index": i})
             for i, choice in enumerate(clean_choices)
         ]
         actions.append(
