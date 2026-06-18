@@ -102,7 +102,7 @@ import {
 import { onSessionsChanged } from '../store/session-sync'
 import { clearSessionTodos, setSessionTodos, todoListActive } from '../store/todos'
 import { openUpdatesWindow, startUpdatePoller, stopUpdatePoller } from '../store/updates'
-import { isSecondaryWindow } from '../store/windows'
+import { isSecondaryWindow, secondaryWindowProfile } from '../store/windows'
 
 import { ChatView } from './chat'
 import { requestComposerFocus, requestComposerInsert } from './chat/composer/focus'
@@ -241,6 +241,7 @@ export function DesktopController() {
   const narrowViewport = useMediaQuery(SIDEBAR_COLLAPSE_MEDIA_QUERY)
 
   const routedSessionId = routeSessionId(location.pathname)
+  const routedSessionProfile = secondaryWindowProfile()
   const routeToken = `${location.pathname}:${location.search}:${location.hash}`
   const routeTokenRef = useRef(routeToken)
   routeTokenRef.current = routeToken
@@ -1047,6 +1048,7 @@ export function DesktopController() {
     resumeSession,
     resumeFailedSessionId,
     resumeExhaustedSessionId,
+    routeProfile: routedSessionProfile,
     routedSessionId,
     runtimeIdByStoredSessionIdRef,
     selectedStoredSessionId,

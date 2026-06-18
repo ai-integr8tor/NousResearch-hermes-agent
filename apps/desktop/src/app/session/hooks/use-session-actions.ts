@@ -267,11 +267,29 @@ function upsertResolvedSession(session: SessionInfo, storedSessionId: string) {
   ])
 }
 
-async function resolveStoredSession(storedSessionId: string): Promise<SessionInfo | undefined> {
+async function resolveStoredSession(
+  storedSessionId: string,
+  profileHint?: string | null
+): Promise<SessionInfo | undefined> {
   const cached = $sessions.get().find(session => sessionMatchesStoredId(session, storedSessionId))
 
   if (cached) {
     return cached
+  }
+
+  const hintedProfile = profileHint?.trim() ? normalizeProfileKey(profileHint) : ''
+
+  if (hintedProfile) {
+    try {
+      const session = await getSession(storedSessionId, hintedProfile)
+
+      upsertResolvedSession(session, storedSessionId)
+
+      return session
+    } catch {
+      // The hint came from the launch URL; if it is stale, keep the existing
+      // active/cross-profile fallback so old windows still have a chance to load.
+    }
   }
 
   // Direct by-id on the live backend — one row lookup, no list scan. Covers
@@ -295,7 +313,7 @@ async function resolveStoredSession(storedSessionId: string): Promise<SessionInf
   const otherProfiles = $profiles
     .get()
     .map(profile => normalizeProfileKey(profile.name))
-    .filter(key => key !== activeKey)
+    .filter(key => key !== activeKey && key !== hintedProfile)
 
   for (const profile of otherProfiles) {
     try {
@@ -598,7 +616,7 @@ export function useSessionActions({
   }, [navigate, selectedStoredSessionId])
 
   const resumeSession = useCallback(
-    async (storedSessionId: string, replaceRoute = false) => {
+    async (storedSessionId: string, replaceRoute = false, profileHint?: string | null) => {
       const requestId = resumeRequestRef.current + 1
       resumeRequestRef.current = requestId
 
@@ -639,8 +657,8 @@ export function useSessionActions({
       // gateway call (no-op when it's already on that profile / single-profile).
       // resolveStoredSession finds the row by id (cheap), so an uncached pasted
       // id loads as fast as a sidebar click instead of hanging on a list scan.
-      const storedForProfile = await resolveStoredSession(storedSessionId)
-      const sessionProfile = storedForProfile?.profile
+      const storedForProfile = await resolveStoredSession(storedSessionId, profileHint)
+      const sessionProfile = storedForProfile?.profile ?? (profileHint?.trim() ? normalizeProfileKey(profileHint) : undefined)
 
       if (resumeRequestRef.current !== requestId) {
         return
