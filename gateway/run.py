@@ -8595,9 +8595,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     if _echo_adapter:
                         for _tx in _successful_transcripts:
                             try:
+                                _echo_text = _tx if _tx.startswith("🎙️") else f'🎙️ "{_tx}"'
                                 await _echo_adapter.send(
                                     source.chat_id,
-                                    f'🎙️ "{_tx}"',
+                                    _echo_text,
                                     metadata=_echo_meta,
                                 )
                             except Exception as _echo_exc:
@@ -12861,11 +12862,29 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 result = await asyncio.to_thread(transcribe_audio, path)
                 if result["success"]:
                     transcript = result["transcript"]
-                    successful_transcripts.append(transcript)
-                    enriched_parts.append(
-                        f'[The user sent a voice message~ '
-                        f'Here\'s what they said: "{transcript}"]'
-                    )
+                    fallback_from = result.get("fallback_from")
+                    if fallback_from:
+                        fallback_reason = str(result.get("fallback_reason", "unknown error"))
+                        if len(fallback_reason) > 240:
+                            fallback_reason = fallback_reason[:237] + "..."
+                        provider_used = result.get("provider", "local")
+                        successful_transcripts.append(
+                            f'🎙️ "{transcript}"\n\n'
+                            f'⚠️ STT fallback: {fallback_from} failed, so Hermes used '
+                            f'{provider_used} / faster-whisper. Reason: {fallback_reason}'
+                        )
+                        enriched_parts.append(
+                            f'[The user sent a voice message~ '
+                            f'Here\'s what they said: "{transcript}". '
+                            f'STT note: {fallback_from} failed, so Hermes fell back to '
+                            f'{provider_used} / faster-whisper. Reason: {fallback_reason}]'
+                        )
+                    else:
+                        successful_transcripts.append(transcript)
+                        enriched_parts.append(
+                            f'[The user sent a voice message~ '
+                            f'Here\'s what they said: "{transcript}"]'
+                        )
                 else:
                     error = result.get("error", "unknown error")
                     if (
