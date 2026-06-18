@@ -807,6 +807,7 @@ class MattermostAdapter(BasePlatformAdapter):
         actions: List[Dict[str, Any]],
         pending: Dict[str, Any],
         log_label: str,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
         """Post an interactive-button attachment and register the pending action.
 
@@ -814,10 +815,15 @@ class MattermostAdapter(BasePlatformAdapter):
         their ``actions`` list, then delegate here.  ``pending`` is stored in
         ``_pending_actions`` only after the post is confirmed live, so a failed
         post cannot leave a dangling registry entry.
+
+        When ``reply_mode`` is ``"thread"`` and ``metadata`` carries a
+        ``thread_id`` or ``root_id``, the prompt is posted inside the thread so
+        users see the approval request in context rather than as a separate
+        channel-level message.
         """
         if not self._buttons_enabled():
             return SendResult(success=False, error="Mattermost callback server not running")
-        payload = {
+        payload: Dict[str, Any] = {
             "channel_id": chat_id,
             "message": message,
             "props": {"attachments": [{
@@ -827,6 +833,9 @@ class MattermostAdapter(BasePlatformAdapter):
                 "actions": actions,
             }]},
         }
+        root_id = await self._thread_root_for_send(None, metadata)
+        if root_id:
+            payload["root_id"] = root_id
         try:
             resp = await self._api_post("posts", payload)
             post_id = resp.get("id", "") if isinstance(resp, dict) else ""
@@ -1003,6 +1012,7 @@ class MattermostAdapter(BasePlatformAdapter):
             action_id=action_id, actions=actions,
             pending={"kind": "approval", "session_key": session_key},
             log_label="send_exec_approval",
+            metadata=metadata,
         )
 
     async def send_slash_confirm(
@@ -1028,6 +1038,7 @@ class MattermostAdapter(BasePlatformAdapter):
             action_id=action_id, actions=actions,
             pending={"kind": "slash", "session_key": session_key, "confirm_id": confirm_id, "channel_id": chat_id},
             log_label="send_slash_confirm",
+            metadata=metadata,
         )
 
     async def send_update_prompt(
@@ -1051,6 +1062,7 @@ class MattermostAdapter(BasePlatformAdapter):
             action_id=action_id, actions=actions,
             pending={"kind": "update"},
             log_label="send_update_prompt",
+            metadata=metadata,
         )
 
     async def send_clarify(
@@ -1077,10 +1089,14 @@ class MattermostAdapter(BasePlatformAdapter):
             # Open-ended: post plain text; the gateway text-intercept captures
             # the user's reply and resolves the clarify automatically.
             try:
-                resp = await self._api_post("posts", {
+                open_payload: Dict[str, Any] = {
                     "channel_id": chat_id,
                     "message": f"\u2753 {question}\n\nReply in this channel with your answer.",
-                })
+                }
+                root_id = await self._thread_root_for_send(None, metadata)
+                if root_id:
+                    open_payload["root_id"] = root_id
+                resp = await self._api_post("posts", open_payload)
                 post_id = resp.get("id", "") if isinstance(resp, dict) else ""
                 if not post_id:
                     return SendResult(success=False, error="Mattermost API returned no post_id")
@@ -1103,6 +1119,7 @@ class MattermostAdapter(BasePlatformAdapter):
             action_id=action_id, actions=actions,
             pending={"kind": "clarify", "clarify_id": clarify_id, "choices": clean_choices},
             log_label="send_clarify",
+            metadata=metadata,
         )
 
     async def _lookup_username(self, user_id: str) -> str:
