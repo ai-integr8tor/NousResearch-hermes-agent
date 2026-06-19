@@ -81,6 +81,7 @@ _VALID_WEBHOOK_EVENTS = {
     "participant-removed",
 }
 _DEDUP_TTL_SECONDS = 60.0
+_CONTENT_DEDUP_TTL_SECONDS = 3.0
 _DEDUP_MAX_ENTRIES = 1000
 # Log redaction patterns
 _PHONE_RE = re.compile(r"\+?\d{7,15}")
@@ -365,11 +366,12 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         for key in keys:
             if not key:
                 continue
+            ttl = _CONTENT_DEDUP_TTL_SECONDS if key.startswith("recent:") else _DEDUP_TTL_SECONDS
             if key in self._seen_inbound_messages:
                 seen_at = self._seen_inbound_messages[key]
                 self._seen_inbound_messages.move_to_end(key)
                 self._seen_inbound_messages[key] = now
-                duplicate = duplicate or (now - seen_at <= _DEDUP_TTL_SECONDS)
+                duplicate = duplicate or (now - seen_at <= ttl)
             else:
                 self._seen_inbound_messages[key] = now
 

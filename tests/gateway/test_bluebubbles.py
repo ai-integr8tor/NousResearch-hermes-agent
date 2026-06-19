@@ -8,6 +8,33 @@ from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import MessageEvent
 
 
+_BLUEBUBBLES_ENV_VARS = (
+    "BLUEBUBBLES_API_URL",
+    "BLUEBUBBLES_AUTO_REACT",
+    "BLUEBUBBLES_AUTO_REACT_TYPE",
+    "BLUEBUBBLES_HOME_CHANNEL",
+    "BLUEBUBBLES_MENTION_PATTERNS",
+    "BLUEBUBBLES_PASSWORD",
+    "BLUEBUBBLES_PUBLIC_URL",
+    "BLUEBUBBLES_REQUIRE_MENTION",
+    "BLUEBUBBLES_SEND_READ_RECEIPTS",
+    "BLUEBUBBLES_SERVER_URL",
+    "BLUEBUBBLES_TYPING_INDICATORS",
+    "BLUEBUBBLES_WEBHOOK_EVENTS",
+    "BLUEBUBBLES_WEBHOOK_HOST",
+    "BLUEBUBBLES_WEBHOOK_PATH",
+    "BLUEBUBBLES_WEBHOOK_PORT",
+    "BLUEBUBBLES_WEBHOOK_URL",
+)
+
+
+@pytest.fixture(autouse=True)
+def clean_bluebubbles_env(monkeypatch):
+    """Keep developer machine BlueBubbles settings from leaking into tests."""
+    for name in _BLUEBUBBLES_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+
+
 def _make_adapter(monkeypatch, **extra):
     monkeypatch.setenv("BLUEBUBBLES_SERVER_URL", "http://localhost:1234")
     monkeypatch.setenv("BLUEBUBBLES_PASSWORD", "secret")
@@ -595,6 +622,49 @@ class TestBlueBubblesWebhookHandling:
         assert first.text == "ok"
         assert second.text == "ok"
         assert handled == [("same text", "any;-;+155****4567")]
+
+    @pytest.mark.asyncio
+    async def test_repeated_same_text_after_short_fallback_window_is_processed(self, monkeypatch):
+        adapter = _make_adapter(monkeypatch, webhook_events=["new-message"], send_read_receipts=False)
+        handled = []
+        current_time = 100.0
+
+        async def fake_handle_message(event):
+            handled.append((event.text, event.message_id))
+
+        def fake_monotonic():
+            return current_time
+
+        monkeypatch.setattr(adapter, "handle_message", fake_handle_message)
+        monkeypatch.setattr("gateway.platforms.bluebubbles.time.monotonic", fake_monotonic)
+
+        first_payload = {
+            "type": "new-message",
+            "data": {
+                "guid": "msg-guid-a",
+                "text": "yes",
+                "handle": {"address": "+155****4567"},
+                "isFromMe": False,
+                "chatIdentifier": "+155****4567",
+            },
+        }
+        second_payload = {
+            "type": "new-message",
+            "data": {
+                "guid": "msg-guid-b",
+                "text": "yes",
+                "handle": {"address": "+155****4567"},
+                "isFromMe": False,
+                "chatIdentifier": "+155****4567",
+            },
+        }
+
+        await adapter._handle_webhook(_FakeBlueBubblesRequest(first_payload))
+        current_time += 4.0
+        await adapter._handle_webhook(_FakeBlueBubblesRequest(second_payload))
+        await asyncio.sleep(0)
+
+        assert handled == [("yes", "msg-guid-a"), ("yes", "msg-guid-b")]
 
 
 class TestBlueBubblesWebhookParsing:
