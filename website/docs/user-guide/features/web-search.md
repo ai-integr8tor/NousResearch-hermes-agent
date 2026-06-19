@@ -24,6 +24,7 @@ Both are configured through a single backend selection. Providers are chosen via
 | **DDGS (DuckDuckGo)** | — (no key) | ✔ | — | ✔ Free |
 | **Tavily** | `TAVILY_API_KEY` | ✔ | ✔ | 1 000 searches/mo |
 | **Exa** | `EXA_API_KEY` | ✔ | ✔ | 1 000 searches/mo |
+| **Keenable** | `KEENABLE_API_KEY` | ✔ | ✔ | Free tier (rate-limited) |
 | **Parallel** | `PARALLEL_API_KEY` | ✔ | ✔ | Paid |
 | **xAI (Grok)** | `XAI_API_KEY` or `hermes auth login xai-oauth` | ✔ | — | Paid (SuperGrok or per-token) |
 
@@ -261,6 +262,19 @@ Get a key at [exa.ai](https://exa.ai). The free tier includes 1 000 searches/mon
 
 ---
 
+### Keenable
+
+Low-latency web search and page-to-markdown fetch built for agents. Search and extract run against the documented REST API (`GET /v1/search`, `GET /v1/fetch`).
+
+```bash
+# ~/.hermes/.env
+KEENABLE_API_KEY=your-keenable-key-here
+```
+
+Get a key at [keenable.ai/signup](https://keenable.ai/signup). A free tier works without a key (rate-limited); the provider requires `KEENABLE_API_KEY` to be set.
+
+---
+
 ### Parallel
 
 AI-native search and extraction with deep research capabilities.
@@ -361,6 +375,7 @@ If no backend is explicitly configured, Hermes picks the first available one bas
 | `PARALLEL_API_KEY` | parallel |
 | `TAVILY_API_KEY` | tavily |
 | `EXA_API_KEY` | exa |
+| `KEENABLE_API_KEY` | keenable |
 | `SEARXNG_URL` | searxng |
 
 xAI Web Search is **not** in the auto-detection chain — having `XAI_API_KEY` set (or being signed in via xAI Grok OAuth) does not automatically route web traffic through xAI, since those credentials are also used for inference / TTS / image gen and the user may want a different backend for web. Opt in explicitly with `web.backend: "xai"`.
