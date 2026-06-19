@@ -46,8 +46,7 @@ By default, Hermes responds to every authorized BlueBubbles/iMessage DM or group
 platforms:
   bluebubbles:
     enabled: true
-    extra:
-      require_mention: true
+    require_mention: true
 ```
 
 With `require_mention: true`, DMs still work normally, but group-chat messages are ignored unless they match a mention pattern. If you do not configure custom patterns, Hermes uses conservative defaults for `Hermes` and `@Hermes agent` variants.
@@ -57,10 +56,43 @@ For a custom agent name, set regex patterns:
 ```yaml
 platforms:
   bluebubbles:
-    extra:
-      require_mention: true
-      mention_patterns:
-        - '(?<![\w@])@?amos\b[,:\-]?'
+    require_mention: true
+    mention_patterns:
+      - '(?<![\w@])@?amos\b[,:\-]?'
+```
+
+#### Optional: Tune iMessage reply UX
+
+BlueBubbles works best with lightweight native iMessage cues instead of extra progress bubbles. Configure the iMessage-specific behavior under `platforms.bluebubbles`:
+
+```yaml
+platforms:
+  bluebubbles:
+    enabled: true
+    # React to inbound messages when Hermes starts processing them.
+    auto_react: true
+    auto_react_type: like
+
+    # Keep final replies in one iMessage bubble unless the message exceeds
+    # the platform length limit. Set true to split paragraphs into bubbles.
+    split_paragraph_replies: false
+
+    # BlueBubbles typing indicators can get stuck, so they default off.
+    typing_indicators: false
+
+    # Mark inbound iMessages read after processing.
+    send_read_receipts: true
+```
+
+Advanced webhook behavior can also be configured here without using `extra`:
+
+```yaml
+platforms:
+  bluebubbles:
+    webhook_host: 127.0.0.1
+    webhook_port: 8645
+    webhook_path: /bluebubbles-webhook
+    webhook_events: [new-message, updated-message]
 ```
 
 ### 4. Authorize Users
@@ -74,15 +106,17 @@ hermes pairing approve bluebubbles <CODE>
 ```
 Use `hermes pairing list` to see pending codes and approved users.
 
-**Pre-authorize specific users** (in `~/.hermes/.env`):
+**Pre-authorize specific users** (legacy env allowlist):
 ```bash
-BLUEBUBBLES_ALLOWED_USERS=user@icloud.com,+15551234567
+BLUEBUBBLES_ALLOWED_USERS=user@icloud.com,+155****4567
 ```
 
-**Open access** (in `~/.hermes/.env`):
+**Open access** (legacy env escape hatch):
 ```bash
 BLUEBUBBLES_ALLOW_ALL_USERS=true
 ```
+
+Prefer DM pairing over static env allowlists when possible.
 
 ### 5. Start the Gateway
 
@@ -109,16 +143,16 @@ Hermes → BlueBubbles REST API → Messages.app → iMessage
 |----------|----------|---------|-------------|
 | `BLUEBUBBLES_SERVER_URL` | Yes | — | BlueBubbles server URL |
 | `BLUEBUBBLES_PASSWORD` | Yes | — | Server password |
-| `BLUEBUBBLES_WEBHOOK_HOST` | No | `127.0.0.1` | Webhook listener bind address |
-| `BLUEBUBBLES_WEBHOOK_PORT` | No | `8645` | Webhook listener port |
-| `BLUEBUBBLES_WEBHOOK_PATH` | No | `/bluebubbles-webhook` | Webhook URL path |
+| `BLUEBUBBLES_WEBHOOK_HOST` | Legacy | `127.0.0.1` | Webhook listener bind address; prefer `platforms.bluebubbles.webhook_host` |
+| `BLUEBUBBLES_WEBHOOK_PORT` | Legacy | `8645` | Webhook listener port; prefer `platforms.bluebubbles.webhook_port` |
+| `BLUEBUBBLES_WEBHOOK_PATH` | Legacy | `/bluebubbles-webhook` | Webhook URL path; prefer `platforms.bluebubbles.webhook_path` |
 | `BLUEBUBBLES_HOME_CHANNEL` | No | — | Phone/email for cron delivery |
-| `BLUEBUBBLES_ALLOWED_USERS` | No | — | Comma-separated authorized users |
-| `BLUEBUBBLES_ALLOW_ALL_USERS` | No | `false` | Allow all users |
-| `BLUEBUBBLES_REQUIRE_MENTION` | No | `false` | Require a mention pattern before responding in group chats |
-| `BLUEBUBBLES_MENTION_PATTERNS` | No | Hermes wake words | JSON array, newline-separated, or comma-separated regex patterns for group mention matching |
+| `BLUEBUBBLES_ALLOWED_USERS` | Legacy | — | Comma-separated authorized users; prefer DM pairing |
+| `BLUEBUBBLES_ALLOW_ALL_USERS` | Legacy | `false` | Allow all users; prefer DM pairing or explicit approval |
+| `BLUEBUBBLES_REQUIRE_MENTION` | Legacy | `false` | Require a mention pattern before responding in group chats; prefer `platforms.bluebubbles.require_mention` |
+| `BLUEBUBBLES_MENTION_PATTERNS` | Legacy | Hermes wake words | JSON array, newline-separated, or comma-separated regex patterns; prefer `platforms.bluebubbles.mention_patterns` |
 
-Auto-marking messages as read is controlled by the `send_read_receipts` key under `platforms.bluebubbles.extra` in `~/.hermes/config.yaml` (default: `true`). There is no corresponding environment variable.
+Prefer `~/.hermes/config.yaml` for non-secret BlueBubbles behavior such as `auto_react`, `split_paragraph_replies`, `typing_indicators`, `send_read_receipts`, `webhook_events`, and webhook listener settings. `BLUEBUBBLES_SERVER_URL` and `BLUEBUBBLES_PASSWORD` should remain in `~/.hermes/.env` because they are connection credentials.
 
 ## Features
 

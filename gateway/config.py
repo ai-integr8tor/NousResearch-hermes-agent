@@ -1020,6 +1020,20 @@ def load_gateway_config() -> GatewayConfig:
                         bridged["channel_prompts"] = channel_prompts
                 if "gateway_restart_notification" in platform_cfg:
                     bridged["gateway_restart_notification"] = platform_cfg["gateway_restart_notification"]
+                if plat == Platform.BLUEBUBBLES:
+                    for key in (
+                        "auto_react",
+                        "auto_react_type",
+                        "send_read_receipts",
+                        "split_paragraph_replies",
+                        "typing_indicators",
+                        "webhook_events",
+                        "webhook_host",
+                        "webhook_path",
+                        "webhook_port",
+                    ):
+                        if key in platform_cfg:
+                            bridged[key] = platform_cfg[key]
                 enabled_was_explicit = _cfg_toplevel and "enabled" in platform_cfg
                 if not bridged and not enabled_was_explicit:
                     continue
@@ -1912,14 +1926,23 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
         if Platform.BLUEBUBBLES not in config.platforms:
             config.platforms[Platform.BLUEBUBBLES] = PlatformConfig()
         config.platforms[Platform.BLUEBUBBLES].enabled = True
-        config.platforms[Platform.BLUEBUBBLES].extra.update({
+        extra = config.platforms[Platform.BLUEBUBBLES].extra
+        extra.update({
             "server_url": bluebubbles_server_url.rstrip("/"),
             "password": bluebubbles_password,
-            "webhook_host": os.getenv("BLUEBUBBLES_WEBHOOK_HOST", "127.0.0.1"),
-            "webhook_port": int(os.getenv("BLUEBUBBLES_WEBHOOK_PORT", "8645")),
-            "webhook_path": os.getenv("BLUEBUBBLES_WEBHOOK_PATH", "/bluebubbles-webhook"),
-            "send_read_receipts": os.getenv("BLUEBUBBLES_SEND_READ_RECEIPTS", "true").lower() in {"true", "1", "yes"},
         })
+        if "webhook_host" not in extra or os.getenv("BLUEBUBBLES_WEBHOOK_HOST"):
+            extra["webhook_host"] = os.getenv("BLUEBUBBLES_WEBHOOK_HOST", "127.0.0.1")
+        if "webhook_port" not in extra or os.getenv("BLUEBUBBLES_WEBHOOK_PORT"):
+            extra["webhook_port"] = int(os.getenv("BLUEBUBBLES_WEBHOOK_PORT", "8645"))
+        if "webhook_path" not in extra or os.getenv("BLUEBUBBLES_WEBHOOK_PATH"):
+            extra["webhook_path"] = os.getenv("BLUEBUBBLES_WEBHOOK_PATH", "/bluebubbles-webhook")
+        bluebubbles_send_read_receipts = os.getenv("BLUEBUBBLES_SEND_READ_RECEIPTS")
+        if bluebubbles_send_read_receipts is not None or "send_read_receipts" not in extra:
+            extra["send_read_receipts"] = (
+                (bluebubbles_send_read_receipts or "true").lower()
+                in {"true", "1", "yes", "on"}
+            )
         bluebubbles_require_mention = os.getenv("BLUEBUBBLES_REQUIRE_MENTION")
         if bluebubbles_require_mention is not None:
             config.platforms[Platform.BLUEBUBBLES].extra["require_mention"] = (
