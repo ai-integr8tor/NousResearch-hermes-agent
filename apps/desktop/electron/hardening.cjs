@@ -1,4 +1,5 @@
 const fs = require('node:fs')
+const net = require('node:net')
 const os = require('node:os')
 const path = require('node:path')
 const { fileURLToPath } = require('node:url')
@@ -9,6 +10,37 @@ const TEXT_PREVIEW_SOURCE_MAX_BYTES = 64 * 1024 * 1024
 
 const SAFE_ENV_SUFFIXES = new Set(['dist', 'example', 'sample', 'template'])
 const SENSITIVE_EXTENSIONS = new Set(['.kdbx', '.p12', '.pem', '.pfx'])
+const EXTERNAL_FILE_REVEAL_EXTENSIONS = new Set([
+  '.app',
+  '.appimage',
+  '.bat',
+  '.bash',
+  '.cmd',
+  '.com',
+  '.command',
+  '.desktop',
+  '.dmg',
+  '.exe',
+  '.fish',
+  '.jar',
+  '.js',
+  '.jse',
+  '.lnk',
+  '.msc',
+  '.msi',
+  '.msp',
+  '.pkg',
+  '.ps1',
+  '.psm1',
+  '.run',
+  '.scr',
+  '.sh',
+  '.vbe',
+  '.vbs',
+  '.wsf',
+  '.wsh',
+  '.zsh'
+])
 
 function resolveTimeoutMs(timeoutMs, fallbackMs = DEFAULT_FETCH_TIMEOUT_MS) {
   const fallback =
@@ -105,6 +137,139 @@ function sensitiveFileBlockReason(filePath) {
   }
 
   return null
+}
+
+function shouldRevealExternalFilePath(filePath) {
+  const basename = path.basename(String(filePath || '')).toLowerCase()
+
+  if (!basename) {
+    return false
+  }
+
+  return EXTERNAL_FILE_REVEAL_EXTENSIONS.has(path.extname(basename))
+}
+
+function parseIpv4Address(address) {
+  const parts = String(address || '').split('.')
+  if (parts.length !== 4) return null
+
+  const octets = parts.map(part => {
+    if (!/^\d+$/.test(part)) return null
+    const value = Number(part)
+    return Number.isInteger(value) && value >= 0 && value <= 255 ? value : null
+  })
+
+  return octets.every(part => part !== null) ? octets : null
+}
+
+function isPrivateIpv4Address(address) {
+  const octets = parseIpv4Address(address)
+  if (!octets) return false
+
+  const [a, b] = octets
+
+  return (
+    a === 0 ||
+    a === 10 ||
+    a === 127 ||
+    (a === 100 && b >= 64 && b <= 127) ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && (b === 0 || b === 168)) ||
+    (a === 198 && (b === 18 || b === 19)) ||
+    a >= 224
+  )
+}
+
+function normalizeIpLiteral(address) {
+  return String(address || '')
+    .trim()
+    .replace(/^\[/, '')
+    .replace(/\]$/, '')
+    .replace(/%.+$/, '')
+    .toLowerCase()
+}
+
+function isPrivateIpAddress(address) {
+  const value = normalizeIpLiteral(address)
+  const family = net.isIP(value)
+
+  if (family === 4) {
+    return isPrivateIpv4Address(value)
+  }
+
+  if (family !== 6) {
+    return false
+  }
+
+  const mappedIpv4 = value.includes('.') ? value.slice(value.lastIndexOf(':') + 1) : ''
+  if (mappedIpv4 && net.isIP(mappedIpv4) === 4) {
+    return isPrivateIpv4Address(mappedIpv4)
+  }
+
+  if (value === '::' || value === '::1') {
+    return true
+  }
+
+  const first = parseInt(value.split(':')[0] || '0', 16)
+  if (!Number.isFinite(first)) {
+    return true
+  }
+
+  return (first & 0xfe00) === 0xfc00 || (first & 0xffc0) === 0xfe80 || (first & 0xff00) === 0xff00
+}
+
+function publicLinkTitleUrlError(rawUrl) {
+  const raw = String(rawUrl || '').trim()
+  if (!raw) return 'URL is required.'
+
+  let parsed
+  try {
+    parsed = new URL(raw)
+  } catch {
+    return 'URL is invalid.'
+  }
+
+  if (!['http:', 'https:'].includes(parsed.protocol)) {
+    return 'Only HTTP(S) URLs can be fetched for link titles.'
+  }
+
+  if (parsed.username || parsed.password) {
+    return 'Credential-bearing URLs cannot be fetched for link titles.'
+  }
+
+  const hostname = normalizeIpLiteral(parsed.hostname)
+  if (!hostname) {
+    return 'URL host is required.'
+  }
+
+  if (hostname === 'localhost' || hostname.endsWith('.localhost')) {
+    return 'Localhost URLs cannot be fetched for link titles.'
+  }
+
+  if (net.isIP(hostname) && isPrivateIpAddress(hostname)) {
+    return 'Private-network URLs cannot be fetched for link titles.'
+  }
+
+  return null
+}
+
+function windowsExternalUrlOpenSpec(rawUrl) {
+  const raw = String(rawUrl || '').trim()
+  if (!raw) return null
+
+  let parsed
+  try {
+    parsed = new URL(raw)
+  } catch {
+    return null
+  }
+
+  if (!['http:', 'https:', 'mailto:'].includes(parsed.protocol)) {
+    return null
+  }
+
+  return { args: [parsed.toString()], command: 'explorer.exe' }
 }
 
 function ipcPathError(code, message) {
@@ -269,11 +434,16 @@ module.exports = {
   DATA_URL_READ_MAX_BYTES,
   DEFAULT_FETCH_TIMEOUT_MS,
   TEXT_PREVIEW_SOURCE_MAX_BYTES,
+  EXTERNAL_FILE_REVEAL_EXTENSIONS,
   encryptDesktopSecret,
+  isPrivateIpAddress,
+  publicLinkTitleUrlError,
   rejectUnsafePathSyntax,
   resolveDirectoryForIpc,
   resolveReadableFileForIpc,
   resolveRequestedPathForIpc,
   resolveTimeoutMs,
-  sensitiveFileBlockReason
+  shouldRevealExternalFilePath,
+  sensitiveFileBlockReason,
+  windowsExternalUrlOpenSpec
 }

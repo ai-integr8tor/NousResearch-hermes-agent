@@ -11,6 +11,15 @@ describe('resolveGatewayWsUrl', () => {
       const getGatewayWsUrl = vi.fn().mockResolvedValue('ws://host/api/ws?ticket=fresh')
       await expect(resolveGatewayWsUrl({ getGatewayWsUrl }, oauthConn)).resolves.toBe('ws://host/api/ws?ticket=fresh')
       expect(getGatewayWsUrl).toHaveBeenCalledOnce()
+      expect(getGatewayWsUrl).toHaveBeenCalledWith(null)
+    })
+
+    it('mints OAuth URLs for the selected profile', async () => {
+      const getGatewayWsUrl = vi.fn().mockResolvedValue('ws://host/api/ws?ticket=pooled')
+      await expect(resolveGatewayWsUrl({ getGatewayWsUrl }, { ...oauthConn, profile: 'pooled' })).resolves.toBe(
+        'ws://host/api/ws?ticket=pooled'
+      )
+      expect(getGatewayWsUrl).toHaveBeenCalledWith('pooled')
     })
 
     it('throws a reauth error instead of falling back to the stale cached ticket', async () => {
@@ -43,7 +52,10 @@ describe('resolveGatewayWsUrl', () => {
   describe('token / local mode', () => {
     it('uses the minted URL when available', async () => {
       const getGatewayWsUrl = vi.fn().mockResolvedValue('ws://host/api/ws?token=fresh')
-      await expect(resolveGatewayWsUrl({ getGatewayWsUrl }, tokenConn)).resolves.toBe('ws://host/api/ws?token=fresh')
+      await expect(resolveGatewayWsUrl({ getGatewayWsUrl }, { ...tokenConn, profile: 'work' })).resolves.toBe(
+        'ws://host/api/ws?token=fresh'
+      )
+      expect(getGatewayWsUrl).toHaveBeenCalledWith('work')
     })
 
     it('falls back to the cached URL when minting fails (token is long-lived)', async () => {

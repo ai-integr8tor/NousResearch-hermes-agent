@@ -184,6 +184,25 @@ describe('usePromptActions /title', () => {
     expect(requestGateway).toHaveBeenCalledWith('slash.exec', expect.objectContaining({ command: 'title' }))
   })
 
+  it('does not mask slash worker failures with command.dispatch fallback', async () => {
+    const refreshSessions = vi.fn(async () => undefined)
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'slash.exec') {
+        throw new Error('worker crashed')
+      }
+
+      return { output: 'fallback output' } as never
+    })
+
+    let handle: HarnessHandle | null = null
+    render(<Harness onReady={h => (handle = h)} refreshSessions={refreshSessions} requestGateway={requestGateway} />)
+
+    await handle!.submitText('/title')
+
+    expect(requestGateway).toHaveBeenCalledWith('slash.exec', expect.objectContaining({ command: 'title' }))
+    expect(requestGateway).not.toHaveBeenCalledWith('command.dispatch', expect.anything())
+  })
+
   it('surfaces a rename error without touching the sidebar store', async () => {
     const refreshSessions = vi.fn(async () => undefined)
     const requestGateway = vi.fn(async (method: string) => {

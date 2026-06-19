@@ -58,8 +58,8 @@ import { clearSessionSubagents } from '@/store/subagents'
 import { clearSessionTodos } from '@/store/todos'
 
 import type {
-  ClientSessionState,
   BrowserManageResponse,
+  ClientSessionState,
   FileAttachResponse,
   HandoffFailResponse,
   HandoffRequestResponse,
@@ -111,6 +111,12 @@ function inlineErrorMessage(error: unknown, fallback: string): string {
   const raw = error instanceof Error ? error.message : typeof error === 'string' ? error : fallback
 
   return (raw.match(/Error invoking remote method '[^']+': Error: (.+)$/)?.[1] ?? raw).replace(/^Error:\s*/, '').trim()
+}
+
+function shouldFallbackSlashExec(error: unknown): boolean {
+  const message = inlineErrorMessage(error, '')
+
+  return /\buse command\.dispatch\b/i.test(message)
 }
 
 function isSessionNotFoundError(error: unknown): boolean {
@@ -925,7 +931,12 @@ export function usePromptActions({
           renderSlashOutput(result?.warning ? `warning: ${result.warning}\n${body}` : body)
 
           return
-        } catch {
+        } catch (error) {
+          if (!shouldFallbackSlashExec(error)) {
+            renderSlashOutput(`error: ${inlineErrorMessage(error, 'slash.exec failed') || 'slash.exec failed'}`)
+
+            return
+          }
           // Fall back to command.dispatch for skill/send/alias directives.
         }
 
