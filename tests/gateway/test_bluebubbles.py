@@ -526,6 +526,46 @@ class TestBlueBubblesMentionGating:
         assert [event.text for event in handled] == ["summarize this"]
 
     @pytest.mark.asyncio
+    async def test_group_auth_key_payload_is_group_and_requires_mention(self, monkeypatch):
+        adapter = _make_adapter(
+            monkeypatch,
+            require_mention=True,
+            send_read_receipts=False,
+        )
+        handled = []
+
+        async def fake_handle_message(event):
+            handled.append(event)
+
+        monkeypatch.setattr(adapter, "handle_message", fake_handle_message)
+        payload = {
+            "type": "new-message",
+            "data": {
+                "guid": "msg-auth-key-group",
+                "text": "Hermes summarize this",
+                "handle": {"address": "+155****0100"},
+                "isFromMe": False,
+                "chats": [
+                    {
+                        "[auth-key]": "iMessage;+;family-group",
+                        "style": 43,
+                        "chatIdentifier": "family-group",
+                        "displayName": "Family",
+                    }
+                ],
+            },
+        }
+
+        response = await adapter._handle_webhook(_FakeBlueBubblesRequest(payload))
+        await asyncio.sleep(0)
+
+        assert response.status == 200
+        assert len(handled) == 1
+        assert handled[0].text == "summarize this"
+        assert handled[0].source.chat_id == "iMessage;+;family-group"
+        assert handled[0].source.chat_type == "group"
+
+    @pytest.mark.asyncio
     async def test_dm_message_does_not_require_mention(self, monkeypatch):
         adapter = _make_adapter(
             monkeypatch,
@@ -1017,6 +1057,48 @@ class TestBlueBubblesGuidResolution:
         )
         assert result is None
 
+    def test_exact_chat_identifier_resolves_guid(self, monkeypatch):
+        adapter = _make_adapter(monkeypatch)
+        import asyncio
+
+        async def fake_api_post(path, payload):
+            return {
+                "data": [
+                    {
+                        "guid": "iMessage;-;user@example.com",
+                        "chatIdentifier": "user@example.com",
+                        "participants": [{"address": "group-member@example.com"}],
+                    }
+                ]
+            }
+
+        monkeypatch.setattr(adapter, "_api_post", fake_api_post)
+        result = asyncio.get_event_loop().run_until_complete(
+            adapter._resolve_chat_guid("user@example.com")
+        )
+        assert result == "iMessage;-;user@example.com"
+
+    def test_participant_address_does_not_resolve_to_group_chat(self, monkeypatch):
+        adapter = _make_adapter(monkeypatch)
+        import asyncio
+
+        async def fake_api_post(path, payload):
+            return {
+                "data": [
+                    {
+                        "guid": "iMessage;+;family-group",
+                        "chatIdentifier": "Family",
+                        "participants": [{"address": "user@example.com"}],
+                    }
+                ]
+            }
+
+        monkeypatch.setattr(adapter, "_api_post", fake_api_post)
+        result = asyncio.get_event_loop().run_until_complete(
+            adapter._resolve_chat_guid("user@example.com")
+        )
+        assert result is None
+
 
 class TestBlueBubblesAttachmentDownload:
     """Verify _download_attachment routes to the correct cache helper."""
@@ -1145,19 +1227,22 @@ class TestBlueBubblesAttachmentDownload:
 
 
 class TestBlueBubblesWebhookUrl:
-    """_webhook_url property normalises local hosts to 'localhost'."""
+    """_webhook_url property preserves explicit IPv4 loopback."""
 
     def test_default_host(self, monkeypatch):
         adapter = _make_adapter(monkeypatch)
-        # Default webhook_host is 0.0.0.0 → normalized to localhost
-        assert "localhost" in adapter._webhook_url
+        assert adapter._webhook_url.startswith("http://127.0.0.1:")
         assert str(adapter.webhook_port) in adapter._webhook_url
         assert adapter.webhook_path in adapter._webhook_url
 
-    @pytest.mark.parametrize("host", ["0.0.0.0", "127.0.0.1", "localhost", "::"])
-    def test_local_hosts_normalized(self, monkeypatch, host):
+    @pytest.mark.parametrize("host", ["0.0.0.0", "localhost", "::"])
+    def test_ambiguous_local_hosts_normalized(self, monkeypatch, host):
         adapter = _make_adapter(monkeypatch, webhook_host=host)
         assert adapter._webhook_url.startswith("http://localhost:")
+
+    def test_ipv4_loopback_preserved(self, monkeypatch):
+        adapter = _make_adapter(monkeypatch, webhook_host="127.0.0.1")
+        assert adapter._webhook_url.startswith("http://127.0.0.1:")
 
     def test_custom_host_preserved(self, monkeypatch):
         adapter = _make_adapter(monkeypatch, webhook_host="192.168.1.50")

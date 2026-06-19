@@ -304,7 +304,11 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         if not chat_guid:
             chats = record.get("chats") or []
             if chats and isinstance(chats[0], dict):
-                chat_guid = chats[0].get("guid") or chats[0].get("chatGuid")
+                chat_guid = (
+                    chats[0].get("guid")
+                    or chats[0].get("chatGuid")
+                    or chats[0].get("[auth-key]")
+                )
         date_created = BlueBubblesAdapter._value(
             str(record.get("dateCreated")) if record.get("dateCreated") is not None else None,
             str(record.get("date_created")) if record.get("date_created") is not None else None,
@@ -333,8 +337,16 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             payload.get("identifier"),
         )
         if not chat_guid and chats and isinstance(chats[0], dict):
-            chat_guid = chats[0].get("guid") or chats[0].get("chatGuid")
-            chat_identifier = chat_identifier or chats[0].get("chatIdentifier")
+            chat_guid = (
+                chats[0].get("guid")
+                or chats[0].get("chatGuid")
+                or chats[0].get("[auth-key]")
+            )
+            chat_identifier = chat_identifier or BlueBubblesAdapter._value(
+                chats[0].get("chatIdentifier"),
+                chats[0].get("identifier"),
+                chats[0].get("displayName"),
+            )
         sender = (
             BlueBubblesAdapter._value(
                 record.get("handle", {}).get("address")
@@ -347,7 +359,12 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             or chat_identifier
             or chat_guid
         )
-        is_group = bool(record.get("isGroup")) or (";+;" in (chat_guid or ""))
+        chat_style = chats[0].get("style") if chats and isinstance(chats[0], dict) else None
+        is_group = (
+            bool(record.get("isGroup"))
+            or (";+;" in (chat_guid or ""))
+            or (isinstance(chat_style, int) and chat_style >= 43)
+        )
         canonical_chat = chat_guid if is_group else (chat_identifier or sender or chat_guid or "")
         attachments = record.get("attachments") or []
         attachment_ids = [
@@ -500,7 +517,10 @@ class BlueBubblesAdapter(BasePlatformAdapter):
     def _webhook_url(self) -> str:
         """Compute the external webhook URL for BlueBubbles registration."""
         host = self.webhook_host
-        if host in {"0.0.0.0", "127.0.0.1", "localhost", "::"}:
+        # Preserve an explicit IPv4 loopback. On macOS the BlueBubbles Node
+        # process can resolve ``localhost`` to IPv6 ::1 while the aiohttp
+        # listener is bound to 127.0.0.1, causing inbound webhooks to fail.
+        if host in {"0.0.0.0", "localhost", "::"}:
             host = "localhost"
         return f"http://{host}:{self.webhook_port}{self.webhook_path}"
 
@@ -629,8 +649,11 @@ class BlueBubblesAdapter(BasePlatformAdapter):
 
         If *target* already contains a semicolon (raw GUID format like
         ``iMessage;-;user@example.com``), it is returned as-is.  Otherwise
-        the adapter queries the BlueBubbles chat list and matches on
-        ``chatIdentifier`` or participant address.
+        the adapter queries the BlueBubbles chat list and matches on exact
+        ``chatIdentifier``/``identifier`` only. It deliberately does not fall
+        back to participant-address matching because the same contact can also
+        appear in group chats, and guessing by participant can leak a DM reply
+        into a group thread.
         """
         target = (target or "").strip()
         if not target:
@@ -655,12 +678,6 @@ class BlueBubblesAdapter(BasePlatformAdapter):
                         while len(self._guid_cache) > _GUID_CACHE_SIZE:
                             self._guid_cache.popitem(last=False)
                     return guid
-                for part in chat.get("participants", []) or []:
-                    if (part.get("address") or "").strip() == target and guid:
-                        self._guid_cache[target] = guid
-                        while len(self._guid_cache) > _GUID_CACHE_SIZE:
-                            self._guid_cache.popitem(last=False)
-                        return guid
         except Exception:
             pass
         return None
@@ -1219,16 +1236,24 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             payload.get("guid"),
         )
         # Fallback: BlueBubbles v1.9+ webhook payloads omit top-level chatGuid;
-        # the chat GUID is nested under data.chats[0].guid instead.
-        if not chat_guid:
-            _chats = record.get("chats") or []
-            if _chats and isinstance(_chats[0], dict):
-                chat_guid = _chats[0].get("guid") or _chats[0].get("chatGuid")
+        # the chat GUID is nested under data.chats[0].guid instead. Some private
+        # API group payloads only expose the stable group identity as [auth-key].
+        _chats = record.get("chats") or []
+        first_chat = _chats[0] if _chats and isinstance(_chats[0], dict) else {}
+        if not chat_guid and first_chat:
+            chat_guid = (
+                first_chat.get("guid")
+                or first_chat.get("chatGuid")
+                or first_chat.get("[auth-key]")
+            )
         chat_identifier = self._value(
             record.get("chatIdentifier"),
             record.get("identifier"),
             payload.get("chatIdentifier"),
             payload.get("identifier"),
+            first_chat.get("chatIdentifier"),
+            first_chat.get("identifier"),
+            first_chat.get("displayName"),
         )
         sender = (
             self._value(
@@ -1248,7 +1273,12 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             return web.json_response({"error": "missing message fields"}, status=400)
 
         session_chat_id = chat_guid or chat_identifier
-        is_group = bool(record.get("isGroup")) or (";+;" in (chat_guid or ""))
+        chat_style = first_chat.get("style")
+        is_group = (
+            bool(record.get("isGroup"))
+            or (";+;" in (chat_guid or ""))
+            or (isinstance(chat_style, int) and chat_style >= 43)
+        )
         if is_group and self.require_mention:
             if not self._message_matches_mention_patterns(text):
                 logger.debug(
