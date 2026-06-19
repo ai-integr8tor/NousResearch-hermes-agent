@@ -23,7 +23,7 @@ import re
 import time
 from typing import Any, Dict, List, Optional
 
-from agent.auxiliary_client import call_llm, _is_connection_error
+from agent.auxiliary_client import call_llm, _is_connection_error, inflight_aux_count
 from agent.context_engine import ContextEngine
 from agent.model_metadata import (
     MINIMUM_CONTEXT_LENGTH,
@@ -601,6 +601,12 @@ class ContextCompressor(ContextEngine):
       5. On subsequent compactions, iteratively update the previous summary
     """
 
+    # Upper bound on consecutive should_compress() checks deferred by the
+    # defer_while_aux_inflight gate.  Keeps sustained auxiliary traffic from
+    # starving compression: past this many deferrals in a row, compression
+    # fires even with calls still in flight.
+    DEFER_MAX_CONSECUTIVE_CHECKS = 3
+
     @property
     def name(self) -> str:
         return "compressor"
@@ -608,6 +614,7 @@ class ContextCompressor(ContextEngine):
     def on_session_reset(self) -> None:
         """Reset all per-session state for /new or /reset."""
         super().on_session_reset()
+        self._consecutive_defer_checks = 0
         self._context_probed = False
         self._context_probe_persistable = False
         self._previous_summary = None
@@ -667,6 +674,7 @@ class ContextCompressor(ContextEngine):
         self.max_summary_tokens = min(
             int(context_length * 0.05), _SUMMARY_TOKENS_CEILING,
         )
+        self._warn_if_defer_gate_inert()
 
     def __init__(
         self,
@@ -683,6 +691,8 @@ class ContextCompressor(ContextEngine):
         provider: str = "",
         api_mode: str = "",
         abort_on_summary_failure: bool = False,
+        defer_while_aux_inflight: bool = False,
+        defer_hard_ceiling: float = 0.95,
     ):
         self.model = model
         self.base_url = base_url
@@ -699,6 +709,16 @@ class ContextCompressor(ContextEngine):
         # When False (default = historical behavior), insert a
         # deterministic "summary unavailable" handoff and drop the middle window.
         self.abort_on_summary_failure = abort_on_summary_failure
+        # When True, auto-compression is postponed while other auxiliary LLM
+        # calls are in flight (see should_compress).  The deferral is bounded
+        # twice: by the hard ceiling — a fraction of context_length past
+        # which compression fires regardless, because running out of context
+        # is worse than accelerator contention — and by
+        # DEFER_MAX_CONSECUTIVE_CHECKS, so sustained auxiliary traffic can
+        # never starve compression into riding the context all the way up.
+        self.defer_while_aux_inflight = bool(defer_while_aux_inflight)
+        self.defer_hard_ceiling = max(0.0, min(float(defer_hard_ceiling), 1.0))
+        self._consecutive_defer_checks = 0
 
         self.context_length = get_model_context_length(
             model, base_url=base_url, api_key=api_key,
@@ -721,6 +741,7 @@ class ContextCompressor(ContextEngine):
         self.max_summary_tokens = min(
             int(self.context_length * 0.05), _SUMMARY_TOKENS_CEILING,
         )
+        self._warn_if_defer_gate_inert()
 
         if not quiet_mode:
             logger.info(
@@ -818,6 +839,12 @@ class ContextCompressor(ContextEngine):
         Includes anti-thrashing protection: if the last two compressions
         each saved less than 10%, skip compression to avoid infinite loops
         where each pass removes only 1-2 messages.
+
+        When ``compression.defer_while_aux_inflight`` is enabled, an
+        over-threshold check is additionally deferred while other auxiliary
+        LLM calls are in flight, bounded by ``defer_hard_ceiling`` and
+        ``DEFER_MAX_CONSECUTIVE_CHECKS``.  Manual ``/compress`` calls
+        ``compress()`` directly and is never deferred.
         """
         tokens = prompt_tokens if prompt_tokens is not None else self.last_prompt_tokens
         if tokens < self.threshold_tokens:
@@ -832,7 +859,59 @@ class ContextCompressor(ContextEngine):
                     self._ineffective_compression_count,
                 )
             return False
+        # Contention deferral (opt-in): on single-accelerator local
+        # deployments, a large compression prefill competes with in-flight
+        # auxiliary calls (web_extract, vision, other sessions'
+        # compressions, ...) for the same GPU and can push them past their
+        # timeouts.  Postpone auto-compression while other auxiliary calls
+        # are in flight.  The deferral is bounded twice — by the hard
+        # ceiling (running out of context is worse than contention) and by
+        # DEFER_MAX_CONSECUTIVE_CHECKS (sustained auxiliary traffic must
+        # not starve compression into riding the context up to the
+        # ceiling).  Best-effort gate: an auxiliary call starting after
+        # this check still overlaps the compression that follows.
+        if self.defer_while_aux_inflight:
+            ceiling_tokens = int(self.context_length * self.defer_hard_ceiling)
+            if (
+                tokens < ceiling_tokens
+                and self._consecutive_defer_checks < self.DEFER_MAX_CONSECUTIVE_CHECKS
+            ):
+                inflight = inflight_aux_count()
+                if inflight > 0:
+                    self._consecutive_defer_checks += 1
+                    if not self.quiet_mode:
+                        logger.info(
+                            "Compression deferred (%d/%d) — %d auxiliary "
+                            "call(s) in flight (~%d tokens < hard ceiling "
+                            "%d). Will re-check next turn.",
+                            self._consecutive_defer_checks,
+                            self.DEFER_MAX_CONSECUTIVE_CHECKS,
+                            inflight, tokens, ceiling_tokens,
+                        )
+                    return False
+            self._consecutive_defer_checks = 0
         return True
+
+    def _warn_if_defer_gate_inert(self) -> None:
+        """Warn when defer_while_aux_inflight can never defer.
+
+        With a small context window the MINIMUM_CONTEXT_LENGTH floor can
+        push threshold_tokens at or above the deferral ceiling — every
+        over-threshold check is then already past the ceiling and the gate
+        silently never applies.
+        """
+        if not self.defer_while_aux_inflight:
+            return
+        ceiling_tokens = int(self.context_length * self.defer_hard_ceiling)
+        if self.threshold_tokens >= ceiling_tokens and not self.quiet_mode:
+            logger.warning(
+                "compression.defer_while_aux_inflight is enabled but inert: "
+                "compression threshold (%d tokens) >= deferral ceiling (%d "
+                "tokens, %.0f%% of %d). Raise defer_hard_ceiling or use a "
+                "larger context window for the deferral to apply.",
+                self.threshold_tokens, ceiling_tokens,
+                self.defer_hard_ceiling * 100, self.context_length,
+            )
 
     # ------------------------------------------------------------------
     # Tool output pruning (cheap pre-pass, no LLM call)

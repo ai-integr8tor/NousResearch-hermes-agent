@@ -1339,6 +1339,12 @@ def init_agent(
     compression_abort_on_summary_failure = str(
         _compression_cfg.get("abort_on_summary_failure", False)
     ).lower() in {"true", "1", "yes"}
+    compression_defer_while_aux_inflight = str(
+        _compression_cfg.get("defer_while_aux_inflight", False)
+    ).lower() in {"true", "1", "yes"}
+    compression_defer_hard_ceiling = float(
+        _compression_cfg.get("defer_hard_ceiling", 0.95)
+    )
 
     # Read optional explicit context_length override for the auxiliary
     # compression model. Custom endpoints often cannot report this via
@@ -1556,6 +1562,8 @@ def init_agent(
             provider=agent.provider,
             api_mode=agent.api_mode,
             abort_on_summary_failure=compression_abort_on_summary_failure,
+            defer_while_aux_inflight=compression_defer_while_aux_inflight,
+            defer_hard_ceiling=compression_defer_hard_ceiling,
         )
     agent.compression_enabled = compression_enabled
 
