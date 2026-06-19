@@ -8,12 +8,15 @@ const { pathToFileURL } = require('node:url')
 const {
   DEFAULT_FETCH_TIMEOUT_MS,
   encryptDesktopSecret,
+  isPrivateIpAddress,
+  publicLinkTitleUrlError,
   resolveDirectoryForIpc,
   resolveReadableFileForIpc,
   resolveRequestedPathForIpc,
   resolveTimeoutMs,
   shouldRevealExternalFilePath,
-  sensitiveFileBlockReason
+  sensitiveFileBlockReason,
+  windowsExternalUrlOpenSpec
 } = require('./hardening.cjs')
 
 async function rejectsWithCode(promise, code) {
@@ -68,6 +71,39 @@ test('shouldRevealExternalFilePath flags executable file links', () => {
   assert.equal(shouldRevealExternalFilePath('C:\\Users\\me\\Downloads\\install.msi'), true)
   assert.equal(shouldRevealExternalFilePath('/Applications/Hermes.app'), true)
   assert.equal(shouldRevealExternalFilePath('/tmp/script.sh'), true)
+})
+
+test('link title URL validation blocks local private and credentialed targets', () => {
+  assert.equal(publicLinkTitleUrlError('https://example.com/a?b=1'), null)
+  assert.match(String(publicLinkTitleUrlError('file:///tmp/report.html')), /HTTP/)
+  assert.match(String(publicLinkTitleUrlError('https://user:pass@example.com')), /Credential/)
+  assert.match(String(publicLinkTitleUrlError('http://localhost:8080')), /Localhost/)
+  assert.match(String(publicLinkTitleUrlError('http://127.0.0.1:8080')), /Private/)
+  assert.match(String(publicLinkTitleUrlError('http://10.0.0.5')), /Private/)
+  assert.match(String(publicLinkTitleUrlError('http://169.254.169.254/latest')), /Private/)
+  assert.match(String(publicLinkTitleUrlError('http://[::1]/')), /Private/)
+  assert.match(String(publicLinkTitleUrlError('http://[fd00::1]/')), /Private/)
+})
+
+test('private IP detection covers mapped and reserved addresses', () => {
+  assert.equal(isPrivateIpAddress('8.8.8.8'), false)
+  assert.equal(isPrivateIpAddress('127.0.0.1'), true)
+  assert.equal(isPrivateIpAddress('172.20.1.1'), true)
+  assert.equal(isPrivateIpAddress('192.168.1.1'), true)
+  assert.equal(isPrivateIpAddress('::ffff:127.0.0.1'), true)
+  assert.equal(isPrivateIpAddress('fe80::1'), true)
+})
+
+test('WSL external URL opener uses explorer without a shell trampoline', () => {
+  assert.deepEqual(windowsExternalUrlOpenSpec('https://example.com/a?x=1&y=2'), {
+    args: ['https://example.com/a?x=1&y=2'],
+    command: 'explorer.exe'
+  })
+  assert.deepEqual(windowsExternalUrlOpenSpec('mailto:user@example.com?subject=a&body=b'), {
+    args: ['mailto:user@example.com?subject=a&body=b'],
+    command: 'explorer.exe'
+  })
+  assert.equal(windowsExternalUrlOpenSpec('javascript:alert(1)'), null)
 })
 
 test('path helpers reject blank non-string NUL and Windows device syntax', async () => {

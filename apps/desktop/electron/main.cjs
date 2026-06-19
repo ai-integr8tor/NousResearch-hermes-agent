@@ -17,10 +17,10 @@ const {
   systemPreferences
 } = require('electron')
 const crypto = require('node:crypto')
+const dns = require('node:dns')
 const fs = require('node:fs')
 const http = require('node:http')
 const https = require('node:https')
-const net = require('node:net')
 const path = require('node:path')
 const { pathToFileURL } = require('node:url')
 const { execFileSync, spawn } = require('node:child_process')
@@ -77,10 +77,13 @@ const {
   DEFAULT_FETCH_TIMEOUT_MS,
   TEXT_PREVIEW_SOURCE_MAX_BYTES,
   encryptDesktopSecret: encryptDesktopSecretStrict,
+  isPrivateIpAddress,
+  publicLinkTitleUrlError,
   resolveReadableFileForIpc,
   resolveRequestedPathForIpc,
   resolveTimeoutMs,
-  shouldRevealExternalFilePath
+  shouldRevealExternalFilePath,
+  windowsExternalUrlOpenSpec
 } = require('./hardening.cjs')
 
 let nodePty = null
@@ -889,14 +892,17 @@ function openExternalUrl(rawUrl) {
   const url = parsed.toString()
 
   if (IS_WSL) {
+    const openSpec = windowsExternalUrlOpenSpec(url)
+    if (!openSpec) return false
+
     rememberLog(`[link] opening via WSL→Windows: ${url}`)
-    const proc = spawn('cmd.exe', ['/c', 'start', '""', url], {
+    const proc = spawn(openSpec.command, openSpec.args, {
       detached: true,
       stdio: 'ignore',
       windowsHide: true
     })
     proc.on('error', error => {
-      rememberLog(`[link] cmd.exe start failed: ${error.message}; falling back to xdg-open`)
+      rememberLog(`[link] explorer.exe failed: ${error.message}; falling back to xdg-open`)
       shell.openExternal(url).catch(fallback => rememberLog(`[link] xdg-open failed: ${fallback.message}`))
     })
     proc.unref()
@@ -2810,7 +2816,6 @@ const titleInflight = new Map()
 const TITLE_CACHE_LIMIT = 500
 const TITLE_BYTE_BUDGET = 96 * 1024
 const TITLE_TIMEOUT_MS = 5000
-const TITLE_MAX_REDIRECTS = 3
 // Browser-shaped UA — many bot-walled sites (GetYourGuide, Cloudflare-protected
 // pages) refuse anything that doesn't look like a real Chrome.
 const TITLE_USER_AGENT =
@@ -2873,6 +2878,21 @@ function parseHtmlTitle(html) {
   return raw ? decodeHtmlEntities(raw).replace(/\s+/g, ' ').trim() : ''
 }
 
+async function assertPublicLinkTitleUrl(rawUrl) {
+  const reason = publicLinkTitleUrlError(rawUrl)
+  if (reason) {
+    throw new Error(reason)
+  }
+
+  const parsed = new URL(String(rawUrl || '').trim())
+  const records = await dns.promises.lookup(parsed.hostname, { all: true, verbatim: true })
+  if (!records.length || records.some(record => isPrivateIpAddress(record.address))) {
+    throw new Error('Link title host resolves to a private or reserved network address.')
+  }
+
+  return parsed.toString()
+}
+
 function fetchHtmlTitleWithCurl(rawUrl) {
   return new Promise(resolve => {
     const url = String(rawUrl || '').trim()
@@ -2881,9 +2901,6 @@ function fetchHtmlTitleWithCurl(rawUrl) {
     const args = [
       '--silent',
       '--show-error',
-      '--location',
-      '--max-redirs',
-      String(TITLE_MAX_REDIRECTS),
       '--max-time',
       String(Math.max(2, Math.ceil(TITLE_TIMEOUT_MS / 1000))),
       '--connect-timeout',
@@ -2924,7 +2941,22 @@ function getLinkTitleSession() {
   if (linkTitleSession || !app.isReady()) return linkTitleSession
   linkTitleSession = session.fromPartition('hermes:link-titles', { cache: false })
   linkTitleSession.webRequest.onBeforeRequest((details, callback) => {
-    callback({ cancel: RENDER_TITLE_BLOCKED_RESOURCES.has(details.resourceType) })
+    if (RENDER_TITLE_BLOCKED_RESOURCES.has(details.resourceType)) {
+      callback({ cancel: true })
+      return
+    }
+
+    if (details.resourceType !== 'mainFrame') {
+      callback({ cancel: false })
+      return
+    }
+
+    assertPublicLinkTitleUrl(details.url)
+      .then(() => callback({ cancel: false }))
+      .catch(error => {
+        rememberLog(`[link-title] blocked navigation: ${error.message}`)
+        callback({ cancel: true })
+      })
   })
   return linkTitleSession
 }
@@ -3028,12 +3060,20 @@ function fetchLinkTitle(rawUrl) {
   if (titleCache.has(key)) return Promise.resolve(titleCache.get(key))
   if (titleInflight.has(key)) return titleInflight.get(key)
 
-  const pending = fetchHtmlTitleWithCurl(url)
-    .catch(() => '')
-    .then(value => usableTitle((value || '').slice(0, 240)))
-    .then(
-      async value => value || usableTitle(((await fetchHtmlTitleWithRenderer(url).catch(() => '')) || '').slice(0, 240))
+  const pending = assertPublicLinkTitleUrl(url)
+    .then(safeUrl =>
+      fetchHtmlTitleWithCurl(safeUrl)
+        .catch(() => '')
+        .then(value => usableTitle((value || '').slice(0, 240)))
+        .then(
+          async value =>
+            value || usableTitle(((await fetchHtmlTitleWithRenderer(safeUrl).catch(() => '')) || '').slice(0, 240))
+        )
     )
+    .catch(error => {
+      rememberLog(`[link-title] blocked title fetch: ${error.message}`)
+      return ''
+    })
     .then(clean => {
       cacheTitle(key, clean)
       titleInflight.delete(key)
