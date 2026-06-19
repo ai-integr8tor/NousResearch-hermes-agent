@@ -786,6 +786,7 @@ AUTHOR_MAP = {
     "me@jakubkrcmar.cz": "jakubkrcmar",
     "prasadus92@gmail.com": "prasadus92",
     "michael@make.software": "mssteuer",
+    "jeanclawdai@proton.me": "mssteuer",
     "der@konsi.org": "konsisumer",
     "abogale2@gmail.com": "amanuel2",
     "alexazzjjtt@163.com": "alexzhu0",
