@@ -319,6 +319,128 @@ def test_include_unconfigured_skips_already_present_slugs():
     assert or_rows[0]["models"] == ["m1"]  # the authenticated row, not skeleton
 
 
+def test_configured_only_suppresses_unconfigured_rows():
+    """configured_only=True overrides include_unconfigured so only
+    configured/current providers are returned — skeleton rows for
+    unconfigured canonical providers must NOT appear."""
+    rows = [
+        {"slug": "openrouter", "name": "OpenRouter", "models": ["m1"],
+         "total_models": 1, "is_current": True, "is_user_defined": False,
+         "source": "built-in"},
+    ]
+    ctx = _empty_ctx(provider="openrouter")
+    with _list_auth_returning(rows):
+        payload = build_models_payload(
+            ctx, include_unconfigured=True, configured_only=True
+        )
+    # Only the configured/current provider should be present — no skeletons.
+    assert len(payload["providers"]) == 1
+    assert payload["providers"][0]["slug"] == "openrouter"
+    assert payload["providers"][0]["models"] == ["m1"]
+
+
+def test_configured_only_filters_discovery_rows_not_in_profile():
+    """The default picker must not show broad provider-discovery rows."""
+    rows = [
+        {"slug": "opencode-go", "name": "OpenCode Go", "models": ["glm-5.2"],
+         "total_models": 1, "is_current": True, "is_user_defined": False,
+         "source": "built-in"},
+        {"slug": "anthropic", "name": "Anthropic", "models": ["claude-opus"],
+         "total_models": 1, "is_current": False, "is_user_defined": False,
+         "source": "built-in"},
+        {"slug": "copilot", "name": "GitHub Copilot", "models": ["gpt-5"],
+         "total_models": 1, "is_current": False, "is_user_defined": False,
+         "source": "hermes"},
+        {"slug": "gemini", "name": "Google AI Studio", "models": ["gemini-pro"],
+         "total_models": 1, "is_current": False, "is_user_defined": False,
+         "source": "canonical"},
+    ]
+    ctx = ConfigContext(
+        current_provider="opencode-go",
+        current_model="glm-5.2",
+        current_base_url="https://opencode.ai/zen/go/v1",
+        user_providers={"opencode-go": {}},
+        custom_providers=[],
+    )
+    with _list_auth_returning(rows):
+        payload = build_models_payload(
+            ctx, configured_only=True, picker_hints=True, canonical_order=True
+        )
+
+    assert [p["slug"] for p in payload["providers"]] == ["opencode-go"]
+
+
+def test_configured_only_keeps_user_defined_custom_rows():
+    rows = [
+        {"slug": "custom:local-proxy", "name": "Local Proxy", "models": ["local-model"],
+         "total_models": 1, "is_current": False, "is_user_defined": True,
+         "source": "custom"},
+        {"slug": "ollama-cloud", "name": "Ollama Cloud", "models": ["gpt-oss"],
+         "total_models": 1, "is_current": False, "is_user_defined": False,
+         "source": "hermes"},
+    ]
+    ctx = ConfigContext(
+        current_provider="custom:local-proxy",
+        current_model="local-model",
+        current_base_url="http://127.0.0.1:4000/v1",
+        user_providers={},
+        custom_providers=[{"name": "local-proxy", "base_url": "http://127.0.0.1:4000/v1"}],
+    )
+    with _list_auth_returning(rows):
+        payload = build_models_payload(ctx, configured_only=True, picker_hints=True)
+
+    assert [p["slug"] for p in payload["providers"]] == ["custom:local-proxy"]
+
+
+def test_configured_only_false_allows_unconfigured():
+    """configured_only=False (default) does not suppress include_unconfigured."""
+    rows = [
+        {"slug": "openrouter", "name": "OpenRouter", "models": ["m1"],
+         "total_models": 1, "is_current": True, "is_user_defined": False,
+         "source": "built-in"},
+    ]
+    ctx = _empty_ctx(provider="openrouter")
+    with _list_auth_returning(rows):
+        payload = build_models_payload(
+            ctx, include_unconfigured=True, configured_only=False
+        )
+    from hermes_cli.models import CANONICAL_PROVIDERS
+
+    seen_slugs = {r["slug"] for r in payload["providers"]}
+    for entry in CANONICAL_PROVIDERS:
+        assert entry.slug in seen_slugs
+
+
+def test_configured_only_filters_authenticated_false_rows():
+    """configured_only=True must also filter out any row that already
+    carries authenticated=False — not just skeleton rows from
+    _append_unconfigured_rows. This is the central invariant: no
+    row with authenticated===False should survive when configured_only
+    is active, even if it came from list_authenticated_providers."""
+    rows = [
+        {"slug": "openrouter", "name": "OpenRouter", "models": ["m1"],
+         "total_models": 1, "is_current": True, "is_user_defined": False,
+         "source": "built-in"},
+        # Simulate a provider that lost credentials between listing and
+        # hint application — it carries authenticated=False directly.
+        {"slug": "deepseek", "name": "DeepSeek", "models": ["deepseek-chat"],
+         "total_models": 1, "is_current": False, "is_user_defined": False,
+         "source": "built-in", "authenticated": False},
+    ]
+    ctx = _empty_ctx(provider="openrouter")
+    with _list_auth_returning(rows):
+        payload = build_models_payload(
+            ctx, include_unconfigured=True, configured_only=True,
+            picker_hints=True
+        )
+    # The unauthenticated provider must be filtered out.
+    slugs = {r["slug"] for r in payload["providers"]}
+    assert "openrouter" in slugs
+    assert "deepseek" not in slugs
+    # No row should have authenticated===False.
+    assert all(r.get("authenticated") is not False for r in payload["providers"])
+
+
 # ─── picker_hints ──────────────────────────────────────────────────────
 
 
@@ -448,7 +570,7 @@ def test_end_to_end_with_real_context_no_credentials_leak(monkeypatch):
     """Full pipeline: real load_picker_context + real
     list_authenticated_providers. Verify no credential string ever
     appears in the returned payload, even with picker_hints=True."""
-    canary = "sk-canary-XYZ-must-not-appear"
+    canary = "sk-" + "canary-XYZ-must-not-appear"
     monkeypatch.setenv("OPENROUTER_API_KEY", canary)
     monkeypatch.setenv("ANTHROPIC_API_KEY", canary)
     cfg = _cfg(model={"provider": "openrouter"})

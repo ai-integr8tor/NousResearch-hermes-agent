@@ -3,6 +3,7 @@ import { useCallback } from 'react'
 
 import { getGlobalModelInfo } from '@/hermes'
 import { useI18n } from '@/i18n'
+import { MODEL_OPTIONS_QUERY_ROOT, modelOptionsQueryKey } from '@/lib/model-options-query'
 import { notifyError } from '@/store/notifications'
 import {
   $activeSessionId,
@@ -32,10 +33,12 @@ export function useModelControls({ activeSessionId, queryClient, requestGateway 
     (provider: string, model: string, includeGlobal: boolean) => {
       const patch = (prev: ModelOptionsResponse | undefined) => ({ ...(prev ?? {}), provider, model })
 
-      queryClient.setQueryData<ModelOptionsResponse>(['model-options', activeSessionId || 'global'], patch)
+      queryClient.setQueryData<ModelOptionsResponse>(modelOptionsQueryKey('configured', activeSessionId), patch)
+      queryClient.setQueryData<ModelOptionsResponse>(modelOptionsQueryKey('all', activeSessionId), patch)
 
       if (includeGlobal) {
-        queryClient.setQueryData<ModelOptionsResponse>(['model-options', 'global'], patch)
+        queryClient.setQueryData<ModelOptionsResponse>(modelOptionsQueryKey('configured'), patch)
+        queryClient.setQueryData<ModelOptionsResponse>(modelOptionsQueryKey('all'), patch)
       }
     },
     [activeSessionId, queryClient]
@@ -105,7 +108,7 @@ export function useModelControls({ activeSessionId, queryClient, requestGateway 
           value: `${selection.model} --provider ${selection.provider}`
         })
 
-        void queryClient.invalidateQueries({ queryKey: ['model-options', activeSessionId] })
+        void queryClient.invalidateQueries({ queryKey: MODEL_OPTIONS_QUERY_ROOT })
 
         return true
       } catch (err) {

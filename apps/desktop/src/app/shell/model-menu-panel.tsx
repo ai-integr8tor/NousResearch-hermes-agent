@@ -18,6 +18,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import type { HermesGateway } from '@/hermes'
 import { getGlobalModelOptions } from '@/hermes'
 import { useI18n } from '@/i18n'
+import { modelOptionsQueryKey } from '@/lib/model-options-query'
 import { currentPickerSelection, displayModelName, modelDisplayParts, reasoningEffortLabel } from '@/lib/model-status-label'
 import { cn } from '@/lib/utils'
 import { $modelPresets, applyModelPreset, modelPresetKey } from '@/store/model-presets'
@@ -76,13 +77,16 @@ export function ModelMenuPanel({ gateway, onSelectModel, requestGateway }: Model
   const visibleModels = useStore($visibleModels)
 
   const modelOptions = useQuery({
-    queryKey: ['model-options', activeSessionId || 'global'],
+    queryKey: modelOptionsQueryKey('configured', activeSessionId),
     queryFn: (): Promise<ModelOptionsResponse> => {
       if (gateway && activeSessionId) {
-        return gateway.request<ModelOptionsResponse>('model.options', { session_id: activeSessionId })
+        return gateway.request<ModelOptionsResponse>('model.options', {
+          session_id: activeSessionId,
+          configured_only: true
+        })
       }
 
-      return getGlobalModelOptions()
+      return getGlobalModelOptions({ configuredOnly: true })
     }
   })
 
@@ -124,15 +128,16 @@ export function ModelMenuPanel({ gateway, onSelectModel, requestGateway }: Model
     setRefreshing(true)
 
     try {
-      const queryKey = ['model-options', activeSessionId || 'global']
+      const queryKey = modelOptionsQueryKey('configured', activeSessionId)
 
       const next =
         gateway && activeSessionId
           ? await gateway.request<ModelOptionsResponse>('model.options', {
               session_id: activeSessionId,
-              refresh: true
+              refresh: true,
+              configured_only: true
             })
-          : await getGlobalModelOptions({ refresh: true })
+          : await getGlobalModelOptions({ refresh: true, configuredOnly: true })
 
       queryClient.setQueryData<ModelOptionsResponse>(queryKey, next)
     } catch {
@@ -338,6 +343,13 @@ function groupModels(
   const groups: ProviderGroup[] = []
 
   for (const provider of providers) {
+    // Skip unauthenticated providers — the backend's configured_only flag
+    // should already exclude these, but guard here as a safety net (matches
+    // the model-picker dialog's filter).
+    if (provider.authenticated === false) {
+      continue
+    }
+
     const allFamilies = collapseModelFamilies(provider.models ?? [])
 
     if (allFamilies.length === 0) {

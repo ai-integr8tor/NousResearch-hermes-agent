@@ -21,6 +21,7 @@ import { useI18n } from '@/i18n'
 import type { ChatMessage } from '@/lib/chat-messages'
 import { quickModelOptions, sessionTitle, toRuntimeMessage } from '@/lib/chat-runtime'
 import { useIncrementalExternalStoreRuntime } from '@/lib/incremental-external-store-runtime'
+import { modelOptionsQueryKey } from '@/lib/model-options-query'
 import { cn } from '@/lib/utils'
 import type { ComposerAttachment } from '@/store/composer'
 import { $pinnedSessionIds } from '@/store/layout'
@@ -342,17 +343,20 @@ export function ChatView({
   const threadKey = selectedSessionId || activeSessionId || (isRoutedSessionView ? location.pathname : 'new')
 
   const modelOptionsQuery = useQuery<ModelOptionsResponse>({
-    queryKey: ['model-options', activeSessionId || 'global'],
+    queryKey: modelOptionsQueryKey('configured', activeSessionId),
     queryFn: () => {
       if (!activeSessionId) {
-        return getGlobalModelOptions()
+        return getGlobalModelOptions({ configuredOnly: true })
       }
 
       if (!gateway) {
         throw new Error('Hermes gateway unavailable')
       }
 
-      return gateway.request<ModelOptionsResponse>('model.options', { session_id: activeSessionId })
+      return gateway.request<ModelOptionsResponse>('model.options', {
+        session_id: activeSessionId,
+        configured_only: true
+      })
     },
     enabled: gatewayOpen
   })

@@ -2,6 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { useState } from 'react'
 
 import { useI18n } from '@/i18n'
+import { modelOptionsQueryKey } from '@/lib/model-options-query'
 import { currentPickerSelection } from '@/lib/model-status-label'
 import type { ModelOptionProvider, ModelOptionsResponse, ModelPricing } from '@/types/hermes'
 
@@ -53,15 +54,16 @@ export function ModelPickerDialog({
   const [search, setSearch] = useState('')
 
   const modelOptions = useQuery({
-    queryKey: ['model-options', sessionId || 'global'],
+    queryKey: modelOptionsQueryKey('configured', sessionId),
     queryFn: () => {
       if (gw && sessionId) {
         return gw.request<ModelOptionsResponse>('model.options', {
-          session_id: sessionId
+          session_id: sessionId,
+          configured_only: true
         })
       }
 
-      return getGlobalModelOptions()
+      return getGlobalModelOptions({ configuredOnly: true })
     },
     enabled: open
   })
@@ -187,10 +189,15 @@ function ModelResults({
     provider.name.toLowerCase().includes(q) ||
     provider.slug.toLowerCase().includes(q)
 
-  // Only configured providers (those with curated models) are selectable
-  // here. Switching to a NOT-yet-configured provider goes through the
-  // "Add provider" footer button, which opens the full onboarding selector.
-  const configured = providers.filter(p => (p.models ?? []).length > 0)
+  // Only configured providers (those with curated models AND authenticated
+  // credentials) are selectable here. Switching to a NOT-yet-configured
+  // provider goes through the "Add provider" footer button, which opens the
+  // full onboarding selector. The backend's configured_only flag already
+  // suppresses unconfigured rows, but this client-side guard catches edge
+  // cases (e.g. a provider with curated catalog models but no credentials).
+  const configured = providers.filter(
+    p => (p.models ?? []).length > 0 && p.authenticated !== false
+  )
 
   return (
     <>

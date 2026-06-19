@@ -9545,6 +9545,11 @@ def _(rid, params: dict) -> dict:
             ),
             current_base_url=getattr(agent, "base_url", "") if agent else "",
         )
+        # configured_only (from the picker) suppresses unconfigured provider
+        # skeleton rows so the default picker view shows only providers the
+        # user has actually authenticated. The TUI and desktop pickers pass
+        # this by default; a toggle/key can request the full universe.
+        configured_only = bool(params.get("configured_only", False))
         # picker_hints + canonical_order produce the TUI's required shape:
         # `authenticated`/`auth_type`/`key_env`/`warning` per row, in
         # CANONICAL_PROVIDERS declaration order. include_unconfigured=True
@@ -9556,6 +9561,7 @@ def _(rid, params: dict) -> dict:
         payload = build_models_payload(
             ctx,
             include_unconfigured=True,
+            configured_only=configured_only,
             picker_hints=True,
             canonical_order=True,
             pricing=True,
