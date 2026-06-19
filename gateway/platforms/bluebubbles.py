@@ -70,10 +70,13 @@ _MESSAGE_EVENTS = {"new-message", "message", "updated-message"}
 # Subscribe to update events too, but classify receipt/status updates below
 # instead of treating them as conversational messages. This preserves
 # BlueBubbles delivery/read-receipt visibility without reintroducing duplicate
-# agent replies for metadata-only updated-message webhooks.
+# agent replies for metadata-only updated-message webhooks. The legacy
+# ``message`` event is accepted on inbound webhooks for compatibility, but is
+# not registered by default for new BlueBubbles webhook subscriptions.
 _DEFAULT_WEBHOOK_EVENTS = ["new-message", "updated-message"]
 _VALID_WEBHOOK_EVENTS = {
     "new-message",
+    "message",
     "updated-message",
     "message-send-error",
     "group-name-change",
@@ -177,21 +180,14 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         self._guid_cache: OrderedDict[str, str] = OrderedDict()
         self.webhook_events = self._configured_webhook_events(extra)
         self.typing_indicators = _bool_setting(
-            extra.get("typing_indicators")
-            if "typing_indicators" in extra
-            else os.getenv("BLUEBUBBLES_TYPING_INDICATORS"),
+            extra.get("typing_indicators"),
             default=False,
         )
         self.auto_react = _bool_setting(
-            extra.get("auto_react")
-            if "auto_react" in extra
-            else os.getenv("BLUEBUBBLES_AUTO_REACT"),
+            extra.get("auto_react"),
             default=True,
         )
-        self.auto_react_type = str(
-            extra.get("auto_react_type")
-            or os.getenv("BLUEBUBBLES_AUTO_REACT_TYPE", "like")
-        )
+        self.auto_react_type = str(extra.get("auto_react_type") or "like")
         self.split_paragraph_replies = _bool_setting(
             extra.get("split_paragraph_replies"),
             default=False,
@@ -265,7 +261,7 @@ class BlueBubblesAdapter(BasePlatformAdapter):
 
     @staticmethod
     def _configured_webhook_events(extra: Dict[str, Any]) -> List[str]:
-        raw = extra.get("webhook_events") or os.getenv("BLUEBUBBLES_WEBHOOK_EVENTS")
+        raw = extra.get("webhook_events")
         if raw is None:
             return list(_DEFAULT_WEBHOOK_EVENTS)
         if isinstance(raw, str):
@@ -319,7 +315,9 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         return f"fallback:{chat_guid or ''}:{date_created or ''}:{text_hash}"
 
     @staticmethod
-    def _message_content_dedup_key(payload: Dict[str, Any], record: Dict[str, Any], text: str) -> str:
+    def _message_content_dedup_key(
+        payload: Dict[str, Any], record: Dict[str, Any], text: str
+    ) -> str:
         """Best-effort duplicate key for BlueBubbles' duplicate DM webhooks."""
         chat_guid = BlueBubblesAdapter._value(
             record.get("chatGuid"),
@@ -351,7 +349,16 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         )
         is_group = bool(record.get("isGroup")) or (";+;" in (chat_guid or ""))
         canonical_chat = chat_guid if is_group else (chat_identifier or sender or chat_guid or "")
-        text_hash = hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()
+        attachments = record.get("attachments") or []
+        attachment_ids = [
+            str(att.get("guid") or att.get("id") or att.get("filename") or "")
+            for att in attachments
+            if isinstance(att, dict)
+        ]
+        content_parts = [text, *sorted(item for item in attachment_ids if item)]
+        text_hash = hashlib.sha256(
+            "\u241f".join(content_parts).encode("utf-8", errors="ignore")
+        ).hexdigest()
         return f"recent:{'group' if is_group else 'dm'}:{canonical_chat}:{sender or ''}:{text_hash}"
 
     def _is_duplicate_inbound_message(self, *keys: str) -> bool:
@@ -1121,7 +1128,7 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         # Only process message events; silently acknowledge everything else
         if event_type and event_type not in _MESSAGE_EVENTS:
             return web.Response(text="ok")
-        if event_type and event_type not in self.webhook_events:
+        if event_type and event_type != "message" and event_type not in self.webhook_events:
             return web.Response(text="ok")
 
         record = self._extract_payload_record(payload) or {}
@@ -1156,8 +1163,10 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             # BlueBubbles also emits updated-message for delivery/read receipts
             # and other status-only metadata changes. Those should keep the
             # webhook subscription alive for receipt visibility, but must not be
-            # routed to the agent as duplicate user messages.
-            if not has_edit and not has_retraction:
+            # routed to the agent as duplicate user messages. Retractions are
+            # likewise acknowledged here because the adapter does not support
+            # deleting an already-dispatched gateway message.
+            if has_retraction or not has_edit:
                 return web.Response(text="ok")
 
         # --- Inbound attachment handling ---

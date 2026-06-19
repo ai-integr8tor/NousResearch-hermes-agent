@@ -9,10 +9,13 @@ from gateway.platforms.base import MessageEvent
 
 
 _BLUEBUBBLES_ENV_VARS = (
+    "BLUEBUBBLES_ALLOWED_USERS",
+    "BLUEBUBBLES_ALLOW_ALL_USERS",
     "BLUEBUBBLES_API_URL",
     "BLUEBUBBLES_AUTO_REACT",
     "BLUEBUBBLES_AUTO_REACT_TYPE",
     "BLUEBUBBLES_HOME_CHANNEL",
+    "BLUEBUBBLES_HOME_CHANNEL_NAME",
     "BLUEBUBBLES_MENTION_PATTERNS",
     "BLUEBUBBLES_PASSWORD",
     "BLUEBUBBLES_PUBLIC_URL",
@@ -83,11 +86,9 @@ class TestBlueBubblesConfigLoading:
         assert hc is not None
         assert hc.chat_id == "user@example.com"
 
-    def test_yaml_bluebubbles_options_bridge_to_platform_extra(self, monkeypatch, tmp_path):
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-        monkeypatch.setenv("BLUEBUBBLES_SERVER_URL", "http://localhost:1234")
-        monkeypatch.setenv("BLUEBUBBLES_PASSWORD", "secret")
-        (tmp_path / "config.yaml").write_text(
+    @pytest.mark.parametrize(
+        "config_block",
+        [
             """
 bluebubbles:
   enabled: true
@@ -102,8 +103,47 @@ bluebubbles:
   webhook_host: 0.0.0.0
   webhook_path: custom-bluebubbles-hook
   webhook_port: 9876
-""".strip()
-        )
+""".strip(),
+            """
+platforms:
+  bluebubbles:
+    enabled: true
+    auto_react: false
+    auto_react_type: loved
+    send_read_receipts: false
+    split_paragraph_replies: true
+    typing_indicators: true
+    webhook_events:
+      - new-message
+      - updated-message
+    webhook_host: 0.0.0.0
+    webhook_path: custom-bluebubbles-hook
+    webhook_port: 9876
+""".strip(),
+            """
+gateway:
+  platforms:
+    bluebubbles:
+      enabled: true
+      auto_react: false
+      auto_react_type: loved
+      send_read_receipts: false
+      split_paragraph_replies: true
+      typing_indicators: true
+      webhook_events:
+        - new-message
+        - updated-message
+      webhook_host: 0.0.0.0
+      webhook_path: custom-bluebubbles-hook
+      webhook_port: 9876
+""".strip(),
+        ],
+    )
+    def test_yaml_bluebubbles_options_bridge_to_platform_extra(self, monkeypatch, tmp_path, config_block):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("BLUEBUBBLES_SERVER_URL", "http://localhost:1234")
+        monkeypatch.setenv("BLUEBUBBLES_PASSWORD", "secret")
+        (tmp_path / "config.yaml").write_text(config_block)
         from gateway.config import load_gateway_config
 
         config = load_gateway_config()
@@ -263,9 +303,21 @@ class TestBlueBubblesHelpers:
         assert not hasattr(adapter, "delayed_ack_text")
         assert not hasattr(adapter, "_delayed_ack_tasks")
 
-    def test_webhook_events_env_parses_comma_list(self, monkeypatch):
-        monkeypatch.setenv("BLUEBUBBLES_WEBHOOK_EVENTS", "new-message,updated-message")
+    def test_webhook_events_config_parses_comma_list(self, monkeypatch):
+        adapter = _make_adapter(monkeypatch, webhook_events="new-message,updated-message")
+        assert adapter.webhook_events == ["new-message", "updated-message"]
+
+    def test_behavior_env_vars_do_not_override_config_defaults(self, monkeypatch):
+        monkeypatch.setenv("BLUEBUBBLES_AUTO_REACT", "false")
+        monkeypatch.setenv("BLUEBUBBLES_AUTO_REACT_TYPE", "loved")
+        monkeypatch.setenv("BLUEBUBBLES_TYPING_INDICATORS", "true")
+        monkeypatch.setenv("BLUEBUBBLES_WEBHOOK_EVENTS", "message")
+
         adapter = _make_adapter(monkeypatch)
+
+        assert adapter.auto_react is True
+        assert adapter.auto_react_type == "like"
+        assert adapter.typing_indicators is False
         assert adapter.webhook_events == ["new-message", "updated-message"]
 
     def test_dedup_key_prefers_message_guid_and_text_hash(self, monkeypatch):
@@ -556,6 +608,141 @@ class TestBlueBubblesWebhookHandling:
 
         assert response.text == "ok"
         assert handled == ["hello edited"]
+
+    @pytest.mark.asyncio
+    async def test_updated_message_retraction_is_acknowledged_but_not_processed(self, monkeypatch):
+        adapter = _make_adapter(monkeypatch, send_read_receipts=False)
+        handled = []
+
+        async def fake_handle_message(event):
+            handled.append(event)
+
+        monkeypatch.setattr(adapter, "handle_message", fake_handle_message)
+        payload = {
+            "type": "updated-message",
+            "data": {
+                "guid": "msg-retracted-1",
+                "text": "deleted text",
+                "dateRetracted": 123,
+                "handle": {"address": "user@example.com"},
+                "isFromMe": False,
+                "chats": [{"guid": "iMessage;-;user@example.com"}],
+            },
+        }
+
+        response = await adapter._handle_webhook(_FakeBlueBubblesRequest(payload))
+        await asyncio.sleep(0)
+
+        assert response.text == "ok"
+        assert handled == []
+
+    @pytest.mark.asyncio
+    async def test_legacy_message_event_is_processed_for_existing_webhooks(self, monkeypatch):
+        adapter = _make_adapter(monkeypatch, webhook_events=["new-message"], send_read_receipts=False)
+        handled = []
+
+        async def fake_handle_message(event):
+            handled.append(event.text)
+
+        monkeypatch.setattr(adapter, "handle_message", fake_handle_message)
+        payload = {
+            "type": "message",
+            "data": {
+                "guid": "legacy-msg-1",
+                "text": "legacy hello",
+                "handle": {"address": "user@example.com"},
+                "isFromMe": False,
+                "chats": [{"guid": "iMessage;-;user@example.com"}],
+            },
+        }
+
+        response = await adapter._handle_webhook(_FakeBlueBubblesRequest(payload))
+        await asyncio.sleep(0)
+
+        assert response.text == "ok"
+        assert handled == ["legacy hello"]
+
+    @pytest.mark.asyncio
+    async def test_distinct_attachment_only_messages_are_not_content_deduped(self, monkeypatch):
+        adapter = _make_adapter(monkeypatch, send_read_receipts=False)
+        handled = []
+
+        async def fake_handle_message(event):
+            handled.append((event.message_id, event.media_urls))
+
+        async def fake_download_attachment(att_guid, attachment):
+            return f"/tmp/{att_guid}.jpg"
+
+        monkeypatch.setattr(adapter, "handle_message", fake_handle_message)
+        monkeypatch.setattr(adapter, "_download_attachment", fake_download_attachment)
+
+        def payload(message_guid, attachment_guid):
+            return {
+                "type": "new-message",
+                "data": {
+                    "guid": message_guid,
+                    "text": "",
+                    "handle": {"address": "user@example.com"},
+                    "isFromMe": False,
+                    "chatIdentifier": "user@example.com",
+                    "attachments": [
+                        {"guid": attachment_guid, "mimeType": "image/jpeg"}
+                    ],
+                },
+            }
+
+        first = await adapter._handle_webhook(_FakeBlueBubblesRequest(payload("msg-photo-1", "att-1")))
+        second = await adapter._handle_webhook(_FakeBlueBubblesRequest(payload("msg-photo-2", "att-2")))
+        await asyncio.sleep(0)
+
+        assert first.text == "ok"
+        assert second.text == "ok"
+        assert handled == [
+            ("msg-photo-1", ["/tmp/att-1.jpg"]),
+            ("msg-photo-2", ["/tmp/att-2.jpg"]),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_duplicate_attachment_webhook_variant_is_content_deduped(self, monkeypatch):
+        adapter = _make_adapter(monkeypatch, send_read_receipts=False)
+        handled = []
+
+        async def fake_handle_message(event):
+            handled.append((event.message_id, event.media_urls))
+
+        async def fake_download_attachment(att_guid, attachment):
+            return f"/tmp/{att_guid}.jpg"
+
+        monkeypatch.setattr(adapter, "handle_message", fake_handle_message)
+        monkeypatch.setattr(adapter, "_download_attachment", fake_download_attachment)
+        first_payload = {
+            "type": "new-message",
+            "data": {
+                "guid": "msg-photo-a",
+                "text": "",
+                "handle": {"address": "+155****4567"},
+                "isFromMe": False,
+                "chats": [{"guid": "any;-;+155****4567", "chatIdentifier": "+155****4567"}],
+                "attachments": [{"guid": "att-same", "mimeType": "image/jpeg"}],
+            },
+        }
+        second_payload = {
+            "type": "new-message",
+            "data": {
+                "guid": "msg-photo-b",
+                "text": "",
+                "handle": {"address": "+155****4567"},
+                "isFromMe": False,
+                "chatIdentifier": "+155****4567",
+                "attachments": [{"guid": "att-same", "mimeType": "image/jpeg"}],
+            },
+        }
+
+        await adapter._handle_webhook(_FakeBlueBubblesRequest(first_payload))
+        await adapter._handle_webhook(_FakeBlueBubblesRequest(second_payload))
+        await asyncio.sleep(0)
+
+        assert handled == [("msg-photo-a", ["/tmp/att-same.jpg"])]
 
     @pytest.mark.asyncio
     async def test_duplicate_guid_and_text_only_processes_once(self, monkeypatch):
