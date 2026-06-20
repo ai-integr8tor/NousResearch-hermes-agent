@@ -104,6 +104,56 @@ class TestChatCompletionsBasic:
         # Original list untouched (deepcopy-on-demand)
         assert msgs[2]["tool_name"] == "execute_code"
 
+    def test_convert_messages_strips_timestamp(self, transport):
+        """The SQLite session store attaches a float ``timestamp`` to every
+        message when restoring conversation history via
+        ``get_messages_as_conversation()``. It is not part of the Chat
+        Completions schema. Strict providers (Fireworks, Moonshot/Kimi,
+        strict OpenAI-compatible gateways) reject it with HTTP 400
+        'Extra inputs are not permitted, field: messages[N].timestamp'.
+        Permissive providers (real OpenAI, OpenRouter) silently ignore it,
+        which masked the bug until a strict custom Fireworks proxy surfaced it.
+        """
+        msgs = [
+            {"role": "system", "content": "sys", "timestamp": 1781818044.0},
+            {"role": "user", "content": "hello", "timestamp": 1781818045.0},
+            {"role": "assistant", "content": "hi", "timestamp": 1781818046.0},
+        ]
+        result = transport.convert_messages(msgs)
+        for m in result:
+            assert "timestamp" not in m, m
+        # Visible content preserved
+        assert result[1]["content"] == "hello"
+        # Original list untouched (deepcopy-on-demand)
+        assert msgs[1]["timestamp"] == 1781818045.0
+
+    def test_convert_messages_strips_timestamp_and_tool_name_together(self, transport):
+        """timestamp and tool_name are stripped in the same sanitization pass."""
+        msgs = [
+            {"role": "user", "content": "do thing", "timestamp": 1781818044.0},
+            {"role": "tool", "tool_call_id": "tc1", "content": "ok",
+             "timestamp": 1781818045.0, "tool_name": "terminal"},
+        ]
+        result = transport.convert_messages(msgs)
+        for m in result:
+            assert "timestamp" not in m, m
+            assert "tool_name" not in m, m
+
+    def test_convert_messages_strips_timestamp_for_gemini_too(self, transport):
+        """Gemini models also need timestamp stripped (extra_content kept)."""
+        msgs = [
+            {"role": "assistant", "content": None, "timestamp": 1781818044.0,
+             "tool_calls": [
+                 {"id": "tc1", "type": "function",
+                  "function": {"name": "foo", "arguments": "{}"},
+                  "extra_content": "sig"},
+             ]},
+        ]
+        result = transport.convert_messages(msgs, model="gemini-2.5-flash")
+        assert "timestamp" not in result[0]
+        # extra_content is KEPT for Gemini models
+        assert result[0]["tool_calls"][0]["extra_content"] == "sig"
+
     def test_convert_messages_strips_internal_scaffolding_markers(self, transport):
         """Hermes-internal ``_``-prefixed markers must never reach the wire.
 
