@@ -1489,6 +1489,58 @@ class TestSendToPlatformDiscordThread:
         _, call_kwargs = send_mock.await_args
         assert call_kwargs["thread_id"] == "17585"
 
+
+class TestSendFeishu:
+    @pytest.mark.asyncio
+    async def test_send_feishu_bypasses_adapter_send_hook_for_text(self, monkeypatch):
+        """Feishu send_message text delivery must not be swallowed by wrappers
+        around the streaming adapter's high-level send() method."""
+        from gateway.platforms.feishu import FeishuAdapter
+        from tools.send_message_tool import _send_feishu
+
+        captured = {}
+
+        class _MessageAPI:
+            def create(self, request):
+                captured["request"] = request
+                return SimpleNamespace(
+                    success=lambda: True,
+                    data=SimpleNamespace(message_id="om_raw"),
+                )
+
+        fake_client = SimpleNamespace(
+            im=SimpleNamespace(v1=SimpleNamespace(message=_MessageAPI()))
+        )
+
+        async def _direct(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        async def _suppressed_send(self, *args, **kwargs):
+            captured["send_hook_called"] = True
+            return SimpleNamespace(success=True, message_id="om_suppressed")
+
+        monkeypatch.setattr("gateway.platforms.feishu.FEISHU_AVAILABLE", True)
+        monkeypatch.setattr("gateway.platforms.feishu.FEISHU_DOMAIN", "feishu")
+        monkeypatch.setattr("gateway.platforms.feishu.LARK_DOMAIN", "lark")
+        monkeypatch.setattr(FeishuAdapter, "_build_lark_client", lambda self, domain: fake_client)
+        monkeypatch.setattr(FeishuAdapter, "send", _suppressed_send)
+        monkeypatch.setattr("gateway.platforms.feishu.asyncio.to_thread", _direct)
+
+        result = await _send_feishu(
+            SimpleNamespace(extra={}),
+            "oc_chat",
+            "hello from send_message",
+        )
+
+        assert result == {
+            "success": True,
+            "platform": "feishu",
+            "chat_id": "oc_chat",
+            "message_id": "om_raw",
+        }
+        assert "send_hook_called" not in captured
+        assert captured["request"].request_body.receive_id == "oc_chat"
+
     def test_discord_no_thread_id_when_not_provided(self):
         """Discord platform without thread_id passes None."""
         send_mock = AsyncMock(return_value={"success": True, "message_id": "1"})

@@ -1735,7 +1735,15 @@ async def _send_feishu(pconfig, chat_id, message, media_files=None, thread_id=No
 
         last_result = None
         if message.strip():
-            last_result = await adapter.send(chat_id, message, metadata=metadata)
+            text_sender = getattr(adapter, "_send_text_direct", None)
+            if callable(text_sender):
+                last_result = await text_sender(
+                    chat_id=chat_id,
+                    content=message,
+                    metadata=metadata,
+                )
+            else:
+                last_result = await adapter.send(chat_id, message, metadata=metadata)
             if not last_result.success:
                 return _error(f"Feishu send failed: {last_result.error}")
 
