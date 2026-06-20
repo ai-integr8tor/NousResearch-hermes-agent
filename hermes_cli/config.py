@@ -3880,6 +3880,23 @@ def get_missing_env_vars(required_only: bool = False) -> List[Dict[str, Any]]:
     return missing
 
 
+def _default_value_for_key(dotted_key: str):
+    """Walk DEFAULT_CONFIG and return the default value for *dotted_key*.
+
+    Returns ``None`` when the key is not present in the defaults (new key
+    added by the user) or when the default is itself a dict (intermediate
+    node, not a leaf).
+    """
+    parts = dotted_key.split(".")
+    node = DEFAULT_CONFIG
+    for part in parts:
+        if isinstance(node, dict) and part in node:
+            node = node[part]
+        else:
+            return None
+    return node if not isinstance(node, dict) else None
+
+
 def _set_nested(config, dotted_key: str, value):
     """Set a value at an arbitrarily nested dotted key path.
 
@@ -6691,15 +6708,21 @@ def set_config_value(key: str, value: str):
     # _set_nested which preserves list-typed nodes; before #17876 the
     # inline navigation here silently overwrote lists with dicts.
 
-    # Convert value to appropriate type
-    if value.lower() in {'true', 'yes', 'on'}:
-        value = True
-    elif value.lower() in {'false', 'no', 'off'}:
-        value = False
-    elif value.isdigit():
-        value = int(value)
-    elif value.replace('.', '', 1).isdigit():
-        value = float(value)
+    # Convert value to appropriate type — but skip coercion when
+    # DEFAULT_CONFIG declares a string-typed default for this key.
+    # Enum strings like "off", "on", "yes", "no" must stay as strings
+    # when the target config key is a string-typed enum (e.g.
+    # approvals.mode = "manual"|"smart"|"off").
+    _default_val = _default_value_for_key(key)
+    if not isinstance(_default_val, str):
+        if value.lower() in {'true', 'yes', 'on'}:
+            value = True
+        elif value.lower() in {'false', 'no', 'off'}:
+            value = False
+        elif value.isdigit():
+            value = int(value)
+        elif value.replace('.', '', 1).isdigit():
+            value = float(value)
 
     _set_nested(user_config, key, value)
     

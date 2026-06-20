@@ -247,3 +247,94 @@ class TestListNavigation:
         assert isinstance(allowlist, list)
         assert allowlist[0] == {"name": "alice", "role": "admin"}
         assert allowlist[1] == {"name": "bob", "role": "admin"}
+
+
+# ---------------------------------------------------------------------------
+# Enum string preservation — regression tests for #47515
+# ---------------------------------------------------------------------------
+
+class TestEnumStringPreservation:
+    """hermes config set must not coerce enum strings like 'off'/'on' to
+    booleans when the target key's default value is a string.
+
+    Before #47515, ``hermes config set approvals.mode off`` wrote
+    ``mode: false`` instead of ``mode: 'off'``, corrupting the schema.
+    """
+
+    def test_string_enum_off_stays_string(self, _isolated_hermes_home):
+        """approvals.mode default is 'manual' (str) → 'off' must stay string."""
+        set_config_value("approvals.mode", "off")
+        import yaml
+        config = yaml.safe_load(_read_config(_isolated_hermes_home))
+        assert config["approvals"]["mode"] == "off"
+        assert isinstance(config["approvals"]["mode"], str)
+
+    def test_string_enum_on_stays_string(self, _isolated_hermes_home):
+        """approvals.mode default is 'manual' (str) → 'on' must stay string."""
+        set_config_value("approvals.mode", "on")
+        import yaml
+        config = yaml.safe_load(_read_config(_isolated_hermes_home))
+        assert config["approvals"]["mode"] == "on"
+        assert isinstance(config["approvals"]["mode"], str)
+
+    def test_string_enum_yes_stays_string(self, _isolated_hermes_home):
+        """approvals.mode default is 'manual' (str) → 'yes' must stay string."""
+        set_config_value("approvals.mode", "yes")
+        import yaml
+        config = yaml.safe_load(_read_config(_isolated_hermes_home))
+        assert config["approvals"]["mode"] == "yes"
+        assert isinstance(config["approvals"]["mode"], str)
+
+    def test_string_enum_no_stays_string(self, _isolated_hermes_home):
+        """approvals.mode default is 'manual' (str) → 'no' must stay string."""
+        set_config_value("approvals.mode", "no")
+        import yaml
+        config = yaml.safe_load(_read_config(_isolated_hermes_home))
+        assert config["approvals"]["mode"] == "no"
+        assert isinstance(config["approvals"]["mode"], str)
+
+    def test_human_delay_mode_off_stays_string(self, _isolated_hermes_home):
+        """human_delay.mode default is 'off' (str) → 'on' must stay string."""
+        set_config_value("human_delay.mode", "on")
+        import yaml
+        config = yaml.safe_load(_read_config(_isolated_hermes_home))
+        assert config["human_delay"]["mode"] == "on"
+        assert isinstance(config["human_delay"]["mode"], str)
+
+    def test_bool_key_still_coerced_true(self, _isolated_hermes_home):
+        """terminal.persistent_shell default is True (bool) → 'on' coerced."""
+        set_config_value("terminal.persistent_shell", "on")
+        import yaml
+        config = yaml.safe_load(_read_config(_isolated_hermes_home))
+        assert config["terminal"]["persistent_shell"] is True
+
+    def test_bool_key_still_coerced_false(self, _isolated_hermes_home):
+        """browser.record_sessions default is False (bool) → 'off' coerced."""
+        set_config_value("browser.record_sessions", "off")
+        import yaml
+        config = yaml.safe_load(_read_config(_isolated_hermes_home))
+        assert config["browser"]["record_sessions"] is False
+
+    def test_bool_key_still_coerced_yes(self, _isolated_hermes_home):
+        """terminal.persistent_shell default is True (bool) → 'yes' coerced."""
+        set_config_value("terminal.persistent_shell", "yes")
+        import yaml
+        config = yaml.safe_load(_read_config(_isolated_hermes_home))
+        assert config["terminal"]["persistent_shell"] is True
+
+    def test_numeric_key_still_coerced(self, _isolated_hermes_home):
+        """Numeric keys should still be coerced to int/float."""
+        set_config_value("verbose", "3")
+        import yaml
+        config = yaml.safe_load(_read_config(_isolated_hermes_home))
+        assert config["verbose"] == 3
+        assert isinstance(config["verbose"], int)
+
+    def test_unknown_key_preserves_string(self, _isolated_hermes_home):
+        """A key not in DEFAULT_CONFIG should preserve the raw string."""
+        set_config_value("custom_setting", "off")
+        import yaml
+        config = yaml.safe_load(_read_config(_isolated_hermes_home))
+        # Unknown key — _default_value_for_key returns None (not str),
+        # so old coercion behavior applies: 'off' → False.
+        assert config["custom_setting"] is False
