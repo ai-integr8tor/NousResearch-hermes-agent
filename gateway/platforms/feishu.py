@@ -951,7 +951,7 @@ def _normalize_interactive_message(message_type: str, payload: Dict[str, Any]) -
     if actions:
         lines.append(f"Actions: {', '.join(actions)}")
 
-    text_content = "\n".join(lines[:12]).strip() or FALLBACK_INTERACTIVE_TEXT
+    text_content = "\n".join(lines).strip() or FALLBACK_INTERACTIVE_TEXT
     return FeishuNormalizedMessage(
         raw_type=message_type,
         text_content=text_content,
@@ -3131,6 +3131,25 @@ class FeishuAdapter(BasePlatformAdapter):
         )
         reply_to_text = await self._fetch_message_text(reply_to_message_id) if reply_to_message_id else None
 
+        # If the replied-to message contains images (e.g. user quotes a photo
+        # and @bot asks to analyze it), fetch the media and merge into the
+        # current message's media_urls so the agent can see the image. This
+        # runs even when the current message already carries media — a user
+        # may attach a new image while quoting an earlier one ("compare these
+        # two"). Duplicates are filtered so re-quoting an image the current
+        # message already includes does not double-count it.
+        if reply_to_message_id:
+            reply_media_urls, reply_media_types = await self._fetch_reply_media(reply_to_message_id)
+            appended = False
+            for url, mtype in zip(reply_media_urls, reply_media_types):
+                if url in media_urls:
+                    continue
+                media_urls.append(url)
+                media_types.append(mtype)
+                appended = True
+            if appended and inbound_type == MessageType.TEXT:
+                inbound_type = MessageType.PHOTO
+
         sender_primary = (
             getattr(sender_id, "open_id", None)
             or getattr(sender_id, "user_id", None)
@@ -4055,6 +4074,47 @@ class FeishuAdapter(BasePlatformAdapter):
             logger.warning("[Feishu] Failed to fetch parent message %s", message_id, exc_info=True)
             return None
 
+    async def _fetch_reply_media(self, message_id: str) -> tuple[List[str], List[str]]:
+        """Fetch image/media resources from a replied-to message.
+
+        When a user quotes a photo message and @-mentions the bot, the current
+        message only contains the user's text. This method fetches the media
+        from the quoted message so the agent can see it.
+        """
+        if not self._client or not message_id:
+            return [], []
+        try:
+            request = self._build_get_message_request(message_id)
+            response = await asyncio.to_thread(self._client.im.v1.message.get, request)
+            if not response or getattr(response, "success", lambda: False)() is False:
+                return [], []
+            items = getattr(getattr(response, "data", None), "items", None) or []
+            parent = items[0] if items else None
+            if not parent:
+                return [], []
+
+            msg_type = (getattr(parent, "msg_type", "") or "").strip().lower()
+            body = getattr(parent, "body", None)
+            raw_content = getattr(body, "content", "") or ""
+
+            # Only process media-bearing message types
+            if msg_type not in {"image", "post", "sticker", "file", "media"}:
+                return [], []
+
+            normalized = normalize_feishu_message(
+                message_type=msg_type,
+                raw_content=raw_content,
+                mentions=getattr(parent, "mentions", None),
+                bot=self._bot_identity(),
+            )
+            return await self._download_feishu_message_resources(
+                message_id=message_id,
+                normalized=normalized,
+            )
+        except Exception:
+            logger.debug("[Feishu] Failed to fetch reply media for %s", message_id, exc_info=True)
+            return [], []
+
     def _extract_text_from_raw_content(
         self,
         *,
@@ -4707,7 +4767,20 @@ class FeishuAdapter(BasePlatformAdapter):
     @staticmethod
     def _build_get_message_request(message_id: str) -> Any:
         if "GetMessageRequest" in globals():
-            return GetMessageRequest.builder().message_id(message_id).build()
+            request = GetMessageRequest.builder().message_id(message_id).build()
+            # Request the user-facing rendered card content. Without this,
+            # JSON 2.0 cards (tables, collapsible panels, etc.) sent to/queried
+            # by clients below the required version return only a fallback
+            # "please upgrade your client" placeholder instead of the real
+            # content. With it, Feishu renders the card body to markdown
+            # (tables become markdown tables), which the agent can read.
+            try:
+                queries = list(getattr(request, "queries", None) or [])
+                queries.append(("card_msg_content_type", "user_card_content"))
+                request.queries = queries
+            except Exception:
+                pass
+            return request
         return SimpleNamespace(message_id=message_id)
 
     @staticmethod

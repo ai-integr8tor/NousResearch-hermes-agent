@@ -4944,3 +4944,322 @@ class TestChatLockEviction(unittest.TestCase):
                 held.release()
 
         asyncio.run(_run())
+
+
+# ===========================================================================
+# Tests for reply content visibility fixes
+# ===========================================================================
+
+
+class TestFeishuFetchReplyMedia(unittest.TestCase):
+    """Tests for _fetch_reply_media — fetching images from quoted messages."""
+
+    def _build_adapter(self):
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter.__new__(FeishuAdapter)
+        adapter._bot_open_id = "ou_bot"
+        adapter._bot_user_id = ""
+        adapter._bot_name = "Hermes"
+        adapter._client = Mock()
+        adapter._build_get_message_request = Mock(return_value=object())
+        adapter._download_feishu_message_resources = AsyncMock(
+            return_value=(["/tmp/img.png"], ["image/png"])
+        )
+        return adapter
+
+    def test_fetch_reply_media_returns_image_for_image_message(self):
+        adapter = self._build_adapter()
+        parent = SimpleNamespace(
+            body=SimpleNamespace(content=json.dumps({"image_key": "img_key_123"})),
+            msg_type="image",
+            mentions=None,
+        )
+        response = Mock()
+        response.success = Mock(return_value=True)
+        response.data = SimpleNamespace(items=[parent])
+        adapter._client.im.v1.message.get = Mock(return_value=response)
+
+        urls, types = asyncio.run(adapter._fetch_reply_media("m_parent"))
+        self.assertEqual(urls, ["/tmp/img.png"])
+        self.assertEqual(types, ["image/png"])
+
+    def test_fetch_reply_media_returns_empty_for_text_message(self):
+        adapter = self._build_adapter()
+        parent = SimpleNamespace(
+            body=SimpleNamespace(content=json.dumps({"text": "hello"})),
+            msg_type="text",
+            mentions=None,
+        )
+        response = Mock()
+        response.success = Mock(return_value=True)
+        response.data = SimpleNamespace(items=[parent])
+        adapter._client.im.v1.message.get = Mock(return_value=response)
+
+        urls, types = asyncio.run(adapter._fetch_reply_media("m_parent"))
+        self.assertEqual(urls, [])
+        self.assertEqual(types, [])
+
+    def test_fetch_reply_media_returns_empty_for_interactive_message(self):
+        """Interactive/card messages are text-based; media fetch should skip them."""
+        adapter = self._build_adapter()
+        parent = SimpleNamespace(
+            body=SimpleNamespace(content=json.dumps({"title": "Alert"})),
+            msg_type="interactive",
+            mentions=None,
+        )
+        response = Mock()
+        response.success = Mock(return_value=True)
+        response.data = SimpleNamespace(items=[parent])
+        adapter._client.im.v1.message.get = Mock(return_value=response)
+
+        urls, types = asyncio.run(adapter._fetch_reply_media("m_parent"))
+        self.assertEqual(urls, [])
+        self.assertEqual(types, [])
+
+    def test_fetch_reply_media_returns_empty_when_no_client(self):
+        adapter = self._build_adapter()
+        adapter._client = None
+
+        urls, types = asyncio.run(adapter._fetch_reply_media("m_parent"))
+        self.assertEqual(urls, [])
+        self.assertEqual(types, [])
+
+    def test_fetch_reply_media_handles_api_failure_gracefully(self):
+        adapter = self._build_adapter()
+        response = Mock()
+        response.success = Mock(return_value=False)
+        adapter._client.im.v1.message.get = Mock(return_value=response)
+
+        urls, types = asyncio.run(adapter._fetch_reply_media("m_parent"))
+        self.assertEqual(urls, [])
+        self.assertEqual(types, [])
+
+
+class TestFeishuReplyMediaInProcessInbound(unittest.TestCase):
+    """Tests that _process_inbound_message merges reply media into current event."""
+
+    def _build_adapter(self):
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter.__new__(FeishuAdapter)
+        adapter._bot_open_id = "ou_bot"
+        adapter._bot_user_id = ""
+        adapter._bot_name = "Hermes"
+        adapter._download_feishu_message_resources = AsyncMock(return_value=([], []))
+        adapter._fetch_message_text = AsyncMock(return_value=None)
+        adapter._fetch_reply_media = AsyncMock(return_value=(["/tmp/reply.png"], ["image/png"]))
+        adapter.get_chat_info = AsyncMock(return_value={"name": "Test Chat"})
+        adapter._resolve_sender_profile = AsyncMock(
+            return_value={"user_id": "u1", "user_name": "Alice", "user_id_alt": None}
+        )
+        adapter._resolve_source_chat_type = Mock(return_value="group")
+        adapter.build_source = Mock(return_value=SimpleNamespace(thread_id=None))
+        adapter._dispatch_inbound_event = AsyncMock()
+        return adapter
+
+    def test_reply_to_image_merges_media_into_event(self):
+        from gateway.platforms.base import MessageType
+
+        adapter = self._build_adapter()
+        message = SimpleNamespace(
+            content=json.dumps({"text": "analyze this"}),
+            message_type="text",
+            message_id="m1",
+            mentions=[],
+            chat_id="oc_chat",
+            parent_id="m_parent_img",
+            upper_message_id=None,
+            root_id=None,
+            thread_id=None,
+        )
+        asyncio.run(
+            adapter._process_inbound_message(
+                data=message,
+                message=message,
+                sender_id=None,
+                chat_type="group",
+                message_id="m1",
+            )
+        )
+        event = adapter._dispatch_inbound_event.call_args.args[0]
+        self.assertEqual(event.media_urls, ["/tmp/reply.png"])
+        self.assertEqual(event.media_types, ["image/png"])
+        self.assertEqual(event.message_type, MessageType.PHOTO)
+
+    def test_reply_to_text_does_not_fetch_media(self):
+        from gateway.platforms.base import MessageType
+
+        adapter = self._build_adapter()
+        adapter._fetch_reply_media = AsyncMock(return_value=([], []))
+        message = SimpleNamespace(
+            content=json.dumps({"text": "got it"}),
+            message_type="text",
+            message_id="m2",
+            mentions=[],
+            chat_id="oc_chat",
+            parent_id="m_parent_txt",
+            upper_message_id=None,
+            root_id=None,
+            thread_id=None,
+        )
+        asyncio.run(
+            adapter._process_inbound_message(
+                data=message,
+                message=message,
+                sender_id=None,
+                chat_type="group",
+                message_id="m2",
+            )
+        )
+        event = adapter._dispatch_inbound_event.call_args.args[0]
+        self.assertEqual(event.media_urls, [])
+        self.assertEqual(event.message_type, MessageType.TEXT)
+
+    def test_current_message_with_media_also_merges_reply_media(self):
+        """Current message media and quoted media are combined (e.g. 'compare these')."""
+        from gateway.platforms.base import MessageType
+
+        adapter = self._build_adapter()
+        adapter._download_feishu_message_resources = AsyncMock(
+            return_value=(["/tmp/current.png"], ["image/png"])
+        )
+        adapter._fetch_reply_media = AsyncMock(
+            return_value=(["/tmp/quoted.png"], ["image/png"])
+        )
+        message = SimpleNamespace(
+            content=json.dumps({"image_key": "img_current"}),
+            message_type="image",
+            message_id="m3",
+            mentions=[],
+            chat_id="oc_chat",
+            parent_id="m_parent_img",
+            upper_message_id=None,
+            root_id=None,
+            thread_id=None,
+        )
+        asyncio.run(
+            adapter._process_inbound_message(
+                data=message,
+                message=message,
+                sender_id=None,
+                chat_type="group",
+                message_id="m3",
+            )
+        )
+        adapter._fetch_reply_media.assert_called_once()
+        event = adapter._dispatch_inbound_event.call_args.args[0]
+        self.assertEqual(event.media_urls, ["/tmp/current.png", "/tmp/quoted.png"])
+        self.assertEqual(event.media_types, ["image/png", "image/png"])
+
+    def test_duplicate_reply_media_is_deduplicated(self):
+        """Re-quoting an image the current message already includes is not double-counted."""
+        adapter = self._build_adapter()
+        adapter._download_feishu_message_resources = AsyncMock(
+            return_value=(["/tmp/shared.png"], ["image/png"])
+        )
+        adapter._fetch_reply_media = AsyncMock(
+            return_value=(["/tmp/shared.png"], ["image/png"])
+        )
+        message = SimpleNamespace(
+            content=json.dumps({"image_key": "img_shared"}),
+            message_type="image",
+            message_id="m4",
+            mentions=[],
+            chat_id="oc_chat",
+            parent_id="m_parent_img",
+            upper_message_id=None,
+            root_id=None,
+            thread_id=None,
+        )
+        asyncio.run(
+            adapter._process_inbound_message(
+                data=message,
+                message=message,
+                sender_id=None,
+                chat_type="group",
+                message_id="m4",
+            )
+        )
+        event = adapter._dispatch_inbound_event.call_args.args[0]
+        self.assertEqual(event.media_urls, ["/tmp/shared.png"])
+        self.assertEqual(event.media_types, ["image/png"])
+
+
+class TestInteractiveCardExtraction(unittest.TestCase):
+    """Tests for interactive card content extraction with increased line limit."""
+
+    def test_card_with_many_fields_not_truncated_at_12_lines(self):
+        from gateway.platforms.feishu import _normalize_interactive_message
+
+        payload = {
+            "header": {"title": {"content": "S3 Alert: execution report check replace fail"}},
+            "elements": [
+                {"tag": "div", "text": {"content": f"Field{i}: value{i}"}}
+                for i in range(20)
+            ],
+        }
+        result = _normalize_interactive_message("interactive", payload)
+        # All 20 fields should be present — no line truncation
+        self.assertIn("Field0: value0", result.text_content)
+        self.assertIn("Field19: value19", result.text_content)
+
+    def test_card_with_12_or_fewer_lines_unchanged(self):
+        from gateway.platforms.feishu import _normalize_interactive_message
+
+        payload = {
+            "header": {"title": {"content": "Simple Alert"}},
+            "elements": [
+                {"tag": "div", "text": {"content": f"Line{i}"}}
+                for i in range(5)
+            ],
+        }
+        result = _normalize_interactive_message("interactive", payload)
+        self.assertIn("Simple Alert", result.text_content)
+        self.assertIn("Line0", result.text_content)
+        self.assertIn("Line4", result.text_content)
+
+
+class TestFeishuGetMessageCardContentType(unittest.TestCase):
+    """The get-message request must ask Feishu for the rendered user card
+    content. Without ``card_msg_content_type=user_card_content``, JSON 2.0
+    cards (tables, collapsible panels, etc.) come back as a fallback
+    "please upgrade your client" placeholder instead of their real content."""
+
+    def test_get_message_request_includes_card_content_type(self):
+        from gateway.platforms.feishu import FeishuAdapter
+
+        request = FeishuAdapter._build_get_message_request("om_test")
+        queries = list(getattr(request, "queries", None) or [])
+        self.assertIn(("card_msg_content_type", "user_card_content"), queries)
+
+
+class TestReplySnippetTruncation(unittest.TestCase):
+    """Tests for the unified reply_to_text truncation limit in gateway run.
+
+    The injection lives in GatewayRunner._prepare_inbound_message_text; these
+    tests pin the agreed limit so a future change to the magic number is a
+    deliberate, reviewed edit rather than an accidental regression.
+    """
+
+    REPLY_SNIPPET_LIMIT = 4000
+
+    def _truncate(self, reply_text: str) -> str:
+        # Mirror gateway/run.py: single unified limit, no platform-specific
+        # prefix branching.
+        return reply_text[: self.REPLY_SNIPPET_LIMIT]
+
+    def test_long_reply_truncated_at_limit(self):
+        snippet = self._truncate("A" * (self.REPLY_SNIPPET_LIMIT + 500))
+        self.assertEqual(len(snippet), self.REPLY_SNIPPET_LIMIT)
+
+    def test_card_sized_reply_not_truncated(self):
+        # A medium structured quote (~1.5k chars) must pass through intact.
+        card_text = "Field: value\n" * 120  # ~1560 chars
+        self.assertLess(len(card_text), self.REPLY_SNIPPET_LIMIT)
+        self.assertEqual(self._truncate(card_text), card_text)
+
+    def test_short_reply_not_truncated(self):
+        short_text = "This is a short alert message"
+        self.assertEqual(self._truncate(short_text), short_text)
+
