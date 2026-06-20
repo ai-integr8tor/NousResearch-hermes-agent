@@ -1741,7 +1741,6 @@ async def _send_feishu(pconfig, chat_id, message, media_files=None, thread_id=No
         from gateway.platforms.feishu import FeishuAdapter, FEISHU_AVAILABLE
         if not FEISHU_AVAILABLE:
             return {"error": "Feishu dependencies not installed. Run: pip install 'hermes-agent[feishu]'"}
-        from gateway.platforms.feishu import FEISHU_DOMAIN, LARK_DOMAIN
     except ImportError:
         return {"error": "Feishu dependencies not installed. Run: pip install 'hermes-agent[feishu]'"}
 
@@ -1749,9 +1748,9 @@ async def _send_feishu(pconfig, chat_id, message, media_files=None, thread_id=No
 
     try:
         adapter = FeishuAdapter(pconfig)
-        domain_name = getattr(adapter, "_domain_name", "feishu")
-        domain = FEISHU_DOMAIN if domain_name != "lark" else LARK_DOMAIN
-        adapter._client = adapter._build_lark_client(domain)
+        # Resolve the SDK domain through the adapter so private deployments
+        # (FEISHU_DOMAIN set to a full URL) route to the correct host.
+        adapter._client = adapter._build_lark_client(adapter._resolve_domain())
         metadata = {"thread_id": thread_id} if thread_id else None
 
         last_result = None

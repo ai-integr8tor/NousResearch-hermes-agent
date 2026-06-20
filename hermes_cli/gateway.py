@@ -4532,43 +4532,19 @@ _PLATFORMS = [
             "6. Restrict access with FEISHU_ALLOWED_USERS for production use",
         ],
         "vars": [
-            {
-                "name": "FEISHU_APP_ID",
-                "prompt": "App ID",
-                "password": False,
-                "help": "The App ID from your Feishu/Lark application.",
-            },
-            {
-                "name": "FEISHU_APP_SECRET",
-                "prompt": "App Secret",
-                "password": True,
-                "help": "The App Secret from your Feishu/Lark application.",
-            },
-            {
-                "name": "FEISHU_DOMAIN",
-                "prompt": "Domain — feishu or lark (default: feishu)",
-                "password": False,
-                "help": "Use 'feishu' for Feishu China, or 'lark' for Lark international.",
-            },
-            {
-                "name": "FEISHU_CONNECTION_MODE",
-                "prompt": "Connection mode — websocket or webhook (default: websocket)",
-                "password": False,
-                "help": "websocket is recommended unless you specifically need webhook mode.",
-            },
-            {
-                "name": "FEISHU_ALLOWED_USERS",
-                "prompt": "Allowed user IDs (comma-separated, or empty)",
-                "password": False,
-                "is_allowlist": True,
-                "help": "Restrict which Feishu/Lark users can interact with the bot.",
-            },
-            {
-                "name": "FEISHU_HOME_CHANNEL",
-                "prompt": "Home chat ID (optional, for cron/notifications)",
-                "password": False,
-                "help": "Chat ID for scheduled results and notifications.",
-            },
+            {"name": "FEISHU_APP_ID", "prompt": "App ID", "password": False,
+             "help": "The App ID from your Feishu/Lark application."},
+            {"name": "FEISHU_APP_SECRET", "prompt": "App Secret", "password": True,
+             "help": "The App Secret from your Feishu/Lark application."},
+            {"name": "FEISHU_DOMAIN", "prompt": "Domain — feishu, lark, or full https:// URL (default: feishu)", "password": False,
+             "help": "Use 'feishu' for Feishu China, 'lark' for Lark international, or a full https:// URL for a private Feishu deployment."},
+            {"name": "FEISHU_CONNECTION_MODE", "prompt": "Connection mode — websocket or webhook (default: websocket)", "password": False,
+             "help": "websocket is recommended unless you specifically need webhook mode."},
+            {"name": "FEISHU_ALLOWED_USERS", "prompt": "Allowed user IDs (comma-separated, or empty)", "password": False,
+             "is_allowlist": True,
+             "help": "Restrict which Feishu/Lark users can interact with the bot."},
+            {"name": "FEISHU_HOME_CHANNEL", "prompt": "Home chat ID (optional, for cron/notifications)", "password": False,
+             "help": "Chat ID for scheduled results and notifications."},
         ],
     },
     {
@@ -5622,9 +5598,28 @@ def _setup_feishu():
             print_warning("  Skipped — Feishu / Lark won't work without an App Secret.")
             return
 
-        domain_choices = ["feishu (China)", "lark (International)"]
+        domain_choices = [
+            "feishu (China)",
+            "lark (International)",
+            "Custom (private deployment URL)",
+        ]
         domain_idx = prompt_choice("  Domain", domain_choices, 0)
-        domain = "lark" if domain_idx == 1 else "feishu"
+        if domain_idx == 1:
+            domain = "lark"
+        elif domain_idx == 2:
+            while True:
+                custom = prompt(
+                    "  Private Feishu base URL (e.g. https://open.example.com)",
+                    password=False,
+                ).strip().rstrip("/")
+                if custom.startswith(("http://", "https://")):
+                    domain = custom
+                    break
+                print_warning(
+                    "  Enter a full URL starting with http:// or https://"
+                )
+        else:
+            domain = "feishu"
 
         # Try to probe the bot with manual credentials
         bot_name = None
