@@ -466,6 +466,73 @@ def _content_policy_blocked_result(
     }
 
 
+def _try_failover_with_hook(
+    agent,
+    classified,
+    *,
+    retry_count: int,
+    max_retries: int,
+    error_type: str,
+    error_message: str,
+    status_code: Optional[int],
+    reason: "Optional[FailoverReason]" = None,
+) -> Optional[str]:
+    """Invoke ``pre_failover_decision`` hook, then fall through to normal fallback.
+
+    Returns:
+        "redirected" — plugin handled the switch (caller should ``continue``)
+        "retry"      — plugin says retry same provider (caller should ``continue``)
+        "abort"      — plugin says stop; caller uses ``_abort_message``
+        None         — no plugin interceded; normal ``_try_activate_fallback()``
+                       was attempted and its result (True/False) is on the agent.
+
+    When returning None, the caller must still check whether fallback succeeded
+    by inspecting the agent state (this function calls ``_try_activate_fallback``
+    for the caller when no plugin intercedes).
+    """
+    # Fire the hook — plugins get first chance to redirect
+    hook_result = agent._invoke_pre_failover_decision(
+        classified=classified,
+        retry_count=retry_count,
+        max_retries=max_retries,
+        error_type=error_type,
+        error_message=error_message,
+        status_code=status_code,
+    )
+    if hook_result is not None:
+        action = hook_result.get("action")
+        if action == "redirect":
+            # Plugin wants to route to a specific model/provider
+            from agent.agent_runtime_helpers import switch_model
+            try:
+                switch_model(
+                    agent,
+                    hook_result.get("model", agent.model),
+                    hook_result.get("provider", agent.provider),
+                    api_key=hook_result.get("api_key", ""),
+                    base_url=hook_result.get("base_url", ""),
+                    api_mode=hook_result.get("api_mode", ""),
+                )
+                logger.info(
+                    "pre_failover_decision: plugin redirected to %s/%s",
+                    hook_result.get("provider"), hook_result.get("model"),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "pre_failover_decision redirect failed: %s; "
+                    "falling through to normal fallback", exc,
+                )
+                return None
+            return "redirected"
+        elif action == "retry":
+            logger.info("pre_failover_decision: plugin requested retry")
+            return "retry"
+        elif action == "abort":
+            agent._failover_abort_message = hook_result.get("message", "")
+            return "abort"
+    return None
+
+
 def run_conversation(
     agent,
     user_message: str,
@@ -2782,6 +2849,34 @@ def run_conversation(
                             )
                         else:
                             agent._buffer_status("⚠️ Rate limited — switching to fallback provider...")
+                        # Let plugins intercept the eager rate-limit fallback
+                        _hook_action = _try_failover_with_hook(
+                            agent, classified,
+                            retry_count=retry_count,
+                            max_retries=max_retries,
+                            error_type=type(api_error).__name__,
+                            error_message=str(api_error),
+                            status_code=status_code,
+                        )
+                        if _hook_action in ("redirected", "retry"):
+                            retry_count = 0
+                            compression_attempts = 0
+                            _retry.primary_recovery_attempted = False
+                            continue
+                        if _hook_action == "abort":
+                            agent._flush_status_buffer()
+                            _abort_msg = getattr(agent, "_failover_abort_message", "") or "Aborted by plugin."
+                            agent._emit_status(f"🛑 {_abort_msg}")
+                            agent._persist_session(messages, conversation_history)
+                            return {
+                                "final_response": _abort_msg,
+                                "messages": messages,
+                                "api_calls": api_call_count,
+                                "completed": False,
+                                "failed": True,
+                                "error": _abort_msg,
+                            }
+                        # No plugin interceded — normal fallback chain
                         if agent._try_activate_fallback(reason=classified.reason):
                             retry_count = 0
                             compression_attempts = 0
@@ -3185,6 +3280,34 @@ def run_conversation(
                             agent._buffer_status("⚠️ Provider safety filter blocked this request — trying fallback...")
                         else:
                             agent._buffer_status(f"⚠️ Non-retryable error (HTTP {status_code}) — trying fallback...")
+                    # Let plugins intercept non-retryable fallback decisions
+                    _hook_action = _try_failover_with_hook(
+                        agent, classified,
+                        retry_count=retry_count,
+                        max_retries=max_retries,
+                        error_type=type(api_error).__name__,
+                        error_message=str(api_error),
+                        status_code=status_code,
+                    )
+                    if _hook_action in ("redirected", "retry"):
+                        retry_count = 0
+                        compression_attempts = 0
+                        _retry.primary_recovery_attempted = False
+                        continue
+                    if _hook_action == "abort":
+                        agent._flush_status_buffer()
+                        _abort_msg = getattr(agent, "_failover_abort_message", "") or "Aborted by plugin."
+                        agent._emit_status(f"🛑 {_abort_msg}")
+                        agent._persist_session(messages, conversation_history)
+                        return {
+                            "final_response": _abort_msg,
+                            "messages": messages,
+                            "api_calls": api_call_count,
+                            "completed": False,
+                            "failed": True,
+                            "error": _abort_msg,
+                        }
+                    # No plugin interceded — normal fallback chain
                     if agent._try_activate_fallback():
                         retry_count = 0
                         compression_attempts = 0
@@ -3329,7 +3452,35 @@ def run_conversation(
                         _retry.primary_recovery_attempted = True
                         retry_count = 0
                         continue
-                    # Try fallback before giving up entirely
+                    # Try fallback before giving up entirely — let plugins
+                    # intercept the decision via pre_failover_decision hook.
+                    _hook_action = _try_failover_with_hook(
+                        agent, classified,
+                        retry_count=retry_count,
+                        max_retries=max_retries,
+                        error_type=type(api_error).__name__,
+                        error_message=str(api_error),
+                        status_code=status_code,
+                    )
+                    if _hook_action in ("redirected", "retry"):
+                        retry_count = 0
+                        compression_attempts = 0
+                        _retry.primary_recovery_attempted = False
+                        continue
+                    if _hook_action == "abort":
+                        agent._flush_status_buffer()
+                        _abort_msg = getattr(agent, "_failover_abort_message", "") or "Aborted by plugin."
+                        agent._emit_status(f"🛑 {_abort_msg}")
+                        agent._persist_session(messages, conversation_history)
+                        return {
+                            "final_response": _abort_msg,
+                            "messages": messages,
+                            "api_calls": api_call_count,
+                            "completed": False,
+                            "failed": True,
+                            "error": _abort_msg,
+                        }
+                    # No plugin interceded — proceed with normal fallback chain
                     if agent._has_pending_fallback():
                         agent._buffer_status(f"⚠️ Max retries ({max_retries}) exhausted — trying fallback...")
                     if agent._try_activate_fallback():

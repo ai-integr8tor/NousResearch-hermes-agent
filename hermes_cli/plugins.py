@@ -167,6 +167,31 @@ VALID_HOOKS: Set[str] = {
     #   choice: "once" | "session" | "always" | "deny" | "timeout"
     "pre_approval_request",
     "post_approval_response",
+    # Failover intercept hook. Fired inside the retry loop when the agent is
+    # about to activate the fallback chain (after error classification, after
+    # credential-pool recovery has been attempted, and after provider-specific
+    # recovery paths have been exhausted).
+    #
+    # Plugins may return a dict to redirect the failover:
+    #   {"action": "redirect", "model": "...", "provider": "...", **extra}
+    #       -> agent switches to the specified model/provider instead of walking
+    #          the configured fallback chain.  Extra keys (api_key, base_url,
+    #          api_mode) are forwarded to switch_model().
+    #   {"action": "retry"}
+    #       -> suppress fallback and retry the same provider (useful after
+    #          a plugin has refreshed credentials or cleared a transient state).
+    #   {"action": "abort", "message": "..."}
+    #       -> stop the retry loop and return the message as the final response.
+    #   None / {} / {"action": "continue"}
+    #       -> no-op; proceed with normal fallback chain behavior.
+    #
+    # First non-None/non-empty dict with a recognized action wins; later
+    # plugins are not consulted.
+    #
+    # Kwargs: classified (ClassifiedError), retry_count, max_retries,
+    #   model, provider, base_url, api_mode, session_id, platform,
+    #   error_type, error_message, status_code.
+    "pre_failover_decision",
 }
 
 ENTRY_POINTS_GROUP = "hermes_agent.plugins"

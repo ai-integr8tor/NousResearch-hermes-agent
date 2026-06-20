@@ -146,7 +146,7 @@ from tools.browser_tool import cleanup_browser
 
 # Agent internals extracted to agent/ package for modularity
 from agent.memory_manager import sanitize_context
-from agent.error_classifier import FailoverReason
+from agent.error_classifier import ClassifiedError, FailoverReason
 from agent.redact import redact_sensitive_text
 from agent.model_metadata import (
     estimate_request_tokens_rough,  # noqa: F401  # re-exported for tests that mock.patch("run_agent.estimate_request_tokens_rough")
@@ -2235,6 +2235,51 @@ class AIAgent:
             )
         except Exception:
             pass
+
+    def _invoke_pre_failover_decision(
+        self,
+        *,
+        classified: ClassifiedError,
+        retry_count: int,
+        max_retries: int,
+        error_type: str,
+        error_message: str,
+        status_code: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Fire ``pre_failover_decision`` hook and return the first actionable response.
+
+        Called just before ``_try_activate_fallback()`` in the retry loop.
+        Plugins may return a dict with an ``action`` key to redirect, retry,
+        or abort the failover.  Returns None when no plugin intercedes.
+        """
+        try:
+            from hermes_cli import plugins as _plugins
+
+            if not _plugins.has_hook("pre_failover_decision"):
+                return None
+            results = _plugins.invoke_hook(
+                "pre_failover_decision",
+                classified=classified,
+                retry_count=retry_count,
+                max_retries=max_retries,
+                model=self.model,
+                provider=self.provider or "",
+                base_url=self.base_url or "",
+                api_mode=self.api_mode or "",
+                session_id=self.session_id or "",
+                platform=self.platform or "",
+                error_type=error_type,
+                error_message=error_message,
+                status_code=status_code,
+            )
+            for result in results:
+                if isinstance(result, dict) and result.get("action") in (
+                    "redirect", "retry", "abort",
+                ):
+                    return result
+        except Exception:
+            pass
+        return None
 
     def _dump_api_request_debug(
         self,
