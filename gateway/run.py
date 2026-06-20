@@ -11768,8 +11768,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return "\n".join(lines)
 
         except Exception as e:
-            logger.warning("MCP reload failed: %s", e)
-            return t("gateway.reload_mcp.failed", error=e)
+            logger.warning("MCP reload failed: %s", repr(e))
+            return t("gateway.reload_mcp.failed", error=repr(e))
 
 
 
@@ -12040,6 +12040,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
     def _reply_anchor_for_event(event: MessageEvent) -> Optional[str]:
         """Return the platform-specific reply anchor for GatewayRunner sends."""
         return _reply_anchor_for_event(event)
+
 
 
     # ------------------------------------------------------------------
