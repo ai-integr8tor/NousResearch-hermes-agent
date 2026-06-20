@@ -3307,9 +3307,19 @@ function fetchJson(url, token, options = {}) {
       },
       res => {
         const chunks = []
+        let received = 0
         res.on('error', reject)
-        res.on('data', chunk => chunks.push(chunk))
+        res.on('data', chunk => {
+          received += chunk.length
+          if (received > MAX_FETCH_BYTES) {
+            req.destroy()
+            reject(new Error(`Response from ${url} exceeded ${MAX_FETCH_BYTES} bytes`))
+            return
+          }
+          chunks.push(chunk)
+        })
         res.on('end', () => {
+          if (req.destroyed) return
           const text = Buffer.concat(chunks).toString('utf8')
           if ((res.statusCode || 500) >= 400) {
             reject(new Error(`${res.statusCode}: ${text || res.statusMessage}`))
@@ -3712,9 +3722,19 @@ async function resourceBufferFromUrl(rawUrl) {
         return
       }
       const chunks = []
+      let received = 0
       res.on('error', reject)
-      res.on('data', chunk => chunks.push(chunk))
+      res.on('data', chunk => {
+        received += chunk.length
+        if (received > MAX_DOWNLOAD_BYTES) {
+          req.destroy()
+          reject(new Error(`Download from ${rawUrl} exceeded ${MAX_DOWNLOAD_BYTES} bytes`))
+          return
+        }
+        chunks.push(chunk)
+      })
       res.on('end', () => {
+        if (req.destroyed) return
         resolve({
           buffer: Buffer.concat(chunks),
           mimeType: res.headers['content-type'] || 'application/octet-stream'
@@ -4795,13 +4815,20 @@ function readDesktopConnectionConfig() {
 
 let _configWriteLock = Promise.resolve()
 function writeDesktopConnectionConfig(config) {
-  _configWriteLock = _configWriteLock.then(() => {
+  const run = _configWriteLock.then(() => {
     fs.mkdirSync(path.dirname(DESKTOP_CONNECTION_CONFIG_PATH), { recursive: true })
     writeFileAtomic(DESKTOP_CONNECTION_CONFIG_PATH, JSON.stringify(config, null, 2))
     connectionConfigCache = config
     connectionConfigCacheMtime = fs.statSync(DESKTOP_CONNECTION_CONFIG_PATH).mtimeMs
-  }).catch(() => {})
-  return _configWriteLock
+  })
+  // Keep the serialization chain alive even when a write fails, so one failure
+  // doesn't wedge every later write. Surface the error on the returned promise
+  // (and log it) so awaiting callers don't report a phantom success.
+  _configWriteLock = run.catch(() => {})
+  return run.catch(err => {
+    console.error('[hermes-main] Failed to persist desktop connection config:', err)
+    throw err
+  })
 }
 
 // Returns the desktop's chosen profile name, or null when unset. "default" is
@@ -5766,9 +5793,17 @@ function wireCommonWindowHandlers(win) {
     }
     if (!DEV_SERVER && url.startsWith('file:')) {
       try {
-        const allowedBase = resolveRendererIndex()
-        if (allowedBase && url.startsWith(allowedBase.replace(/index.html.*$/, ''))) {
-          return
+        // resolveRendererIndex() returns a filesystem PATH; `url` is a file://
+        // URL. Compare like-for-like by converting the renderer directory to a
+        // file: URL prefix (the previous path-vs-URL compare never matched and
+        // bounced every in-app file: navigation to the external opener).
+        const indexPath = resolveRendererIndex()
+        if (indexPath) {
+          let allowedDir = pathToFileURL(path.dirname(indexPath)).href
+          if (!allowedDir.endsWith('/')) allowedDir += '/'
+          if (url.startsWith(allowedDir)) {
+            return
+          }
         }
       } catch {}
     }
@@ -6385,13 +6420,15 @@ ipcMain.handle('hermes:connection-config:oauth-logout', async (_event, rawUrl) =
 })
 ipcMain.handle('hermes:connection-config:save', async (_event, payload) => {
   const config = coerceDesktopConnectionConfig(payload)
-  writeDesktopConnectionConfig(config)
+  // Await persistence so a write failure rejects the IPC call instead of
+  // reporting a phantom success while connection.json was never written.
+  await writeDesktopConnectionConfig(config)
 
   return sanitizeDesktopConnectionConfig(config, payload?.profile)
 })
 ipcMain.handle('hermes:connection-config:apply', async (_event, payload) => {
   const config = coerceDesktopConnectionConfig(payload)
-  writeDesktopConnectionConfig(config)
+  await writeDesktopConnectionConfig(config)
 
   const key = connectionScopeKey(payload?.profile)
 
@@ -7282,7 +7319,9 @@ ipcMain.handle('hermes:updates:branch:get', async () => readDesktopUpdateConfig(
 
 ipcMain.handle('hermes:updates:branch:set', async (_event, name) => {
   const branch = typeof name === 'string' && name.trim() ? name.trim() : DEFAULT_UPDATE_BRANCH
-  if (!/^[A-Za-z0-9._\/-]{1,200}$/.test(branch)) {
+  // Reject a leading '-' (would be read as a flag by a git CLI) and any '..'
+  // sequence (ref traversal) on top of the character allowlist.
+  if (!/^[A-Za-z0-9._\/-]{1,200}$/.test(branch) || branch.startsWith('-') || branch.includes('..')) {
     throw new Error('Invalid branch name')
   }
   writeDesktopUpdateConfig({ branch })
