@@ -275,6 +275,41 @@ def _normalize_profile(value: Any) -> Optional[str]:
     return text
 
 
+def _default_assignee() -> Optional[str]:
+    """The configured kanban.default_assignee, or None."""
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config()
+        da = (cfg.get("kanban", {}) or {}).get("default_assignee")
+        return str(da).strip() or None if da else None
+    except Exception:
+        return None
+
+
+def _resolve_valid_assignee(assignee: str) -> tuple[str, Optional[str]]:
+    """Map a requested assignee to a real on-disk profile.
+
+    Agents sometimes pass a generic name (e.g. "worker") that is NOT a profile
+    on disk — the dispatcher silently skips such cards, stranding them in
+    ``ready`` forever. Mirror the decomposer's guarantee: if the requested
+    assignee isn't a real profile, rewrite it to kanban.default_assignee.
+    Returns (effective_assignee, note) where note is a human-readable string
+    when a rewrite happened (else None). If neither the requested name nor the
+    default resolves, returns the original (best-effort — never silently drops).
+    """
+    try:
+        from hermes_cli.profiles import profile_exists
+    except Exception:
+        return assignee, None  # can't validate — leave as-is
+    if profile_exists(assignee):
+        return assignee, None
+    default = _default_assignee()
+    if default and profile_exists(default):
+        return default, (f"assignee '{assignee}' is not a profile on disk; "
+                         f"routed to default_assignee '{default}'")
+    return assignee, None
+
+
 def _parse_bool_arg(args: dict, name: str, *, default: bool = False):
     value = args.get(name)
     if value is None:
@@ -634,6 +669,39 @@ def _handle_block(args: dict, **kw) -> str:
         return tool_error(f"kanban_block: {e}")
 
 
+def _handle_submit_review(args: dict, **kw) -> str:
+    """Submit the worker's own running task to review (running -> review).
+
+    This transitions the task to 'review' status so the dispatcher spawns a
+    review agent to check the diff, run tests, and either merge or request changes.
+    """
+    tid = _default_task_id(args.get("task_id"))
+    if not tid:
+        return tool_error(
+            "task_id is required (or set HERMES_KANBAN_TASK in the env)"
+        )
+    ownership_err = _enforce_worker_task_ownership(tid)
+    if ownership_err:
+        return ownership_err
+    board = args.get("board")
+    try:
+        kb, conn = _connect(board=board)
+        try:
+            ok = kb.submit_review_task(conn, tid)
+            if not ok:
+                return tool_error(
+                    f"could not submit {tid} to review (task must be running)"
+                )
+            return _ok(task_id=tid, status="review")
+        finally:
+            conn.close()
+    except ValueError as e:
+        return tool_error(f"kanban_submit_review: {e}")
+    except Exception as e:
+        logger.exception("kanban_submit_review failed")
+        return tool_error(f"kanban_submit_review: {e}")
+
+
 def _handle_heartbeat(args: dict, **kw) -> str:
     """Signal that the worker is still alive during a long operation.
 
@@ -736,6 +804,13 @@ def _handle_create(args: dict, **kw) -> str:
             "assignee is required — name the profile that should execute this "
             "task (the dispatcher will only spawn tasks with an assignee)"
         )
+    # Guard against stranded cards: an assignee that is not a real on-disk
+    # profile (e.g. the generic "worker") is silently skipped by the dispatcher
+    # and sits in `ready` forever. Rewrite unknown assignees to the configured
+    # default_assignee, same guarantee the decomposer provides.
+    assignee, _assignee_note = _resolve_valid_assignee(str(assignee))
+    if _assignee_note:
+        logger.warning("kanban_create: %s", _assignee_note)
     body = args.get("body")
     parents = args.get("parents") or []
     tenant = args.get("tenant") or os.environ.get("HERMES_TENANT")
@@ -1198,6 +1273,30 @@ KANBAN_BLOCK_SCHEMA = {
     },
 }
 
+KANBAN_SUBMIT_REVIEW_SCHEMA = {
+    "name": "kanban_submit_review",
+    "description": (
+        "Submit your running task to review status (running -> review). "
+        "Use this for code changes that need automated review before merging. "
+        "The dispatcher will spawn a review agent that checks the diff, runs "
+        "tests, and either merges your work or sends it back with change requests. "
+        "Call this INSTEAD of kanban_complete for coding tasks. Put your "
+        "structured metadata (changed_files, tests_run, diff summary) in a "
+        "kanban_comment first."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "task_id": {
+                "type": "string",
+                "description": _DESC_TASK_ID_DEFAULT,
+            },
+            "board": _board_schema_prop(),
+        },
+        "required": [],
+    },
+}
+
 KANBAN_HEARTBEAT_SCHEMA = {
     "name": "kanban_heartbeat",
     "description": (
@@ -1482,6 +1581,15 @@ registry.register(
     handler=_handle_block,
     check_fn=_check_kanban_mode,
     emoji="⏸",
+)
+
+registry.register(
+    name="kanban_submit_review",
+    toolset="kanban",
+    schema=KANBAN_SUBMIT_REVIEW_SCHEMA,
+    handler=_handle_submit_review,
+    check_fn=_check_kanban_mode,
+    emoji="🔎",
 )
 
 registry.register(

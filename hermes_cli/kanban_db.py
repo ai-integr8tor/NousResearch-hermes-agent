@@ -3090,7 +3090,25 @@ def claim_task(
             {"lock": lock, "expires": expires, "run_id": run_id},
             run_id=run_id,
         )
-        return get_task(conn, task_id)
+        claimed_task = get_task(conn, task_id)
+
+    # pre_kanban_dispatch hook — fired AFTER the claim commits (outside the
+    # write txn) so a handler may inspect/annotate the task before the worker
+    # reads its context. Only fires on a RE-dispatch (run_id > 1, i.e. a prior
+    # attempt exists) so the common first-claim path is untouched and adds no
+    # overhead. Handlers are best-effort: a failing/absent hook never blocks the
+    # claim. HSCC uses this to post an idempotent-resume comment (the resume
+    # probe) that build_worker_context surfaces to the worker.
+    if run_id and run_id > 1:
+        try:
+            from hermes_cli.plugins import invoke_hook as _invoke_hook
+            _invoke_hook(
+                "pre_kanban_dispatch",
+                task_id=task_id, run_id=run_id, task=claimed_task, conn=conn,
+            )
+        except Exception:
+            pass  # never let a hook failure break dispatch
+    return claimed_task
 
 
 def claim_review_task(
@@ -4181,6 +4199,38 @@ def block_task(
         _append_event(conn, task_id, "blocked", {"reason": reason}, run_id=run_id)
         return True
 
+
+def submit_review_task(conn: sqlite3.Connection, task_id: str) -> bool:
+    """Transition ``running -> review`` so the dispatcher spawns a review agent.
+
+    Returns True on success, False if the task is not currently running. The
+    review consumer (claim_review_task + review-column dispatch) already exists;
+    this is the producer side. The task keeps its worktree for the review agent.
+    Clears claim_lock + claim_expires so the review dispatcher can claim it.
+    """
+    with write_txn(conn):
+        cur = conn.execute(
+            """
+            UPDATE tasks
+               SET status       = 'review',
+                   claim_lock   = NULL,
+                   claim_expires= NULL,
+                   worker_pid   = NULL
+             WHERE id = ?
+               AND status = 'running'
+            """,
+            (task_id,),
+        )
+        if cur.rowcount != 1:
+            return False
+        run_id = _end_run(
+            conn, task_id,
+            outcome="review",
+            status="review",
+            summary=None,
+        )
+        _append_event(conn, task_id, "submitted_review", {}, run_id=run_id)
+        return True
 
 
 def promote_task(
