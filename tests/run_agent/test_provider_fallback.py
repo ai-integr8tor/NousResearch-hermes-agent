@@ -103,6 +103,39 @@ class TestFallbackChainAdvancement:
             assert agent.model == "gpt-4o"
             assert agent._fallback_activated is True
 
+    def test_successful_fallback_emits_user_visible_notice(self):
+        fbs = [{"provider": "openai", "model": "gpt-4o"}]
+        agent = _make_agent(fallback_model=fbs)
+        notices = []
+        agent.notice_callback = notices.append
+
+        with patch(
+            "agent.auxiliary_client.resolve_provider_client",
+            return_value=(_mock_client(), "gpt-4o"),
+        ):
+            assert agent._try_activate_fallback() is True
+
+        assert len(notices) == 1
+        notice = notices[0]
+        assert notice.text == "🔄 Primary model failed — switching to fallback: gpt-4o via openai"
+        assert notice.level == "warn"
+        assert notice.kind == "ttl"
+        assert notice.key == "provider.fallback.active"
+
+    def test_fallback_notice_callback_errors_do_not_block_recovery(self):
+        fbs = [{"provider": "openai", "model": "gpt-4o"}]
+        agent = _make_agent(fallback_model=fbs)
+        agent.notice_callback = MagicMock(side_effect=RuntimeError("render failed"))
+
+        with patch(
+            "agent.auxiliary_client.resolve_provider_client",
+            return_value=(_mock_client(), "gpt-4o"),
+        ):
+            assert agent._try_activate_fallback() is True
+
+        assert agent.model == "gpt-4o"
+        agent.notice_callback.assert_called_once()
+
     def test_second_fallback_works(self):
         fbs = [
             {"provider": "openai", "model": "gpt-4o"},

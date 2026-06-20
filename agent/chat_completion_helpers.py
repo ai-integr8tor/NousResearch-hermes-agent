@@ -1287,10 +1287,25 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
                 api_mode=agent.api_mode,
             )
 
-        agent._buffer_status(
+        fallback_message = (
             f"🔄 Primary model failed — switching to fallback: "
             f"{fb_model} via {fb_provider}"
         )
+        agent._buffer_status(fallback_message)
+        try:
+            from agent.credits_tracker import AgentNotice
+
+            agent._emit_notice(
+                AgentNotice(
+                    text=fallback_message,
+                    level="warn",
+                    kind="ttl",
+                    ttl_ms=15000,
+                    key="provider.fallback.active",
+                )
+            )
+        except Exception:
+            logger.debug("fallback notice emission failed", exc_info=True)
         logger.info(
             "Fallback activated: %s → %s (%s)",
             old_model, fb_model, fb_provider,

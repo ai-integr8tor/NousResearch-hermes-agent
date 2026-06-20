@@ -116,6 +116,20 @@ When triggered, Hermes:
 
 The switch is seamless — your conversation history, tool calls, and context are preserved. The agent continues from exactly where it left off, just using a different model.
 
+### Fallback Visibility
+
+When fallback activates, Hermes emits an out-of-band notice through the active driver so you can tell that the current turn is no longer running on the primary model. Messaging platforms receive a standalone notice such as:
+
+```text
+🔄 Primary model failed — switching to fallback: grok-4.3 via xai-oauth
+```
+
+The notice is separate from verbose retry/status chatter: transient retries remain buffered and are only shown if recovery fails, but the successful provider switch itself is user-visible. This helps you interpret answer quality, latency, privacy posture, and local-vs-cloud execution while preserving the seamless fallback behavior.
+
+:::note
+The notice reports the model/provider that Hermes switched to for the current turn. Because fallback is turn-scoped, the next user message starts by trying the primary model again.
+:::
+
 :::info Per-Turn, Not Per-Session
 Fallback is **turn-scoped**: each new user message starts with the primary model restored. If the primary fails mid-turn, fallback activates for that turn only. On the next message, Hermes tries the primary again. Within a single turn, fallback activates at most once — if the fallback also fails, normal error handling takes over (retries, then error message). This prevents cascading failover loops within a turn while giving the primary model a fresh chance every turn.
 :::
