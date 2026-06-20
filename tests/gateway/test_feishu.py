@@ -4944,3 +4944,109 @@ class TestChatLockEviction(unittest.TestCase):
                 held.release()
 
         asyncio.run(_run())
+
+
+class TestMarkdownTableParsing(unittest.TestCase):
+    """Test _parse_markdown_table extracts table segments correctly."""
+
+    def test_no_table_returns_single_text_segment(self):
+        from gateway.platforms.feishu import _parse_markdown_table
+        result = _parse_markdown_table("hello world")
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["type"], "text")
+
+    def test_simple_table_detected(self):
+        from gateway.platforms.feishu import _parse_markdown_table
+        md = "| A | B |\n| --- | --- |\n| 1 | 2 |"
+        result = _parse_markdown_table(md)
+        tables = [s for s in result if s["type"] == "table"]
+        self.assertEqual(len(tables), 1)
+        self.assertEqual(tables[0]["headers"], ["A", "B"])
+        self.assertEqual(tables[0]["rows"], [["1", "2"]])
+
+    def test_text_and_table_mixed(self):
+        from gateway.platforms.feishu import _parse_markdown_table
+        md = "Intro text\n\n| Col1 | Col2 |\n| --- | --- |\n| a | b |\n\nOutro text"
+        result = _parse_markdown_table(md)
+        types = [s["type"] for s in result]
+        self.assertIn("text", types)
+        self.assertIn("table", types)
+        tables = [s for s in result if s["type"] == "table"]
+        self.assertEqual(tables[0]["headers"], ["Col1", "Col2"])
+        self.assertEqual(tables[0]["rows"], [["a", "b"]])
+
+    def test_table_with_bold_headers(self):
+        from gateway.platforms.feishu import _parse_markdown_table
+        md = "| **Name** | **Age** |\n| --- | --- |\n| Alice | 30 |"
+        result = _parse_markdown_table(md)
+        tables = [s for s in result if s["type"] == "table"]
+        self.assertEqual(tables[0]["headers"], ["**Name**", "**Age**"])
+
+    def test_multiple_tables(self):
+        from gateway.platforms.feishu import _parse_markdown_table
+        md = "| A |\n| --- |\n| 1 |\n\nmid\n\n| B |\n| --- |\n| 2 |"
+        result = _parse_markdown_table(md)
+        tables = [s for s in result if s["type"] == "table"]
+        self.assertEqual(len(tables), 2)
+
+
+class TestBuildTableCard(unittest.TestCase):
+    """Test _build_table_card produces valid CardKit v2 structure."""
+
+    def test_card_structure(self):
+        from gateway.platforms.feishu import _build_table_card
+        card = _build_table_card(["Name", "Age"], [["Alice", "30"], ["Bob", "25"]])
+        self.assertEqual(card["tag"], "table")
+        self.assertEqual(len(card["columns"]), 2)
+        self.assertEqual(card["columns"][0]["name"], "col_0")
+        self.assertEqual(card["columns"][0]["display_name"], "Name")
+        self.assertEqual(card["columns"][0]["data_type"], "text")
+        self.assertEqual(len(card["rows"]), 2)
+        self.assertEqual(card["rows"][0]["col_0"], "Alice")
+        self.assertEqual(card["rows"][1]["col_1"], "25")
+        self.assertTrue(card["header_style"]["bold"])
+
+    def test_bold_markers_stripped_from_cells(self):
+        from gateway.platforms.feishu import _build_table_card
+        card = _build_table_card(["**Col**"], [["**data**"]])
+        self.assertEqual(card["columns"][0]["display_name"], "Col")
+        self.assertEqual(card["rows"][0]["col_0"], "data")
+
+    def test_row_length_normalized(self):
+        from gateway.platforms.feishu import _build_table_card
+        # Row with fewer cells than headers — missing cols absent from row dict
+        card = _build_table_card(["A", "B", "C"], [["x", "y"]])
+        self.assertEqual(card["rows"][0].get("col_0"), "x")
+        self.assertEqual(card["rows"][0].get("col_1"), "y")
+        self.assertNotIn("col_2", card["rows"][0])
+        # Row with MORE cells than headers — extra cells truncated
+        card2 = _build_table_card(["A"], [["x", "y", "z"]])
+        self.assertEqual(card2["rows"][0].get("col_0"), "x")
+        self.assertNotIn("col_1", card2["rows"][0])
+
+
+class TestBuildInteractiveCardWithTables(unittest.TestCase):
+    """Test _build_interactive_card_with_tables end-to-end."""
+
+    def test_returns_none_for_no_table(self):
+        from gateway.platforms.feishu import _build_interactive_card_with_tables
+        self.assertIsNone(_build_interactive_card_with_tables("plain text"))
+
+    def test_returns_card_for_table(self):
+        from gateway.platforms.feishu import _build_interactive_card_with_tables
+        md = "| H1 | H2 |\n| --- | --- |\n| a | b |"
+        card = _build_interactive_card_with_tables(md)
+        self.assertIsNotNone(card)
+        self.assertEqual(card["schema"], "2.0")
+        elements = card["body"]["elements"]
+        self.assertTrue(any(e["tag"] == "table" for e in elements))
+
+    def test_mixed_content_has_markdown_and_table_elements(self):
+        from gateway.platforms.feishu import _build_interactive_card_with_tables
+        md = "Some intro\n\n| Col |\n| --- |\n| val |\n\nSome outro"
+        card = _build_interactive_card_with_tables(md)
+        self.assertIsNotNone(card)
+        elements = card["body"]["elements"]
+        tags = [e["tag"] for e in elements]
+        self.assertIn("markdown", tags)
+        self.assertIn("table", tags)
