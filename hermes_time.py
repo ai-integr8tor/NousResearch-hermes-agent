@@ -122,3 +122,41 @@ def now() -> datetime:
     return datetime.now().astimezone()
 
 
+def get_timezone_display() -> str:
+    """Return the configured timezone as 'IANA (UTC±HH:MM)' for display.
+
+    Aligned with PR #10061 format. Returns empty string if no timezone configured.
+    """
+    tz = get_timezone()
+    if tz is None:
+        return ""
+    offset = now().utcoffset()
+    if offset is None:
+        return str(tz)
+    total_seconds = int(offset.total_seconds())
+    sign = "+" if total_seconds >= 0 else "-"
+    hours, remainder = divmod(abs(total_seconds), 3600)
+    minutes = remainder // 60
+    return f"{tz} (UTC{sign}{hours:02d}:{minutes:02d})"
+
+
+def format_current_time_context(dt: datetime | None = None) -> str:
+    """Build a per-turn time block for injection into user messages.
+
+    Returns a string like:
+        Current time: Monday, June 10, 2026 03:45 PM HKT
+        Timezone: Asia/Hong_Kong (UTC+08:00)
+
+    Designed for injection via _plugin_user_context (user message),
+    NOT system prompt — preserves prompt cache prefix stability.
+    """
+    if dt is None:
+        dt = now()
+    time_str = dt.strftime("%A, %B %d, %Y %I:%M %p %Z").strip()
+    lines = [f"Current time: {time_str}"]
+    tz_display = get_timezone_display()
+    if tz_display:
+        lines.append(f"Timezone: {tz_display}")
+    return "\n".join(lines)
+
+

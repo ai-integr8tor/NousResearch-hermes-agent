@@ -360,6 +360,22 @@ def build_turn_context(
     except Exception as exc:
         logger.warning("pre_llm_call hook failed: %s", exc)
 
+    # Inject per-turn current time into user context (cache-safe: user message,
+    # not system prompt). Renames "Conversation started" → "Session started" in
+    # the frozen system prompt so agents don't confuse it for live time.
+    # See PR #15872 for rationale and cache-stability tests.
+    try:
+        from hermes_time import format_current_time_context
+        _time_block = format_current_time_context()
+        if _time_block:
+            plugin_user_context = (
+                f"{_time_block}\n\n{plugin_user_context}"
+                if plugin_user_context
+                else _time_block
+            )
+    except Exception:
+        pass  # hermes_time is optional; graceful degradation
+
     # Per-turn file-mutation verifier state.
     agent._turn_failed_file_mutations = {}
 
