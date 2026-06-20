@@ -323,24 +323,56 @@ class TestSend:
         assert payload["markdown"]["text"] == "Screenshot\n\n![image](https://example.com/demo.png)"
 
     @pytest.mark.asyncio
-    async def test_send_image_file_returns_explicit_unsupported_error(self):
+    async def test_send_image_file_uploads_and_sends_file_payload(self, tmp_path):
         from gateway.platforms.dingtalk import DingTalkAdapter
         adapter = DingTalkAdapter(PlatformConfig(enabled=True))
+        image_path = tmp_path / "demo.png"
+        image_path.write_bytes(b"png-bytes")
 
-        result = await adapter.send_image_file("chat-123", "/tmp/demo.png")
+        upload_response = MagicMock()
+        upload_response.status_code = 200
+        upload_response.json.return_value = {"errcode": 0, "media_id": "media-123"}
+        send_response = MagicMock()
+        send_response.status_code = 200
+        send_response.text = "OK"
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(side_effect=[upload_response, send_response])
+        adapter._http_client = mock_client
+        adapter._get_access_token = AsyncMock(return_value="access-token")
 
-        assert result.success is False
-        assert result.error and "do not support local image uploads" in result.error
+        result = await adapter.send_image_file(
+            "chat-123",
+            str(image_path),
+            metadata={"session_webhook": "https://dingtalk.example/webhook"},
+        )
+
+        assert result.success is True
+        upload_call = mock_client.post.await_args_list[0]
+        assert upload_call.args[0].startswith(
+            "https://oapi.dingtalk.com/media/upload?access_token=access-token"
+        )
+        send_call = mock_client.post.await_args_list[1]
+        assert send_call.args[0] == "https://dingtalk.example/webhook"
+        assert send_call.kwargs["json"] == {
+            "msgtype": "file",
+            "file": {
+                "mediaId": "media-123",
+                "fileName": "demo.png",
+                "fileType": "png",
+            },
+        }
 
     @pytest.mark.asyncio
-    async def test_send_document_returns_explicit_unsupported_error(self):
+    async def test_send_document_requires_session_webhook(self, tmp_path):
         from gateway.platforms.dingtalk import DingTalkAdapter
         adapter = DingTalkAdapter(PlatformConfig(enabled=True))
+        file_path = tmp_path / "demo.pdf"
+        file_path.write_bytes(b"%PDF-1.4")
 
-        result = await adapter.send_document("chat-123", "/tmp/demo.pdf")
+        result = await adapter.send_document("chat-123", str(file_path))
 
         assert result.success is False
-        assert result.error and "do not support local file attachments" in result.error
+        assert result.error and "session_webhook" in result.error
 
 
 # ---------------------------------------------------------------------------
@@ -621,6 +653,71 @@ class TestExtractMedia:
             assert mtypes == ["audio"]
         finally:
             del DINGTALK_TYPE_MAPPING["audio"]
+
+    def test_file_message_from_extensions_is_document(self):
+        from gateway.platforms.dingtalk import DingTalkAdapter
+        from gateway.platforms.base import MessageType
+
+        msg = MagicMock()
+        msg.image_content = None
+        msg.rich_text_content = None
+        msg.rich_text = None
+        msg.message_type = "file"
+        msg.extensions = {
+            "content": {
+                "downloadCode": "download-code-1",
+                "fileName": "git_diff.txt",
+                "fileType": "text/plain",
+            }
+        }
+
+        msg_type, urls, mtypes = DingTalkAdapter._extract_media(
+            DingTalkAdapter, msg
+        )
+
+        assert msg_type == MessageType.DOCUMENT
+        assert urls == ["download-code-1"]
+        assert mtypes == ["text/plain"]
+
+    @pytest.mark.asyncio
+    async def test_resolve_media_codes_rewrites_extensions_content(self, tmp_path):
+        from gateway.platforms.dingtalk import DingTalkAdapter
+
+        adapter = DingTalkAdapter(
+            PlatformConfig(enabled=True, extra={"download_dir": str(tmp_path)})
+        )
+        adapter._get_access_token = AsyncMock(return_value="access-token")
+        adapter._robot_sdk = SimpleNamespace(
+            robot_message_file_download_with_options_async=AsyncMock(
+                return_value=SimpleNamespace(
+                    body=SimpleNamespace(download_url="https://signed.example/file")
+                )
+            )
+        )
+        file_response = MagicMock()
+        file_response.status_code = 200
+        file_response.content = b"hello from dingtalk"
+        file_response.headers = {"content-disposition": 'attachment; filename="git_diff.txt"'}
+        adapter._http_client = SimpleNamespace(get=AsyncMock(return_value=file_response))
+        content = {
+            "downloadCode": "download-code-1",
+            "fileName": "git_diff.txt",
+            "fileType": "text/plain",
+        }
+        msg = SimpleNamespace(
+            message_id="msg-1",
+            message_type="file",
+            robot_code="robot-1",
+            image_content=None,
+            rich_text_content=None,
+            extensions={"msgtype": "file", "content": content},
+        )
+
+        await adapter._resolve_media_codes(msg, chat_id="chat-1")
+
+        saved_path = content["downloadCode"]
+        assert saved_path.endswith("git_diff.txt")
+        assert (tmp_path / "chat-1" / "msg-1" / "git_diff.txt").read_bytes() == b"hello from dingtalk"
 
 
 # ---------------------------------------------------------------------------

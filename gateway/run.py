@@ -876,6 +876,9 @@ _AUTO_APPEND_MEDIA_TOOL_NAMES = {
     "text_to_speech_tool",
     "image_generate",
 }
+_AUTO_APPEND_MEDIA_TOOL_CALL_NAMES = {
+    "send_message",
+}
 
 # ---- helpers: detect interrupted tool tails & auto-continue noise ----------
 
@@ -1039,15 +1042,18 @@ def _collect_auto_append_media_tags(
     messages: List[Dict[str, Any]],
     history_offset: int = 0,
     history_media_paths: Optional[set] = None,
+    current_platform: Optional[str] = None,
 ) -> tuple[List[str], bool]:
-    """Collect real media tags from current-turn producer-tool results only.
+    """Collect real media tags from current-turn producer outputs only.
 
     Two layered guards keep stale/example MEDIA: strings out of the reply:
 
     1. Producer-tool allowlist: only tools that intentionally emit deliverable
-       artifacts (TTS) are eligible. Documentation, logs, and search results can
-       contain example strings such as MEDIA:/absolute/path/to/file, which must
-       never be delivered as attachments. (Fixes the original report behind #16721.)
+       artifacts (TTS) are eligible. ``send_message`` tool calls are also
+       eligible, but only when their target platform matches the current
+       gateway platform. Documentation, logs, and search results can contain
+       example strings such as MEDIA:/absolute/path/to/file, which must never
+       be delivered as attachments. (Fixes the original report behind #16721.)
     2. Current-turn isolation: only messages produced this turn are scanned, so a
        tool result from an earlier turn (still present in the full message list)
        cannot leak onto a later text-only reply (#34608).
@@ -1066,6 +1072,12 @@ def _collect_auto_append_media_tags(
     else:
         new_messages = messages
 
+    current_platform_norm = ""
+    if current_platform:
+        current_platform_norm = str(current_platform).lower()
+        if current_platform_norm.startswith("platform."):
+            current_platform_norm = current_platform_norm.split(".", 1)[1]
+
     tool_name_by_call_id: Dict[str, str] = {}
     for msg in new_messages:
         if msg.get("role") != "assistant":
@@ -1079,6 +1091,80 @@ def _collect_auto_append_media_tags(
 
     media_tags: List[str] = []
     has_voice_directive = False
+
+    def _append_media_path(path: str) -> None:
+        path = (path or "").strip().rstrip('\",}')
+        tag = f"MEDIA:{path}" if path else ""
+        if path and path not in history_media_paths and tag not in media_tags:
+            media_tags.append(tag)
+
+    def _append_media_tags_from_content(content: str) -> None:
+        nonlocal has_voice_directive
+        if "MEDIA:" not in content:
+            return
+        for match in _TOOL_MEDIA_RE.finditer(content):
+            _append_media_path(match.group(1))
+        if "[[audio_as_voice]]" in content:
+            has_voice_directive = True
+
+    # A model may try to send an attachment by calling send_message with a
+    # MEDIA: tag in the message body. Platforms such as DingTalk reply via a
+    # per-session webhook, so preserve that attachment request for gateway
+    # delivery instead of relying on the generic standalone send path.
+    for msg in new_messages:
+        if msg.get("role") != "assistant":
+            continue
+        for call in msg.get("tool_calls") or []:
+            fn = call.get("function") or {}
+            name = str(fn.get("name") or call.get("name") or "")
+            if name not in _AUTO_APPEND_MEDIA_TOOL_CALL_NAMES:
+                continue
+
+            raw_args = fn.get("arguments", call.get("arguments", ""))
+            parsed_args: Any = None
+            candidates: List[str] = []
+            if isinstance(raw_args, dict):
+                parsed_args = raw_args
+            elif isinstance(raw_args, str):
+                candidates.append(raw_args)
+                try:
+                    parsed_args = json.loads(raw_args)
+                except Exception:
+                    parsed_args = None
+
+            if isinstance(parsed_args, dict):
+                target = str(parsed_args.get("target") or "")
+                target_platform = target.split(":", 1)[0].lower()
+                if (
+                    current_platform_norm
+                    and target_platform
+                    and target_platform != current_platform_norm
+                ):
+                    continue
+                message = parsed_args.get("message") or parsed_args.get("content")
+                if message:
+                    candidates.append(str(message))
+
+                media_arg = parsed_args.get("media_files")
+                if isinstance(media_arg, (list, tuple)):
+                    for item in media_arg:
+                        if isinstance(item, dict):
+                            _append_media_path(
+                                str(
+                                    item.get("path")
+                                    or item.get("file_path")
+                                    or item.get("media_path")
+                                    or ""
+                                )
+                            )
+                        elif isinstance(item, (list, tuple)) and item:
+                            _append_media_path(str(item[0]))
+                        elif item:
+                            _append_media_path(str(item))
+
+            for content in candidates:
+                _append_media_tags_from_content(content)
+
     for msg in new_messages:
         if msg.get("role") not in ("tool", "function"):
             continue
@@ -1104,14 +1190,7 @@ def _collect_auto_append_media_tags(
                         media_tags.append(f"MEDIA:{path}")
                         break
             continue
-        if "MEDIA:" not in content:
-            continue
-        for match in _TOOL_MEDIA_RE.finditer(content):
-            path = match.group(1).strip().rstrip('",}')
-            if path and path not in history_media_paths:
-                media_tags.append(f"MEDIA:{path}")
-        if "[[audio_as_voice]]" in content:
-            has_voice_directive = True
+        _append_media_tags_from_content(content)
 
     return media_tags, has_voice_directive
 
@@ -15983,20 +16062,27 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # also the sole guard on the fallback branch taken when mid-run
             # context compression shrinks the message list below the original
             # history length, preserving the compression-safe behaviour of #160.
-            if "MEDIA:" not in final_response:
-                media_tags, has_voice_directive = _collect_auto_append_media_tags(
-                    result.get("messages", []),
-                    history_offset=len(agent_history),
-                    history_media_paths=_history_media_paths,
-                )
+            media_tags, has_voice_directive = _collect_auto_append_media_tags(
+                result.get("messages", []),
+                history_offset=len(agent_history),
+                history_media_paths=_history_media_paths,
+                current_platform=source.platform,
+            )
 
-                if media_tags:
-                    seen = set()
-                    unique_tags = []
-                    for tag in media_tags:
-                        if tag not in seen:
-                            seen.add(tag)
-                            unique_tags.append(tag)
+            if media_tags:
+                existing_deliverable_tags = {
+                    line.strip().rstrip(",")
+                    for line in final_response.splitlines()
+                    if line.strip().startswith("MEDIA:")
+                }
+                seen = set()
+                unique_tags = []
+                for tag in media_tags:
+                    if tag in existing_deliverable_tags or tag in seen:
+                        continue
+                    seen.add(tag)
+                    unique_tags.append(tag)
+                if unique_tags:
                     if has_voice_directive:
                         unique_tags.insert(0, "[[audio_as_voice]]")
                     final_response = final_response + "\n" + "\n".join(unique_tags)

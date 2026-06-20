@@ -896,6 +896,26 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
             last_result = result
         return last_result
 
+    # --- DingTalk: current-session media is delivered by the gateway adapter ---
+    if platform == Platform.DINGTALK and media_files:
+        current_platform = ""
+        try:
+            from gateway.session_context import get_session_env
+            current_platform = (
+                get_session_env("HERMES_SESSION_PLATFORM", "") or ""
+            ).lower()
+        except Exception:
+            current_platform = ""
+        if current_platform == "dingtalk":
+            return {
+                "success": True,
+                "platform": "dingtalk",
+                "chat_id": chat_id,
+                "media_deferred_to_gateway": True,
+                "media_count": len(media_files),
+                "note": "DingTalk MEDIA attachments are delivered by the active gateway reply.",
+            }
+
     # --- Non-media platforms ---
     if media_files and not message.strip():
         return {

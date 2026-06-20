@@ -865,6 +865,28 @@ class TestSendToPlatformWhatsapp:
         async_mock.assert_awaited_once_with({"bridge_port": 3000}, chat_id, "hello from hermes")
 
 
+class TestSendToPlatformDingTalk:
+    def test_dingtalk_current_session_media_defers_to_gateway(self, tmp_path):
+        file_path = tmp_path / "git_diff.txt"
+        file_path.write_text("diff", encoding="utf-8")
+
+        with patch("gateway.session_context.get_session_env", return_value="dingtalk"):
+            result = asyncio.run(
+                _send_to_platform(
+                    Platform.DINGTALK,
+                    SimpleNamespace(enabled=True, token=None, extra={}),
+                    "chat-1",
+                    "",
+                    media_files=[(str(file_path), False)],
+                )
+            )
+
+        assert result["success"] is True
+        assert result["platform"] == "dingtalk"
+        assert result["media_deferred_to_gateway"] is True
+        assert result["media_count"] == 1
+
+
 class TestSendTelegramHtmlDetection:
     """Verify that messages containing HTML tags are sent with parse_mode=HTML
     and that plain / markdown messages use MarkdownV2."""

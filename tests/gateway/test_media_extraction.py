@@ -259,6 +259,70 @@ caption
         )
         assert tags == []
 
+    def test_gateway_auto_append_send_message_media_for_current_platform(self):
+        """send_message media for the active platform must reach gateway delivery."""
+        from gateway.config import Platform
+        from gateway.run import _collect_auto_append_media_tags
+
+        messages = [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call_send",
+                        "function": {
+                            "name": "send_message",
+                            "arguments": (
+                                '{"target": "dingtalk:chat-1", '
+                                '"message": "sending file", '
+                                '"media_files": [{"path": "C:/tmp/git_diff.txt"}]}'
+                            ),
+                        },
+                    }
+                ],
+            }
+        ]
+
+        tags, voice = _collect_auto_append_media_tags(
+            messages,
+            history_offset=0,
+            current_platform=Platform.DINGTALK,
+        )
+
+        assert tags == ["MEDIA:C:/tmp/git_diff.txt"]
+        assert voice is False
+
+    def test_gateway_auto_append_send_message_skips_other_platform(self):
+        """A send_message call for another platform must not leak to this reply."""
+        from gateway.config import Platform
+        from gateway.run import _collect_auto_append_media_tags
+
+        messages = [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call_send",
+                        "function": {
+                            "name": "send_message",
+                            "arguments": (
+                                '{"target": "telegram:123", '
+                                '"media_files": ["C:/tmp/git_diff.txt"]}'
+                            ),
+                        },
+                    }
+                ],
+            }
+        ]
+
+        tags, _ = _collect_auto_append_media_tags(
+            messages,
+            history_offset=0,
+            current_platform=Platform.DINGTALK,
+        )
+
+        assert tags == []
+
     def test_media_tags_not_extracted_from_history(self):
         """MEDIA tags from previous turns should NOT be extracted again."""
         # Simulate conversation history with a TTS call from a previous turn
