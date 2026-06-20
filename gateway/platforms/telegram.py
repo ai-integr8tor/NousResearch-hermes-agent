@@ -12,6 +12,7 @@ import dataclasses
 import inspect
 import json
 import logging
+import math
 import os
 import tempfile
 import html as _html
@@ -80,6 +81,7 @@ from gateway.platforms.base import (
     SUPPORTED_VIDEO_TYPES,
     SUPPORTED_DOCUMENT_TYPES,
     SUPPORTED_IMAGE_DOCUMENT_TYPES,
+    merge_pending_message_event,
     utf16_len,
 )
 from gateway.platforms.telegram_network import (
@@ -438,6 +440,7 @@ class TelegramAdapter(BasePlatformAdapter):
         self._pending_photo_batch_tasks: Dict[str, asyncio.Task] = {}
         self._media_group_events: Dict[str, MessageEvent] = {}
         self._media_group_tasks: Dict[str, asyncio.Task] = {}
+        self._media_downloads_in_progress_by_session: Dict[str, int] = {}
         # Buffer rapid text messages so Telegram client-side splits of long
         # messages are aggregated into a single MessageEvent.  Lower defaults
         # (0.3s / 1.0s instead of 0.6s / 2.0s) let short replies stream
@@ -6064,6 +6067,7 @@ class TelegramAdapter(BasePlatformAdapter):
         concatenates them and waits for a short quiet period before
         dispatching the combined message.
         """
+        event = self._event_with_inline_forward_context(event)
         key = self._text_batch_key(event)
         existing = self._pending_text_batches.get(key)
         chunk_len = len(event.text or "")
@@ -6087,6 +6091,53 @@ class TelegramAdapter(BasePlatformAdapter):
         self._pending_text_batch_tasks[key] = asyncio.create_task(
             self._flush_text_batch(key)
         )
+
+    @staticmethod
+    def _format_forward_origin_context(forward_origin: Optional[Dict[str, str]]) -> Optional[str]:
+        if not forward_origin:
+            return None
+
+        parts = ["Forwarded message"]
+        if forward_origin.get("automatic") == "true":
+            parts.append("automatic forward")
+
+        sender = forward_origin.get("sender_name")
+        if sender:
+            username = forward_origin.get("sender_username")
+            if username:
+                sender = f"{sender} (@{username})"
+            parts.append(f"From: {sender}")
+        elif forward_origin.get("type") == "hidden_user":
+            parts.append("From: hidden sender")
+
+        chat = forward_origin.get("chat_name")
+        if chat:
+            username = forward_origin.get("chat_username")
+            if username:
+                chat = f"{chat} (@{username})"
+            parts.append(f"Chat: {chat}")
+
+        author_signature = forward_origin.get("author_signature")
+        if author_signature:
+            parts.append(f"Author: {author_signature}")
+
+        date = forward_origin.get("date")
+        if date:
+            parts.append(f"Date: {date}")
+
+        return "[" + " | ".join(parts) + "]"
+
+    def _event_with_inline_forward_context(self, event: MessageEvent) -> MessageEvent:
+        forward_context = self._format_forward_origin_context(getattr(event, "forward_origin", None))
+        if not forward_context:
+            return event
+        text = event.text or ""
+        if text.lstrip().startswith("[Forwarded message |"):
+            event.forward_origin = None
+            return event
+        event.text = f"{forward_context}\n\n{text}" if text else forward_context
+        event.forward_origin = None
+        return event
 
     async def _flush_text_batch(self, key: str) -> None:
         """Wait for the quiet period then dispatch the aggregated text.
@@ -6148,6 +6199,112 @@ class TelegramAdapter(BasePlatformAdapter):
         if media_group_id:
             return f"{session_key}:album:{media_group_id}"
         return f"{session_key}:photo-burst"
+
+    def _event_session_key(self, event: MessageEvent) -> str:
+        """Return the gateway session key used by text/photo batching."""
+        from gateway.session import build_session_key
+
+        return build_session_key(
+            event.source,
+            group_sessions_per_user=self.config.extra.get("group_sessions_per_user", True),
+            thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
+        )
+
+    def _track_media_download_start(self, event: MessageEvent) -> str:
+        """Mark a Telegram media download that may belong to a nearby text turn."""
+        session_key = self._event_session_key(event)
+        counts = getattr(self, "_media_downloads_in_progress_by_session", None)
+        if counts is None:
+            counts = {}
+            self._media_downloads_in_progress_by_session = counts
+        counts[session_key] = counts.get(session_key, 0) + 1
+        return session_key
+
+    def _track_media_download_done(self, session_key: Optional[str]) -> None:
+        if not session_key:
+            return
+        counts = getattr(self, "_media_downloads_in_progress_by_session", None)
+        if not counts:
+            return
+        remaining = counts.get(session_key, 0) - 1
+        if remaining > 0:
+            counts[session_key] = remaining
+        else:
+            counts.pop(session_key, None)
+
+    @staticmethod
+    def _startup_media_grace_seconds() -> float:
+        raw = os.getenv("HERMES_TELEGRAM_STARTUP_MEDIA_GRACE_SECONDS", "1.0")
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            value = 1.0
+        if not math.isfinite(value):
+            value = 1.0
+        return max(0.0, min(value, 3.0))
+
+    def has_startup_media_pending(self, session_key: str) -> bool:
+        """Whether Telegram has media work that can still join a starting text turn."""
+        if not session_key:
+            return False
+        counts = getattr(self, "_media_downloads_in_progress_by_session", None) or {}
+        if counts.get(session_key, 0) > 0:
+            return True
+        prefix = f"{session_key}:"
+        for key in getattr(self, "_pending_photo_batches", {}) or {}:
+            if key == f"{session_key}:photo-burst" or key.startswith(prefix + "album:"):
+                return True
+        for event in (getattr(self, "_media_group_events", {}) or {}).values():
+            try:
+                if self._event_session_key(event) == session_key:
+                    return True
+            except Exception:
+                continue
+        return False
+
+    @staticmethod
+    def _event_has_startup_attachment(event: MessageEvent) -> bool:
+        return bool(getattr(event, "media_urls", None))
+
+    def pop_startup_media_event(self, session_key: str) -> Optional[MessageEvent]:
+        """Consume buffered Telegram attachment batches that can join a text turn."""
+        if not session_key:
+            return None
+
+        merged_by_session: Dict[str, MessageEvent] = {}
+        pending_photo_batches = getattr(self, "_pending_photo_batches", None) or {}
+        pending_photo_tasks = getattr(self, "_pending_photo_batch_tasks", None) or {}
+        photo_keys = [
+            key for key in list(pending_photo_batches.keys())
+            if key == f"{session_key}:photo-burst"
+            or key.startswith(f"{session_key}:album:")
+        ]
+        for key in photo_keys:
+            event = pending_photo_batches.pop(key, None)
+            task = pending_photo_tasks.pop(key, None)
+            if task is not None and not task.done():
+                task.cancel()
+            if event is not None and self._event_has_startup_attachment(event):
+                merge_pending_message_event(merged_by_session, session_key, event)
+
+        media_group_events = getattr(self, "_media_group_events", None) or {}
+        media_group_tasks = getattr(self, "_media_group_tasks", None) or {}
+        group_ids = []
+        for group_id, event in list(media_group_events.items()):
+            try:
+                if self._event_session_key(event) == session_key:
+                    group_ids.append(group_id)
+            except Exception:
+                continue
+        for group_id in group_ids:
+            event = media_group_events.pop(group_id, None)
+            task = media_group_tasks.pop(group_id, None)
+            if task is not None and not task.done():
+                task.cancel()
+            if event is not None and self._event_has_startup_attachment(event):
+                merge_pending_message_event(merged_by_session, session_key, event)
+
+        return merged_by_session.get(session_key)
 
     async def _flush_photo_batch(self, batch_key: str) -> None:
         """Send a buffered photo burst/album as a single MessageEvent."""
@@ -6221,6 +6378,7 @@ class TelegramAdapter(BasePlatformAdapter):
         # Download photo to local image cache so the vision tool can access it
         # even after Telegram's ephemeral file URLs expire (~1 hour).
         if msg.photo:
+            image_download_session_key = self._track_media_download_start(event)
             try:
                 # msg.photo is a list of PhotoSize sorted by size; take the largest
                 photo = msg.photo[-1]
@@ -6249,9 +6407,12 @@ class TelegramAdapter(BasePlatformAdapter):
 
             except Exception as e:
                 logger.warning("[Telegram] Failed to cache photo: %s", e, exc_info=True)
+            finally:
+                self._track_media_download_done(image_download_session_key)
 
         # Download voice/audio messages to cache for STT transcription
         if msg.voice:
+            audio_download_session_key = self._track_media_download_start(event)
             try:
                 allowed, note = self._telegram_media_size_allowed(msg.voice, "voice message")
                 if not allowed:
@@ -6267,7 +6428,10 @@ class TelegramAdapter(BasePlatformAdapter):
                 logger.info("[Telegram] Cached user voice at %s", cached_path)
             except Exception as e:
                 logger.warning("[Telegram] Failed to cache voice: %s", e, exc_info=True)
+            finally:
+                self._track_media_download_done(audio_download_session_key)
         elif msg.audio:
+            audio_download_session_key = self._track_media_download_start(event)
             try:
                 allowed, note = self._telegram_media_size_allowed(msg.audio, "audio file")
                 if not allowed:
@@ -6283,6 +6447,8 @@ class TelegramAdapter(BasePlatformAdapter):
                 logger.info("[Telegram] Cached user audio at %s", cached_path)
             except Exception as e:
                 logger.warning("[Telegram] Failed to cache audio: %s", e, exc_info=True)
+            finally:
+                self._track_media_download_done(audio_download_session_key)
 
         elif msg.video:
             try:
@@ -6304,6 +6470,7 @@ class TelegramAdapter(BasePlatformAdapter):
         # Download document files to cache for agent processing
         elif msg.document:
             doc = msg.document
+            document_download_session_key = self._track_media_download_start(event)
             try:
                 # Determine file extension
                 ext = ""
@@ -6436,6 +6603,8 @@ class TelegramAdapter(BasePlatformAdapter):
 
             except Exception as e:
                 logger.warning("[Telegram] Failed to cache document: %s", e, exc_info=True)
+            finally:
+                self._track_media_download_done(document_download_session_key)
 
         media_group_id = getattr(msg, "media_group_id", None)
         if media_group_id:
@@ -6472,6 +6641,15 @@ class TelegramAdapter(BasePlatformAdapter):
     async def _flush_media_group_event(self, media_group_id: str) -> None:
         try:
             await asyncio.sleep(self.MEDIA_GROUP_WAIT_SECONDS)
+            event = self._media_group_events.get(media_group_id)
+            session_key = self._event_session_key(event) if event is not None else ""
+            deadline = asyncio.get_running_loop().time() + self._startup_media_grace_seconds()
+            while (
+                session_key
+                and self._media_downloads_in_progress_by_session.get(session_key, 0) > 0
+                and asyncio.get_running_loop().time() < deadline
+            ):
+                await asyncio.sleep(min(0.05, max(0.0, deadline - asyncio.get_running_loop().time())))
             event = self._media_group_events.pop(media_group_id, None)
             if event is not None:
                 await self.handle_message(event)
@@ -6646,6 +6824,73 @@ class TelegramAdapter(BasePlatformAdapter):
                 self.name, cache_key, thread_id,
             )
 
+    @staticmethod
+    def _telegram_forward_origin_type(origin: Any) -> str:
+        raw = getattr(origin, "type", None) or origin.__class__.__name__
+        raw = getattr(raw, "value", raw)
+        return str(raw or "").split(".")[-1].lower()
+
+    @staticmethod
+    def _telegram_forward_origin_date(origin: Any) -> Optional[str]:
+        date = getattr(origin, "date", None)
+        if isinstance(date, datetime):
+            if date.tzinfo is None:
+                date = date.replace(tzinfo=timezone.utc)
+            return date.isoformat()
+        return None
+
+    def _extract_forward_origin(self, message: Message) -> Optional[Dict[str, str]]:
+        """Normalize Telegram forwarded-message metadata for agent context."""
+        origin = getattr(message, "forward_origin", None)
+        if origin is None:
+            return None
+
+        result: Dict[str, str] = {"type": self._telegram_forward_origin_type(origin)}
+        if getattr(message, "is_automatic_forward", False):
+            result["automatic"] = "true"
+
+        date = self._telegram_forward_origin_date(origin)
+        if date:
+            result["date"] = date
+
+        sender_user = getattr(origin, "sender_user", None)
+        if sender_user is not None:
+            sender_name = getattr(sender_user, "full_name", None) or getattr(sender_user, "username", None)
+            if sender_name:
+                result["sender_name"] = str(sender_name)
+            sender_id = getattr(sender_user, "id", None)
+            if sender_id is not None:
+                result["sender_id"] = str(sender_id)
+            username = getattr(sender_user, "username", None)
+            if username:
+                result["sender_username"] = str(username)
+
+        hidden_name = getattr(origin, "sender_user_name", None)
+        if hidden_name:
+            result["sender_name"] = str(hidden_name)
+
+        chat = getattr(origin, "chat", None)
+        if chat is not None:
+            chat_name = getattr(chat, "title", None) or getattr(chat, "full_name", None) or getattr(chat, "username", None)
+            if chat_name:
+                result["chat_name"] = str(chat_name)
+            chat_id = getattr(chat, "id", None)
+            if chat_id is not None:
+                result["chat_id"] = str(chat_id)
+            username = getattr(chat, "username", None)
+            if username:
+                result["chat_username"] = str(username)
+
+        author_signature = getattr(origin, "author_signature", None)
+        if author_signature:
+            result["author_signature"] = str(author_signature)
+
+        message_id = getattr(origin, "message_id", None)
+        if message_id is not None:
+            result["message_id"] = str(message_id)
+
+        return result
+
     def _build_message_event(
         self,
         message: Message,
@@ -6803,6 +7048,7 @@ class TelegramAdapter(BasePlatformAdapter):
             platform_update_id=update_id,
             reply_to_message_id=reply_to_id,
             reply_to_text=reply_to_text,
+            forward_origin=self._extract_forward_origin(message),
             auto_skill=topic_skill,
             channel_prompt=_channel_prompt,
             timestamp=message.date,

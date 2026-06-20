@@ -1454,6 +1454,7 @@ class MessageEvent:
     # Reply context
     reply_to_message_id: Optional[str] = None
     reply_to_text: Optional[str] = None  # Text of the replied-to message (for context injection)
+    forward_origin: Optional[Dict[str, str]] = None
     
     # Auto-loaded skill(s) for topic/channel bindings (e.g., Telegram DM Topics,
     # Discord channel_skill_bindings).  A single name or ordered list.
@@ -1635,6 +1636,8 @@ def merge_pending_message_event(
         incoming_is_photo = event.message_type == MessageType.PHOTO
         existing_has_media = bool(existing.media_urls)
         incoming_has_media = bool(event.media_urls)
+        if getattr(event, "forward_origin", None) and not getattr(existing, "forward_origin", None):
+            existing.forward_origin = event.forward_origin
 
         if existing_is_photo and incoming_is_photo:
             existing.media_urls.extend(event.media_urls)
