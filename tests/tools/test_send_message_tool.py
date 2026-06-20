@@ -1019,6 +1019,17 @@ class TestSendTelegramThreadIdMapping:
         kwargs = bot.send_message.await_args.kwargs
         assert kwargs["message_thread_id"] == 17585
 
+    def test_private_dm_topic_uses_direct_messages_topic_id(self, monkeypatch):
+        """Telegram private DM topics must route through direct_messages_topic_id."""
+        bot = self._make_bot()
+        _install_telegram_mock(monkeypatch, bot)
+
+        asyncio.run(_send_telegram("tok", "123456789", "hello", thread_id="17585"))
+
+        kwargs = bot.send_message.await_args.kwargs
+        assert kwargs["direct_messages_topic_id"] == 17585
+        assert "message_thread_id" not in kwargs
+
     def test_no_thread_id_no_kwarg(self, monkeypatch):
         """With no thread_id, message_thread_id must not appear in kwargs."""
         bot = self._make_bot()

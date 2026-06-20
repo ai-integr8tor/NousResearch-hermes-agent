@@ -648,6 +648,33 @@ def _resolve_delivery_target(job: dict) -> Optional[dict]:
     return targets[0] if targets else None
 
 
+def _delivery_metadata_for_target(platform_name: str, chat_id: str, thread_id: Optional[str]) -> dict | None:
+    """Build adapter metadata for a resolved cron delivery target.
+
+    Most platforms only need the generic ``thread_id``. Telegram private DM
+    topics are different: synthetic sends without a reply anchor must carry
+    ``direct_messages_topic_id`` or the adapter can reject/fall back out of the
+    requested topic lane.
+    """
+    if thread_id is None:
+        return None
+
+    metadata: dict[str, str | bool] = {"thread_id": str(thread_id)}
+    if platform_name.lower() != "telegram":
+        return metadata
+
+    try:
+        is_private_chat = int(str(chat_id)) > 0
+    except (TypeError, ValueError):
+        is_private_chat = False
+
+    if is_private_chat and str(thread_id) not in {"", "1"}:
+        metadata["telegram_dm_topic_reply_fallback"] = True
+        metadata["direct_messages_topic_id"] = str(thread_id)
+
+    return metadata
+
+
 # Media extension sets — audio routing is centralized in gateway.platforms.base
 # via should_send_media_as_audio() so Telegram-specific rules stay in one place.
 _VIDEO_EXTS = frozenset({'.mp4', '.mov', '.avi', '.mkv', '.webm', '.3gp'})
@@ -812,7 +839,7 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         delivered = False
         target_errors = []
         if runtime_adapter is not None and loop is not None and getattr(loop, "is_running", lambda: False)():
-            send_metadata = {"thread_id": thread_id} if thread_id else None
+            send_metadata = _delivery_metadata_for_target(platform_name, chat_id, thread_id)
             try:
                 # Send cleaned text (MEDIA tags stripped) — not the raw content
                 text_to_send = cleaned_delivery_content.strip()

@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from tools.send_message_tool import (
     _send_dingtalk,
     _send_matrix,
+    _telegram_thread_kwargs,
 )
 
 # ``_send_mattermost`` moved into the mattermost plugin
@@ -224,6 +225,32 @@ class TestSendMatrix:
 
         assert len(txn_ids) == 2
         assert txn_ids[0] != txn_ids[1]
+
+
+# ---------------------------------------------------------------------------
+# _telegram_thread_kwargs
+# ---------------------------------------------------------------------------
+
+
+class TestTelegramThreadKwargs:
+    def test_general_topic_is_omitted(self):
+        assert _telegram_thread_kwargs("-1001234567890", "1") == {}
+        assert _telegram_thread_kwargs("-1001234567890", 1) == {}
+
+    def test_forum_topic_uses_message_thread_id(self):
+        assert _telegram_thread_kwargs("-1001234567890", "17585") == {
+            "message_thread_id": 17585,
+        }
+
+    def test_private_dm_topic_uses_direct_messages_topic_id(self):
+        assert _telegram_thread_kwargs("123456789", "17585") == {
+            "direct_messages_topic_id": 17585,
+        }
+
+    def test_non_numeric_chat_id_falls_back_to_message_thread_id(self):
+        assert _telegram_thread_kwargs("@channelalias", "17585") == {
+            "message_thread_id": 17585,
+        }
 
 
 # ---------------------------------------------------------------------------

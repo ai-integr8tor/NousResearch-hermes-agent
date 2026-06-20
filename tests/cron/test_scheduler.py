@@ -657,6 +657,55 @@ class TestDeliverResultWrapping:
         voice_call = adapter.send_voice.call_args
         assert voice_call[1]["audio_path"] == str(media_path)
 
+    def test_live_adapter_telegram_dm_topic_uses_direct_messages_topic_metadata(self):
+        """Cron deliveries to Telegram private DM topics must preserve direct topic metadata."""
+        from gateway.config import Platform
+        from concurrent.futures import Future
+
+        adapter = AsyncMock()
+        adapter.send.return_value = MagicMock(success=True)
+
+        pconfig = MagicMock()
+        pconfig.enabled = True
+        mock_cfg = MagicMock()
+        mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
+
+        loop = MagicMock()
+        loop.is_running.return_value = True
+
+        def fake_run_coro(coro, _loop):
+            future = Future()
+            future.set_result(MagicMock(success=True))
+            coro.close()
+            return future
+
+        job = {
+            "id": "topic-job",
+            "deliver": "telegram:123456789:20197",
+        }
+
+        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+             patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}), \
+             patch("asyncio.run_coroutine_threadsafe", side_effect=fake_run_coro), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock:
+            _deliver_result(
+                job,
+                "hello from cron",
+                adapters={Platform.TELEGRAM: adapter},
+                loop=loop,
+            )
+
+        adapter.send.assert_called_once_with(
+            "123456789",
+            "hello from cron",
+            metadata={
+                "thread_id": "20197",
+                "telegram_dm_topic_reply_fallback": True,
+                "direct_messages_topic_id": "20197",
+            },
+        )
+        send_mock.assert_not_awaited()
+
     def test_live_adapter_routes_image_to_send_image_file(self, tmp_path, monkeypatch):
         """Image MEDIA files should be routed to send_image_file, not send_voice."""
         from gateway.config import Platform
