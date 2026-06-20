@@ -1739,8 +1739,22 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
             runtime_kwargs = {
                 "requested": job.get("provider"),
             }
+            if model:
+                runtime_kwargs["target_model"] = model
             if job.get("base_url"):
                 runtime_kwargs["explicit_base_url"] = job.get("base_url")
+            elif isinstance(_cfg.get("model"), dict):
+                _model_cfg_for_runtime = _cfg["model"]
+                _cfg_base_url = str(_model_cfg_for_runtime.get("base_url") or "").strip()
+                _cfg_api_key = str(
+                    _model_cfg_for_runtime.get("api_key")
+                    or _model_cfg_for_runtime.get("api")
+                    or ""
+                ).strip()
+                if _cfg_base_url:
+                    runtime_kwargs["explicit_base_url"] = _cfg_base_url
+                if _cfg_api_key:
+                    runtime_kwargs["explicit_api_key"] = _cfg_api_key
             runtime = resolve_runtime_provider(**runtime_kwargs)
         except AuthError as auth_exc:
             # Primary provider auth failed — try fallback chain before giving up.

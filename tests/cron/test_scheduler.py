@@ -1672,6 +1672,85 @@ class TestRunJobConfigEnvVarExpansion:
         assert kwargs["model"] == "${_HERMES_TEST_CRON_UNSET_VAR}"
 
 
+class TestRunJobRuntimeProviderResolution:
+    _RUNTIME = {
+        "api_key": "test-key",
+        "base_url": "https://example.invalid/v1",
+        "provider": "openrouter",
+        "api_mode": "chat_completions",
+    }
+
+    def test_run_job_passes_target_model_to_runtime_provider(self, tmp_path):
+        job = {
+            "id": "opencode-job",
+            "name": "opencode test",
+            "prompt": "hi",
+            "model": "deepseek-v4-flash",
+            "provider": "opencode-go",
+        }
+        fake_db = MagicMock()
+
+        with patch("cron.scheduler._hermes_home", tmp_path), \
+             patch("cron.scheduler._resolve_origin", return_value=None), \
+             patch("dotenv.load_dotenv"), \
+             patch("hermes_state.SessionDB", return_value=fake_db), \
+             patch(
+                 "hermes_cli.runtime_provider.resolve_runtime_provider",
+                 return_value=self._RUNTIME,
+             ) as mock_runtime, \
+             patch("run_agent.AIAgent") as mock_agent_cls:
+            mock_agent = MagicMock()
+            mock_agent.run_conversation.return_value = {"final_response": "ok"}
+            mock_agent_cls.return_value = mock_agent
+
+            success, _, _, error = run_job(job)
+
+        assert success is True
+        assert error is None
+        assert mock_runtime.call_args.kwargs["requested"] == "opencode-go"
+        assert mock_runtime.call_args.kwargs["target_model"] == "deepseek-v4-flash"
+
+    def test_run_job_passes_config_custom_runtime_overrides(self, tmp_path):
+        (tmp_path / "config.yaml").write_text(
+            "model:\n"
+            "  provider: custom\n"
+            "  default: some-model\n"
+            "  base_url: https://custom-endpoint.example.com/v1\n"
+            "  api_key: sk-config-secret\n",
+            encoding="utf-8",
+        )
+        job = {
+            "id": "custom-job",
+            "name": "custom test",
+            "prompt": "hi",
+        }
+        fake_db = MagicMock()
+
+        with patch("cron.scheduler._hermes_home", tmp_path), \
+             patch("cron.scheduler._resolve_origin", return_value=None), \
+             patch("dotenv.load_dotenv"), \
+             patch("hermes_state.SessionDB", return_value=fake_db), \
+             patch(
+                 "hermes_cli.runtime_provider.resolve_runtime_provider",
+                 return_value=self._RUNTIME,
+             ) as mock_runtime, \
+             patch("run_agent.AIAgent") as mock_agent_cls:
+            mock_agent = MagicMock()
+            mock_agent.run_conversation.return_value = {"final_response": "ok"}
+            mock_agent_cls.return_value = mock_agent
+
+            success, _, _, error = run_job(job)
+
+        assert success is True
+        assert error is None
+        assert mock_runtime.call_args.kwargs == {
+            "requested": None,
+            "target_model": "some-model",
+            "explicit_base_url": "https://custom-endpoint.example.com/v1",
+            "explicit_api_key": "sk-config-secret",
+        }
+
+
 class TestRunJobSkillBacked:
     def test_run_job_preserves_skill_env_passthrough_into_worker_thread(self, tmp_path):
         job = {
