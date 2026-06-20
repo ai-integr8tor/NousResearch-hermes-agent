@@ -363,19 +363,24 @@ class TestAspectRatioNormalization:
 
 class TestRegistryIntegration:
 
-    def test_schema_exposes_supported_gpt_image_2_controls_to_agent(self, image_tool):
-        """The agent-facing schema stays tight while allowing supported
-        image-to-image/reference workflows."""
+    def test_schema_exposes_expected_agent_params(self, image_tool):
+        """The agent-facing schema exposes the unified text+image surface plus
+        GPT-Image controls. Model selection stays a user-level config choice,
+        never an agent-level arg."""
         props = image_tool.IMAGE_GENERATE_SCHEMA["parameters"]["properties"]
         assert set(props.keys()) == {
-            "prompt", "aspect_ratio", "reference_images",
-            "size", "quality", "n", "output_format", "mask_image",
+            "prompt", "aspect_ratio", "image_url", "reference_image_urls",
+            "reference_images", "size", "quality", "n", "output_format",
+            "mask_image",
         }
+        assert image_tool.IMAGE_GENERATE_SCHEMA["parameters"]["required"] == ["prompt"]
 
-    def test_reference_images_schema_is_string_array(self, image_tool):
-        ref_schema = image_tool.IMAGE_GENERATE_SCHEMA["parameters"]["properties"]["reference_images"]
-        assert ref_schema["type"] == "array"
-        assert ref_schema["items"]["type"] == "string"
+    def test_reference_image_schemas_are_string_arrays(self, image_tool):
+        props = image_tool.IMAGE_GENERATE_SCHEMA["parameters"]["properties"]
+        for key in ("reference_image_urls", "reference_images"):
+            ref_schema = props[key]
+            assert ref_schema["type"] == "array"
+            assert ref_schema["items"]["type"] == "string"
 
     def test_aspect_ratio_enum_is_three_values(self, image_tool):
         enum = image_tool.IMAGE_GENERATE_SCHEMA["parameters"]["properties"]["aspect_ratio"]["enum"]
