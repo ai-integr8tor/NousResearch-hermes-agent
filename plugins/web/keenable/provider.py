@@ -94,7 +94,7 @@ class KeenableWebSearchProvider(WebSearchProvider):
 
     def is_available(self) -> bool:
         """Return True when ``KEENABLE_API_KEY`` is set to a non-empty value."""
-        return bool(os.getenv("KEENABLE_API_KEY", "").strip())
+        return bool(_api_key())
 
     def supports_search(self) -> bool:
         return True
