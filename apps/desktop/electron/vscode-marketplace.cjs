@@ -250,16 +250,30 @@ function extractEntry(buf, record, maxBytes = MAX_ENTRY_BYTES) {
     throw new Error('Corrupt zip: bad local file header.')
   }
 
+  // 0 = stored, 8 = deflate. Theme files are one or the other; reject anything
+  // else up front so an unknown/corrupt method can't be misread as raw deflate.
+  if (record.method !== 0 && record.method !== 8) {
+    throw new Error(`Unsupported zip compression method ${record.method}.`)
+  }
+
   const nameLen = buf.readUInt16LE(record.localOffset + 26)
   const extraLen = buf.readUInt16LE(record.localOffset + 28)
   const dataStart = record.localOffset + 30 + nameLen + extraLen
-  const data = buf.subarray(dataStart, dataStart + record.compressedSize)
+  const dataEnd = dataStart + record.compressedSize
 
-  // 0 = stored, 8 = deflate. Theme files are one or the other. Bound the output
-  // either way so a malicious entry can't exhaust memory after the download cap.
+  // A corrupt central directory can point past the buffer; subarray would then
+  // silently return a truncated slice. Validate the bounds before slicing.
+  if (dataStart > buf.length || dataEnd > buf.length || dataEnd < dataStart) {
+    throw new Error('Corrupt zip: entry payload is out of bounds.')
+  }
+
+  const data = buf.subarray(dataStart, dataEnd)
+
+  // Bound the output so a malicious entry can't exhaust memory after the
+  // download cap, whether it is stored or deflated.
   if (record.method === 0) {
     if (data.length > maxBytes) {
-      throw new Error('Theme entry exceeds the extraction size limit.')
+      throw new Error('Zip entry exceeds the extraction size limit.')
     }
 
     return data.toString('utf8')

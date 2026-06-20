@@ -132,6 +132,63 @@ test('extractThemes skips a decompression-bomb theme entry instead of inflating 
   assert.ok(!themes.some(theme => theme.label === 'Bomb'))
 })
 
+test('extractThemes skips an oversized stored theme entry instead of reading it', () => {
+  // The stored path has no zlib cap, so the explicit `data.length > maxBytes`
+  // check is the only guard. A 17 MB stored entry (> MAX_ENTRY_BYTES of 16 MB)
+  // must be skipped by the per-theme try/catch, leaving the legitimate sibling.
+  const oversized = Buffer.alloc(17 * 1024 * 1024, 0x41) // 17 MB of 'A'.
+  const pkg = JSON.stringify({
+    name: 'theme-stored-bomb',
+    displayName: 'StoredBomb',
+    contributes: {
+      themes: [
+        { label: 'StoredBomb', uiTheme: 'vs-dark', path: './themes/big.json' },
+        { label: 'Safe', uiTheme: 'vs-dark', path: './themes/safe.json' }
+      ]
+    }
+  })
+  const safeJson = JSON.stringify({ name: 'Safe', type: 'dark', colors: { 'editor.background': '#000000' } })
+
+  const zip = makeZip([
+    { name: 'extension/package.json', data: pkg },
+    { name: 'extension/themes/big.json', data: oversized },
+    { name: 'extension/themes/safe.json', data: safeJson }
+  ])
+
+  const themes = extractThemes(zip)
+  assert.strictEqual(themes.length, 1)
+  assert.strictEqual(themes[0].label, 'Safe')
+  assert.ok(!themes.some(theme => theme.label === 'StoredBomb'))
+})
+
+test('extractThemes fails closed when the stored package.json manifest is oversized', () => {
+  // The manifest is parsed outside the per-theme try/catch, so an oversized
+  // stored manifest must throw (fail closed) rather than be read unbounded.
+  const oversized = Buffer.alloc(17 * 1024 * 1024, 0x7b) // 17 MB of '{'.
+
+  const zip = makeZip([{ name: 'extension/package.json', data: oversized }])
+
+  assert.throws(() => extractThemes(zip), /exceeds the extraction size limit/i)
+})
+
+test('extractThemes rejects an unsupported zip compression method', () => {
+  // Only stored (0) and deflate (8) are allowed; an unknown method must throw
+  // instead of being misread as raw deflate. The manifest is parsed outside the
+  // per-theme try/catch, so patching its central-directory method surfaces the
+  // rejection through the public entry point.
+  const zip = makeZip([{ name: 'extension/package.json', data: '{}' }])
+
+  // Patch the method byte in both the local (offset 8) and central headers. The
+  // central-directory method lives at `centralStart + 10`; locate it via the
+  // EOCD's central-directory offset field rather than hardcoding a position.
+  const eocd = zip.length - 22
+  const centralStart = zip.readUInt32LE(eocd + 16)
+  zip.writeUInt16LE(99, 8) // local header method.
+  zip.writeUInt16LE(99, centralStart + 10) // central header method.
+
+  assert.throws(() => extractThemes(zip), /unsupported zip compression method/i)
+})
+
 test('extractThemes still reads a normal deflated theme under the inflate cap', () => {
   // Regression guard: the inflate cap must not break legitimate deflated themes.
   const pkg = JSON.stringify({
