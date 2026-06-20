@@ -5923,7 +5923,100 @@ class TelegramAdapter(BasePlatformAdapter):
         # _message_mentions_bot above — skip the redundant second call.
         if not self._telegram_guest_mode() and self._message_mentions_bot(message):
             return True
-        return self._message_matches_mention_patterns(message)
+        if self._message_matches_mention_patterns(message):
+            return True
+        # Ongoing conversation: a forum topic that already has an active
+        # session keeps accepting follow-up messages (text and media, even
+        # without a caption mention) so the conversation is not broken by a
+        # missing re-mention. Mirrors Slack thread behavior. Idle topics still
+        # require a mention to start, so the bot stays quiet on unrelated
+        # group chatter.
+        return self._forum_topic_has_active_session(message)
+
+    def _forum_topic_thread_id(self, message: Message, chat_type: str) -> Optional[str]:
+        """Return the durable forum/DM topic thread id for a message, or None.
+
+        Single source of truth for the rule used when building a MessageEvent:
+        keep ``message_thread_id`` only when Telegram marks the message as a
+        real topic/forum message (group forum topics, or DM topics with
+        ``is_topic_message``). Forum groups without an explicit topic fall back
+        to the General-topic id so routing stays inside the group's forum
+        rather than the bot's main channel (#22423). Plain reply-anchor thread
+        ids are dropped so reply UI does not fragment sessions (#3206).
+        """
+        chat = getattr(message, "chat", None)
+        thread_id_raw = getattr(message, "message_thread_id", None)
+        is_topic_message = bool(getattr(message, "is_topic_message", False))
+        is_forum_group = getattr(chat, "is_forum", False) is True
+        thread_id_str = None
+        if thread_id_raw is not None:
+            if chat_type == "group" and (is_topic_message or is_forum_group):
+                thread_id_str = str(thread_id_raw)
+            elif chat_type == "dm" and is_topic_message:
+                thread_id_str = str(thread_id_raw)
+        if chat_type == "group" and thread_id_str is None and is_forum_group:
+            thread_id_str = self._GENERAL_TOPIC_THREAD_ID
+        return thread_id_str
+
+    def _forum_topic_has_active_session(self, message: Message) -> bool:
+        """Return True when a group forum topic already has an active session.
+
+        Mirrors :meth:`SlackAdapter._has_active_session_for_thread`. Once a
+        session is running in a forum topic, follow-up messages in that topic
+        belong to the ongoing conversation and should be processed without a
+        fresh @mention. This is what lets an uncaptioned screenshot continue an
+        active topic conversation instead of being dropped by the mention gate.
+
+        Only fires for real forum topic threads that already have a session, so
+        idle topics still need a mention to start. Builds the lookup key with
+        ``build_session_key`` using the same isolation flags the store used to
+        key the entry, so the lookup matches the stored key. Any failure returns
+        False (mention still required).
+        """
+        store = getattr(self, "_session_store", None)
+        if not store:
+            return False
+        try:
+            from gateway.session import SessionSource, build_session_key
+
+            chat = getattr(message, "chat", None)
+            chat_id = str(getattr(chat, "id", "") or "")
+            if not chat_id:
+                return False
+            thread_id = self._forum_topic_thread_id(message, "group")
+            if not thread_id:
+                return False
+            user = getattr(message, "from_user", None)
+            source = SessionSource(
+                platform=Platform.TELEGRAM,
+                chat_id=chat_id,
+                chat_type="group",
+                user_id=str(user.id) if user is not None else None,
+                thread_id=thread_id,
+            )
+            # Read isolation flags from the session store's own config, not the
+            # adapter's PlatformConfig.extra. The store keys entries via
+            # SessionStore._generate_session_key, which reads these flags from
+            # the gateway config it holds; using the same source keeps the
+            # lookup key aligned with the stored key when an operator changes
+            # group_sessions_per_user / thread_sessions_per_user. Mirrors
+            # SlackAdapter._has_active_session_for_thread.
+            store_cfg = getattr(store, "config", None)
+            group_per_user = (
+                getattr(store_cfg, "group_sessions_per_user", True) if store_cfg is not None else True
+            )
+            thread_per_user = (
+                getattr(store_cfg, "thread_sessions_per_user", False) if store_cfg is not None else False
+            )
+            session_key = build_session_key(
+                source,
+                group_sessions_per_user=group_per_user,
+                thread_sessions_per_user=thread_per_user,
+            )
+            store._ensure_loaded()
+            return session_key in store._entries
+        except Exception:
+            return False
 
     async def _ensure_forum_commands(self, message) -> None:
         """Lazy-register bot commands for forum supergroups.
@@ -6673,28 +6766,12 @@ class TelegramAdapter(BasePlatformAdapter):
             chat_type = "channel"
 
         # Resolve Telegram topic name and skill binding.
-        # Only preserve message_thread_id when Telegram marks the message as
-        # a real topic/forum message. Telegram can also populate
-        # message_thread_id for ordinary reply UI anchors; treating those as
-        # durable session threads fragments workflows such as CAPTCHA/login
-        # handoffs where the user later replies "done" in the same group.
-        # Private chats have the same pitfall: only real DM topic messages
-        # (is_topic_message=True) should keep the thread id, otherwise sends
-        # can hit Telegram's 'Message thread not found' error (#3206).
-        thread_id_raw = message.message_thread_id
-        is_topic_message = bool(getattr(message, "is_topic_message", False))
-        is_forum_group = getattr(chat, "is_forum", False) is True
-        thread_id_str = None
-        if thread_id_raw is not None:
-            if chat_type == "group" and (is_topic_message or is_forum_group):
-                thread_id_str = str(thread_id_raw)
-            elif chat_type == "dm" and is_topic_message:
-                thread_id_str = str(thread_id_raw)
-        # For forum groups without an explicit topic, default to the
-        # General-topic id so the gateway routes back to the General topic
-        # rather than dropping into the bot's main channel (#22423).
-        if chat_type == "group" and thread_id_str is None and is_forum_group:
-            thread_id_str = self._GENERAL_TOPIC_THREAD_ID
+        # _forum_topic_thread_id keeps message_thread_id only for real
+        # topic/forum messages (group forum topics, DM topics) and drops plain
+        # reply-anchor thread ids (#3206), defaulting forum groups without an
+        # explicit topic to the General topic (#22423). The same helper is used
+        # by the active-session gate so the routed key and the gate key agree.
+        thread_id_str = self._forum_topic_thread_id(message, chat_type)
         chat_topic = None
         topic_skill = None
 
