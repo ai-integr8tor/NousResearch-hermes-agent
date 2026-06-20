@@ -5,6 +5,7 @@ Handles: hermes gateway [run|start|stop|restart|status|install|uninstall|setup]
 """
 
 import asyncio
+import json
 import logging
 import os
 import shlex
@@ -3804,6 +3805,13 @@ def launchd_status(deep: bool = False):
         print("  Service definition exists locally but launchd has not loaded it.")
         print("  Run: hermes gateway start")
 
+    runtime_lines = _runtime_health_lines()
+    if runtime_lines:
+        print()
+        print("Recent gateway health:")
+        for line in runtime_lines:
+            print(f"  {line}")
+
     if deep:
         log_file = get_hermes_home() / "logs" / "gateway.log"
         if log_file.exists():
@@ -4931,7 +4939,11 @@ def _platform_status(platform: dict) -> str:
 def _runtime_health_lines() -> list[str]:
     """Summarize the latest persisted gateway runtime health state."""
     try:
-        from gateway.status import read_runtime_status
+        from gateway.status import (
+            classify_gateway_log_line,
+            classify_gateway_transport_liveness,
+            read_runtime_status,
+        )
     except Exception:
         return []
 
@@ -4945,11 +4957,37 @@ def _runtime_health_lines() -> list[str]:
     active_agents = state.get("active_agents")
     restart_requested = state.get("restart_requested")
     platforms = state.get("platforms", {}) or {}
+    liveness = classify_gateway_transport_liveness(state)
+    seen_codes = set()
+
+    for issue in liveness.get("platforms", []):
+        platform = issue.get("platform") or "gateway"
+        code = issue.get("code") or "transport_unhealthy"
+        seen_codes.add(code)
+        summary = issue.get("summary") or "transport unhealthy"
+        repair = issue.get("recommended_repair")
+        detail = f"{summary} [{code}]"
+        if repair:
+            detail = f"{detail}; repair: {repair}"
+        lines.append(f"⚠ {platform}: {detail}")
 
     for platform, pdata in platforms.items():
         if pdata.get("state") == "fatal":
             message = pdata.get("error_message") or "unknown error"
             lines.append(f"⚠ {platform}: {message}")
+
+    for issue in _recent_gateway_log_transport_issues(classify_gateway_log_line):
+        code = issue.get("code") or "transport_unhealthy"
+        if code in seen_codes:
+            continue
+        seen_codes.add(code)
+        platform = issue.get("platform") or "gateway"
+        summary = issue.get("summary") or "transport unhealthy"
+        repair = issue.get("recommended_repair")
+        detail = f"{summary} [{code}]"
+        if repair:
+            detail = f"{detail}; repair: {repair}"
+        lines.append(f"⚠ {platform}: {detail}")
 
     if gateway_state == "startup_failed" and exit_reason:
         lines.append(f"⚠ Last startup issue: {exit_reason}")
@@ -4961,6 +4999,33 @@ def _runtime_health_lines() -> list[str]:
         lines.append(f"⚠ Last shutdown reason: {exit_reason}")
 
     return lines
+
+
+def _recent_gateway_log_transport_issues(classifier) -> list[dict]:
+    log_file = get_hermes_home() / "logs" / "gateway.log"
+    if not log_file.exists():
+        return []
+    try:
+        with log_file.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - 65536), os.SEEK_SET)
+            raw = handle.read()
+    except OSError:
+        return []
+
+    issues: list[dict] = []
+    seen_codes: set[str] = set()
+    for line in reversed(raw.decode("utf-8", errors="replace").splitlines()[-200:]):
+        issue = classifier(line)
+        if not issue:
+            continue
+        code = issue.get("code")
+        if code in seen_codes:
+            continue
+        seen_codes.add(code)
+        issues.append(issue)
+    return list(reversed(issues))
 
 
 def _setup_standard_platform(platform: dict):
@@ -7052,6 +7117,41 @@ def _gateway_command_inner(args):
             # Start fresh
             print("Starting gateway...")
             run_gateway(verbose=0)
+
+    elif subcmd == "recover":
+        from gateway.recovery import execute_gateway_recovery
+        from hermes_cli.profiles import get_active_profile_name
+
+        result = execute_gateway_recovery(
+            profile=get_active_profile_name(),
+            dry_run=getattr(args, "dry_run", False),
+            max_restarts=max(1, int(getattr(args, "max_restarts", 3) or 3)),
+            window_seconds=max(1, int(getattr(args, "window_seconds", 900) or 900)),
+        )
+        if getattr(args, "json", False):
+            print(json.dumps(result, indent=2))
+        else:
+            action = result.get("action")
+            profile = result.get("profile")
+            if action == "restart_profile":
+                if result.get("executed"):
+                    print(f"✓ Restarted Hermes gateway profile '{profile}'")
+                else:
+                    print(f"↻ Would restart Hermes gateway profile '{profile}'")
+                print(f"  Command: {result.get('restart_command_display')}")
+            elif action == "operator_intervention_required":
+                print("✗ Gateway recovery cooldown exceeded")
+                print(f"  Profile: {profile}")
+                print(f"  Code: {result.get('code')}")
+                if result.get("cooldown_remaining_seconds"):
+                    print(f"  Retry after: {result.get('cooldown_remaining_seconds')}s")
+                print("  Operator intervention required before another restart.")
+            else:
+                print("✓ No supervised gateway recovery needed")
+        if result.get("operator_intervention_required") or (
+            result.get("executed") and not result.get("ok", False)
+        ):
+            sys.exit(1)
 
     elif subcmd == "status":
         deep = getattr(args, "deep", False)
