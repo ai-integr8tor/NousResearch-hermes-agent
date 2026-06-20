@@ -148,6 +148,15 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
   // "Start new session" affordance; clicking it bumps `reconnectNonce`, which
   // is a dependency of the connect effect, so a fresh PTY spawns in place.
   const [sessionEnded, setSessionEnded] = useState(false);
+  // True while the WebSocket to the PTY backend is in the OPEN state. The
+  // sidebar uses this to decide whether the model-switch flow should show
+  // the "reload to apply" confirm dialog — when there's no live chat,
+  // reloading has nothing to interrupt and the dialog is just noise.
+  // Initialized to false: the WS opens asynchronously after first mount, so
+  // a user opening the picker before the handshake completes correctly sees
+  // the "no chat running" path. Cleared on close/error/session-end alongside
+  // `sessionEnded`.
+  const [ptyActive, setPtyActive] = useState(false);
   const [reconnectNonce, setReconnectNonce] = useState(0);
   const reconnect = useCallback(() => {
     setSessionEnded(false);
@@ -618,6 +627,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     ws.onopen = () => {
       setBanner(null);
       setSessionEnded(false);
+      setPtyActive(true);
       // Send the initial RESIZE immediately so Ink has *a* size to lay
       // out against on its first paint.  The double-rAF block above will
       // follow up with the authoritative measurement — at worst Ink
@@ -635,6 +645,12 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
 
     ws.onclose = (ev) => {
       wsRef.current = null;
+      // The PTY is no longer live the moment the WS closes — regardless of
+      // whether the close is a clean session end, a 4xx auth/refusal, or a
+      // 1011 server error. Set this before any of the banner/setSessionEnded
+      // branches below so the sidebar's model-switch flow always sees the
+      // "no live chat" path when the chat is in fact down.
+      setPtyActive(false);
       if (unmounting) {
         return;
       }
@@ -897,6 +913,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
                 profile={scopedProfile}
                 onDashboardNewSessionRequest={startFreshDashboardChat}
                 showTools={false}
+                ptyActive={ptyActive}
               />
             </div>
             <ChatSessionList
@@ -996,6 +1013,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
                 profile={scopedProfile}
                 onDashboardNewSessionRequest={startFreshDashboardChat}
                 showTools={false}
+                ptyActive={ptyActive}
               />
             </div>
 

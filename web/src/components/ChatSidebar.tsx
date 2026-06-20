@@ -84,6 +84,16 @@ interface ChatSidebarProps {
    * column; the model picker and its event plumbing are unaffected.
    */
   showTools?: boolean;
+  /**
+   * Whether the parent ChatPage has a live PTY session attached to the
+   * terminal. Drives whether the model-switch flow shows the
+   * "reload to apply" confirm dialog: with no live chat, reloading has
+   * nothing to interrupt and the dialog is just noise. Defaults to true
+   * (dialog shown) so callers that don't pass it keep the existing
+   * behavior — the Models page in particular doesn't have a PTY context
+   * of its own and can keep its current "always show" semantics.
+   */
+  ptyActive?: boolean;
 }
 
 export function ChatSidebar({
@@ -92,6 +102,7 @@ export function ChatSidebar({
   className,
   onDashboardNewSessionRequest,
   showTools = true,
+  ptyActive = true,
 }: ChatSidebarProps) {
   // `version` bumps on reconnect; gw is derived so we never call setState
   // for it inside an effect (React 19's set-state-in-effect rule). The
@@ -500,9 +511,23 @@ export function ChatSidebar({
             // confirm_required => the dialog shows the expensive-model prompt
             // and calls back; don't announce until the user confirms.
             if (!result.confirm_required) {
-              refreshEffectiveModel();
-              // Ask before reloading: applying the model starts a fresh chat.
-              setPendingReloadModel(model.split("/").slice(-1)[0]);
+              if (ptyActive) {
+                // Defer the badge refresh + notice until the user resolves
+                // the reload dialog. Refreshing now would flip the sidebar
+                // badge to the new model BEFORE the user has been asked
+                // anything, making Cancel look like a no-op (it isn't —
+                // Cancel keeps the running PTY on its current model, Reload
+                // restarts it on the new one; the model itself is saved in
+                // both cases).
+                setPendingReloadModel(model.split("/").slice(-1)[0]);
+              } else {
+                // No live chat — nothing to interrupt with a reload. The
+                // model is already saved; the next chat will boot from it.
+                refreshEffectiveModel();
+                setModelNotice(
+                  `Model set to ${model}. The next chat will use it; refresh the page to apply it to any running chat.`,
+                );
+              }
             }
             return result;
           }}
@@ -518,6 +543,10 @@ export function ChatSidebar({
         onCancel={() => {
           const m = pendingReloadModel;
           setPendingReloadModel(null);
+          // Cancel keeps the running PTY on its current model. The model
+          // IS saved, so sync the badge to match — but only now, after
+          // the user has explicitly declined the reload.
+          refreshEffectiveModel();
           setModelNotice(
             `Model set to ${m}. Run /new or refresh the page to apply it to this chat.`,
           );
