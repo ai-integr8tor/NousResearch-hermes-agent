@@ -2322,11 +2322,13 @@ def delegate_task(
                         "goal": _t["goal"],
                         "mode": "background",
                         "note": (
-                            "Subagent is running in the background. You and the "
-                            "user can keep working; the full task source and "
-                            "result will re-enter the conversation as a new "
-                            "message when it finishes. Do not wait or poll — "
-                            "just continue."
+                            "Short async subtask dispatched. You and the user "
+                            "can keep working; the task source and result will "
+                            "re-enter the conversation as a new message when it "
+                            "finishes. This is not durable and has no model-facing "
+                            "status/log/collect surface; use terminal background, "
+                            "cron, or a spawned Hermes process for longer work. "
+                            "Do not poll after dispatch — continue useful work."
                         ),
                     },
                     ensure_ascii=False,
@@ -2855,13 +2857,13 @@ def _build_top_level_description() -> str:
         "- Mechanical multi-step work with no reasoning needed -> use execute_code\n"
         "- Single tool call -> just call the tool directly\n"
         "- Tasks needing user interaction -> subagents cannot use clarify\n"
-        "- Durable long-running work that must outlive the current turn -> "
-        "use cronjob (action='create') or terminal(background=True, "
-        "notify_on_complete=True) instead. delegate_task runs SYNCHRONOUSLY "
-        "inside the parent turn: if the parent is interrupted (user sends a "
-        "new message, /stop, /new) the child is cancelled with status="
-        "'interrupted' and its work is discarded. Children cannot continue "
-        "in the background.\n\n"
+        "- Durable or long-running jobs that need live status/logs, cancellation, "
+        "collection, or must survive process/session shutdown -> use cronjob "
+        "(action='create'), terminal(background=True, notify_on_complete=True), "
+        "or a spawned Hermes process instead. Synchronous delegate_task blocks "
+        "the parent turn and is interrupted when the parent is interrupted; "
+        "background=true only detaches a single short async subtask enough to "
+        "return a later completion event, not a durable job manager.\n\n"
         "IMPORTANT:\n"
         "- Subagents have NO memory of your conversation. Pass all relevant "
         "info (file paths, error messages, constraints) via the 'context' field.\n"
@@ -3059,19 +3061,21 @@ DELEGATE_TASK_SCHEMA = {
             "background": {
                 "type": "boolean",
                 "description": (
-                    "Run the subagent asynchronously in the BACKGROUND "
-                    "instead of blocking this turn. When true, delegate_task "
-                    "returns immediately with a delegation_id; you and the "
-                    "user keep working while the subagent runs, and its full "
-                    "result re-enters the conversation as a new message when "
-                    "it finishes (similar to terminal background=true + "
-                    "notify_on_complete). The re-injected message includes the "
-                    "original goal/context so you can act on it even after "
-                    "moving on. Single-task only — cannot be combined with the "
-                    "'tasks' batch array. Use for long-running independent work "
-                    "the user shouldn't have to wait on (research, builds, "
-                    "multi-step investigations). Do NOT poll or wait after "
-                    "dispatching — just continue; the result will come to you."
+                    "Run one short async subtask without blocking this turn. "
+                    "When true, delegate_task returns immediately with a "
+                    "delegation_id; you and the user can keep working, and a "
+                    "completion event with the original goal/context is "
+                    "re-injected as a new message when the child finishes. "
+                    "This is not durable: there is no status/log/collect/cancel "
+                    "tool surface for the model, and it should not be used for "
+                    "repo-discovery + implementation + test/report lanes or "
+                    "anything likely to take more than a few minutes. For "
+                    "longer-running independent work, use "
+                    "terminal(background=True, notify_on_complete=True), cronjob, "
+                    "or a spawned Hermes process instead. Single-task only — "
+                    "cannot be combined with the 'tasks' batch array. Do not "
+                    "poll or wait after dispatching; either continue useful work "
+                    "or choose a durable primitive before dispatch."
                 ),
             },
             "acp_command": {

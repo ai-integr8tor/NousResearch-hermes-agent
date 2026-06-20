@@ -124,6 +124,24 @@ class TestDelegateRequirements(unittest.TestCase):
         self.assertIn(f"up to {_get_max_concurrent_children()}", fn["description"])
         self.assertIn(f"max_spawn_depth={_get_max_spawn_depth()}", fn["description"])
 
+    def test_background_schema_describes_short_non_durable_async_work(self):
+        """The model-facing contract must not steer long/durable work into
+        background delegation when there is no status/log/collect surface.
+        """
+        from tools.registry import registry
+
+        defs = registry.get_definitions({"delegate_task"})
+        self.assertEqual(len(defs), 1)
+        fn = defs[0]["function"]
+        background_desc = fn["parameters"]["properties"]["background"]["description"]
+        full_contract = f"{fn['description']}\n{background_desc}"
+
+        self.assertNotIn("long-running independent work", full_contract)
+        self.assertNotIn("durable long-running work", full_contract)
+        self.assertIn("short async", background_desc.lower())
+        self.assertIn("not durable", full_contract.lower())
+        self.assertIn("terminal(background=True, notify_on_complete=True)", full_contract)
+
 
 class TestChildSystemPrompt(unittest.TestCase):
     def test_goal_only(self):
@@ -215,6 +233,28 @@ class TestDelegateTask(unittest.TestCase):
         self.assertEqual(result["results"][0]["summary"], "Result A")
         self.assertEqual(result["results"][1]["summary"], "Result B")
         self.assertIn("total_duration_seconds", result)
+
+    def test_background_dispatch_note_describes_short_non_durable_async_work(self):
+        parent = _make_mock_parent()
+        with patch("run_agent.AIAgent") as MockAgent, patch(
+            "tools.async_delegation.dispatch_async_delegation"
+        ) as mock_dispatch:
+            MockAgent.return_value = MagicMock()
+            mock_dispatch.return_value = {
+                "status": "dispatched",
+                "delegation_id": "deleg_test",
+            }
+
+            result = json.loads(
+                delegate_task(goal="Quick check", parent_agent=parent, background=True)
+            )
+
+        self.assertEqual(result["status"], "dispatched")
+        note = result["note"]
+        self.assertIn("short async", note.lower())
+        self.assertIn("not durable", note.lower())
+        self.assertNotIn("long-running independent work", note)
+        self.assertNotIn("Do not wait or poll", note)
 
     @patch("tools.delegate_tool._run_single_child")
     def test_batch_mode_accepts_json_string_tasks(self, mock_run):
