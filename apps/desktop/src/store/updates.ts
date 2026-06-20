@@ -328,6 +328,8 @@ export async function applyUpdates(opts: DesktopUpdateApplyOptions = {}): Promis
         message: result.command ?? 'hermes update',
         command: result.command ?? 'hermes update'
       })
+    } else if (result?.ok) {
+      $updateApply.set({ ...IDLE, applying: false, stage: 'done', message: 'Update complete' })
     }
 
     return result
@@ -443,7 +445,7 @@ export async function applyBackendUpdate(): Promise<DesktopUpdateApplyResult> {
 function ingestProgress(payload: DesktopUpdateProgress): void {
   const current = $updateApply.get()
   const log = [...current.log, { stage: payload.stage, message: payload.message, at: payload.at }].slice(-50)
-  const terminal = payload.stage === 'error' || payload.stage === 'restart' || payload.stage === 'manual'
+  const terminal = payload.stage === 'error' || payload.stage === 'restart' || payload.stage === 'manual' || payload.stage === 'done'
 
   $updateApply.set({
     applying: !terminal,
