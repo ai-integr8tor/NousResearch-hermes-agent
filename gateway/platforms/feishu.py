@@ -2892,7 +2892,13 @@ class FeishuAdapter(BasePlatformAdapter):
             message_type=MessageType.COMMAND,
             source=source,
             raw_message=data,
-            message_id=token or str(uuid.uuid4()),
+            # The callback token is a short-lived delivery token, not a message
+            # id: using it as ``message_id`` makes the reply anchor reply_to an
+            # id Feishu rejects (error 99992354), so the command's response
+            # never reaches the chat. ``None`` sends the response as a regular
+            # message instead; dedup is handled separately by
+            # ``_is_card_action_duplicate`` above.
+            message_id=None,
             timestamp=datetime.now(),
         )
         logger.info("[Feishu] Routing card action %r from %s in %s as synthetic command", action_tag, open_id, chat_id)

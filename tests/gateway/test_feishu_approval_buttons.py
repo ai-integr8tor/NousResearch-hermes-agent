@@ -437,6 +437,32 @@ class TestNonApprovalCardAction:
         event = mock_handle.call_args[0][0]
         assert "/card button" in event.text
 
+    @pytest.mark.asyncio
+    async def test_synthetic_command_carries_no_message_id(self):
+        """The callback token is not a message id: if the synthetic event
+        carries it, the response's reply anchor reply_to's an id Feishu
+        rejects (error 99992354) and the response is never delivered."""
+        adapter = _make_adapter()
+
+        data = _make_card_action_data(
+            action_value={"custom_action": "something_else"},
+            token="tok_not_a_message_id",
+        )
+
+        with (
+            patch.object(
+                adapter, "_resolve_sender_profile", new_callable=AsyncMock,
+                return_value={"user_id": "ou_u", "user_name": "Dave", "user_id_alt": None},
+            ),
+            patch.object(adapter, "get_chat_info", new_callable=AsyncMock, return_value={"name": "Test Chat"}),
+            patch.object(adapter, "_handle_message_with_guards", new_callable=AsyncMock) as mock_handle,
+        ):
+            await adapter._handle_card_action_event(data)
+
+        mock_handle.assert_called_once()
+        event = mock_handle.call_args[0][0]
+        assert event.message_id is None
+
 
 # ===========================================================================
 # _on_card_action_trigger — inline card response for approval actions
