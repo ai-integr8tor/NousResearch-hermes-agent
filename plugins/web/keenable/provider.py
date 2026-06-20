@@ -15,12 +15,17 @@ Config keys this provider responds to::
 
 Env vars::
 
-    KEENABLE_API_KEY=...             # https://keenable.ai/signup (required — BYOK)
+    KEENABLE_API_KEY=...             # https://keenable.ai/signup (optional)
     KEENABLE_API_URL=...             # optional override of https://api.keenable.ai
 
-A free tier exists, but this provider is intentionally BYOK: it advertises
-itself as available only when ``KEENABLE_API_KEY`` is set, matching the
-"require explicit configuration" posture (NousResearch/hermes-agent#46350).
+Keyless: Keenable's free tier works without a key. When ``KEENABLE_API_KEY``
+is unset the provider calls the ``/public`` endpoint variants (rate-limited)
+and omits the ``X-API-Key`` header — mirroring Keenable's own MCP client.
+
+It stays **opt-in**, not a silent default: ``is_available()`` is key-gated, so
+keenable is never auto-selected in the no-credential fallback (it would only
+take over the no-config default otherwise — the posture #46350 reverted). It
+works keyless only when explicitly chosen via ``web.backend``/``*_backend``.
 """
 
 from __future__ import annotations
@@ -41,19 +46,21 @@ def _keenable_base_url() -> str:
     return os.getenv("KEENABLE_API_URL", "https://api.keenable.ai").rstrip("/")
 
 
-def _keenable_headers() -> Dict[str, str]:
-    """Build request headers. Raises ``ValueError`` when the key is unset."""
-    api_key = os.getenv("KEENABLE_API_KEY", "").strip()
-    if not api_key:
-        raise ValueError(
-            "KEENABLE_API_KEY environment variable not set. "
-            "Get your API key at https://keenable.ai/signup"
-        )
-    return {
-        "X-API-Key": api_key,
-        "X-Keenable-Title": _CLIENT_TITLE,
-        "Content-Type": "application/json",
-    }
+def _api_key() -> str:
+    return os.getenv("KEENABLE_API_KEY", "").strip()
+
+
+def _keenable_headers(api_key: str) -> Dict[str, str]:
+    """Request headers; ``X-API-Key`` only when a key is present (keyless otherwise)."""
+    headers = {"X-Keenable-Title": _CLIENT_TITLE, "Content-Type": "application/json"}
+    if api_key:
+        headers["X-API-Key"] = api_key
+    return headers
+
+
+def _endpoint(base_url: str, path: str, api_key: str) -> str:
+    """Keyless calls hit the ``/public`` variant (no auth, rate-limited)."""
+    return f"{base_url}{path}" if api_key else f"{base_url}{path}/public"
 
 
 def _normalize_search_results(response: Dict[str, Any]) -> Dict[str, Any]:
@@ -96,7 +103,11 @@ class KeenableWebSearchProvider(WebSearchProvider):
         return True
 
     def search(self, query: str, limit: int = 5) -> Dict[str, Any]:
-        """Execute a Keenable search (``GET /v1/search?query=&count=``)."""
+        """Execute a Keenable search (``GET /v1/search?query=``).
+
+        The API takes no result-count param (query/mode/site/date filters
+        only), so ``limit`` is applied client-side to the ranked results.
+        """
         try:
             from tools.interrupt import is_interrupted
 
@@ -105,17 +116,18 @@ class KeenableWebSearchProvider(WebSearchProvider):
 
             import httpx
 
+            api_key = _api_key()
             logger.info("Keenable search: '%s' (limit=%d)", query, limit)
             response = httpx.get(
-                f"{_keenable_base_url()}/v1/search",
-                headers=_keenable_headers(),
-                params={"query": query, "count": limit},
+                _endpoint(_keenable_base_url(), "/v1/search", api_key),
+                headers=_keenable_headers(api_key),
+                params={"query": query},
                 timeout=60,
             )
             response.raise_for_status()
-            return _normalize_search_results(response.json())
-        except ValueError as exc:
-            return {"success": False, "error": str(exc)}
+            normalized = _normalize_search_results(response.json())
+            normalized["data"]["web"] = normalized["data"]["web"][:limit]
+            return normalized
         except Exception as exc:  # noqa: BLE001 — including httpx errors
             logger.warning("Keenable search error: %s", exc)
             return {"success": False, "error": f"Keenable search failed: {exc}"}
@@ -134,12 +146,10 @@ class KeenableWebSearchProvider(WebSearchProvider):
         import httpx
 
         base_url = _keenable_base_url()
+        api_key = _api_key()
+        headers = _keenable_headers(api_key)
+        fetch_url = _endpoint(base_url, "/v1/fetch", api_key)
         documents: List[Dict[str, Any]] = []
-
-        try:
-            headers = _keenable_headers()
-        except ValueError as exc:
-            return [{"url": u, "title": "", "content": "", "error": str(exc)} for u in urls]
 
         # /v1/fetch takes a single ``url`` query param (no batch, no max_chars).
         for url in urls:
@@ -149,7 +159,7 @@ class KeenableWebSearchProvider(WebSearchProvider):
             try:
                 logger.info("Keenable fetch: %s", url)
                 response = httpx.get(
-                    f"{base_url}/v1/fetch",
+                    fetch_url,
                     headers=headers,
                     params={"url": url},
                     timeout=60,
@@ -187,12 +197,12 @@ class KeenableWebSearchProvider(WebSearchProvider):
     def get_setup_schema(self) -> Dict[str, Any]:
         return {
             "name": "Keenable",
-            "badge": "paid",
-            "tag": "Low-latency search + page fetch for agents.",
+            "badge": "free",
+            "tag": "Search + page fetch; free tier works keyless, key raises limits.",
             "env_vars": [
                 {
                     "key": "KEENABLE_API_KEY",
-                    "prompt": "Keenable API key",
+                    "prompt": "Keenable API key (optional — blank uses the keyless free tier)",
                     "url": "https://keenable.ai/signup",
                 },
             ],

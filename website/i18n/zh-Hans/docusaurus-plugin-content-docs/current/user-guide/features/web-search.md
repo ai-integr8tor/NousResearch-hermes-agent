@@ -271,7 +271,7 @@ EXA_API_KEY=your-exa-key-here
 KEENABLE_API_KEY=your-keenable-key-here
 ```
 
-在 [keenable.ai/signup](https://keenable.ai/signup) 获取密钥。免费层级无需密钥即可使用（有速率限制）；该后端要求设置 `KEENABLE_API_KEY`。
+免费层级**无需密钥**即可使用——选择 keenable 作为后端后，它会调用 Keenable 的 `/public` 端点（有速率限制）。在 [keenable.ai/signup](https://keenable.ai/signup) 获取 `KEENABLE_API_KEY` 可提高限额。keenable 仅在显式选择时启用，绝不会作为无配置时的默认后端。
 
 ---
 

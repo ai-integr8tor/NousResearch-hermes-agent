@@ -271,7 +271,7 @@ Low-latency web search and page-to-markdown fetch built for agents. Search and e
 KEENABLE_API_KEY=your-keenable-key-here
 ```
 
-Get a key at [keenable.ai/signup](https://keenable.ai/signup). A free tier works without a key (rate-limited); the provider requires `KEENABLE_API_KEY` to be set.
+The free tier works **keyless** — select keenable as your backend and it calls Keenable's `/public` endpoints (rate-limited). Set `KEENABLE_API_KEY` (get one at [keenable.ai/signup](https://keenable.ai/signup)) to raise limits. Keenable is opt-in only: it is never auto-selected as a no-config default.
 
 ---
 

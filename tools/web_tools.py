@@ -226,7 +226,10 @@ def _is_backend_available(backend: str) -> bool:
     if backend == "tavily":
         return _has_env("TAVILY_API_KEY")
     if backend == "keenable":
-        return _has_env("KEENABLE_API_KEY")
+        # Serviceable even without a key (keyless /public free tier). Gated to
+        # explicit selection — keenable is omitted from the no-config
+        # auto-detect set below so it never becomes a silent default (#46350).
+        return True
     if backend == "searxng":
         return _has_env("SEARXNG_URL")
     if backend == "brave-free":
@@ -1191,9 +1194,11 @@ def check_web_api_key() -> bool:
     configured = _load_web_config().get("backend", "").lower().strip()
     if configured in {"exa", "parallel", "firecrawl", "tavily", "keenable", "searxng", "brave-free", "ddgs", "xai"}:
         return _is_backend_available(configured)
+    # keenable is omitted here on purpose: it's serviceable keyless, but must
+    # not flip the no-config auto-detect to "available" (it's opt-in only).
     return any(
         _is_backend_available(backend)
-        for backend in ("exa", "parallel", "firecrawl", "tavily", "keenable", "searxng", "brave-free", "ddgs", "xai")
+        for backend in ("exa", "parallel", "firecrawl", "tavily", "searxng", "brave-free", "ddgs", "xai")
     )
 
 
