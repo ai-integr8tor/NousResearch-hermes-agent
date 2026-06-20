@@ -1,4 +1,4 @@
-import type { Unstable_TriggerAdapter, Unstable_TriggerItem } from '@assistant-ui/core'
+﻿import type { Unstable_TriggerAdapter, Unstable_TriggerItem } from '@assistant-ui/core'
 import { ComposerPrimitive, useAui, useAuiState } from '@assistant-ui/react'
 import { useStore } from '@nanostores/react'
 import {
@@ -114,8 +114,8 @@ const COMPOSER_FADE_BACKGROUND =
 const pickPlaceholder = (pool: readonly string[]) => pool[Math.floor(Math.random() * pool.length)]
 
 /** Completion items can carry an `action` (set in use-slash-completions) that
- *  runs a side effect on pick instead of inserting a chip — e.g. the session
- *  picker's "Browse all…" entry opens the overlay. Table-driven so new action
+ *  runs a side effect on pick instead of inserting a chip â€” e.g. the session
+ *  picker's "Browse allâ€¦" entry opens the overlay. Table-driven so new action
  *  items are a registry row, not a composer branch. */
 const COMPLETION_ACTIONS: Record<string, () => void> = {
   'session-picker': () => setSessionPickerOpen(true)
@@ -140,7 +140,7 @@ function slashChipKindForItem(item: Unstable_TriggerItem): SlashChipKind {
 /** A `/` query is at its arg stage once it's past the command name. */
 const slashArgStage = (query: string) => query.includes(' ')
 
-/** The `/command` token of a slash query (`personality x` → `/personality`). */
+/** The `/command` token of a slash query (`personality x` â†’ `/personality`). */
 const slashCommandToken = (query: string) => `/${query.split(/\s+/, 1)[0]?.toLowerCase() ?? ''}`
 
 interface QueueEditState {
@@ -193,7 +193,7 @@ export function ChatBar({
   )
 
   // Status items (subagents, background processes) are keyed by the RUNTIME
-  // session id — gateway events and process.list both speak that id. Only the
+  // session id â€” gateway events and process.list both speak that id. Only the
   // queue uses the stored-session fallback key (prompts can queue pre-resume).
   const statusSessionId = sessionId ?? null
 
@@ -261,7 +261,7 @@ export function ChatBar({
   // Resting placeholder: a starter for brand-new sessions, a continuation for
   // existing ones. Picked once and only re-rolled when we genuinely move to a
   // *different* conversation. Critically, the first id assignment of a freshly
-  // started session (null → id, on the first send) is treated as the same
+  // started session (null â†’ id, on the first send) is treated as the same
   // conversation so the placeholder doesn't visibly flip mid-stream.
   const [restingPlaceholder, setRestingPlaceholder] = useState(() =>
     pickPlaceholder(sessionId ? followUpPlaceholders : newSessionPlaceholders)
@@ -277,7 +277,7 @@ export function ChatBar({
       return
     }
 
-    // null → id: the new session we're already in just got persisted. Keep the
+    // null â†’ id: the new session we're already in just got persisted. Keep the
     // starter we showed instead of swapping to a follow-up under the user.
     if (prev == null && sessionId) {
       return
@@ -365,9 +365,9 @@ export function ChatBar({
 
   // Keep draftRef in sync with the assistant-ui composer state for callers
   // that read the latest text outside the React render cycle. We don't push
-  // to `$composerDraft` per keystroke any more — nobody outside the composer
+  // to `$composerDraft` per keystroke any more â€” nobody outside the composer
   // subscribes to it (verified by grep), and the round-trip
-  // `setText` ⇄ `subscribe` ⇄ `setText` was adding two useEffects to the per-
+  // `setText` â‡„ `subscribe` â‡„ `setText` was adding two useEffects to the per-
   // keystroke critical path. `reconcileComposerTerminalSelections` only
   // matters when the draft is submitted; we now call it from the submit
   // path instead.
@@ -389,7 +389,7 @@ export function ChatBar({
 
   // Expansion (input on its own full-width row, controls below) is driven by
   // the editor's *actual* rendered height via the ResizeObserver in
-  // syncComposerMetrics — it only fires when the text genuinely wraps to a
+  // syncComposerMetrics â€” it only fires when the text genuinely wraps to a
   // second line, so the layout flips exactly at the wrap point rather than at
   // a guessed character count. We only handle the two cases the observer
   // can't: an explicit newline (expand before layout settles) and an emptied
@@ -412,10 +412,10 @@ export function ChatBar({
 
   // Bucket measured heights so we only invalidate the global CSS var when
   // the size crosses a meaningful threshold. Without bucketing, the editor
-  // grows ~1px per character → setProperty fires every keystroke → entire
-  // tree's computed style is invalidated → next paint forces a full
+  // grows ~1px per character â†’ setProperty fires every keystroke â†’ entire
+  // tree's computed style is invalidated â†’ next paint forces a full
   // recalculate-style pass. With an 8px bucket, the invalidation rate drops
-  // ~8× and small char-by-char typing produces no style invalidation at all
+  // ~8Ã— and small char-by-char typing produces no style invalidation at all
   // until a wrap or row change actually happens.
   const lastBucketedHeightRef = useRef(0)
   const lastBucketedSurfaceHeightRef = useRef(0)
@@ -443,9 +443,9 @@ export function ChatBar({
 
     // Expand once the input has actually wrapped past a single line. The
     // observer only fires on real size changes, so this reads scrollHeight at
-    // most once per wrap (not per keystroke). One line ≈ 28px (1.625rem
+    // most once per wrap (not per keystroke). One line â‰ˆ 28px (1.625rem
     // min-height + padding); a second line clears ~36px. We only ever expand
-    // here — collapse is handled by the emptied-draft effect to avoid
+    // here â€” collapse is handled by the emptied-draft effect to avoid
     // oscillating across the wrap boundary as the input switches widths.
     const editor = editorRef.current
 
@@ -491,10 +491,10 @@ export function ChatBar({
     aui.composer().setText(nextDraft)
 
     // Push the new text into the contentEditable editor directly. Setting the
-    // assistant-ui composer state alone is not enough: the draft→editor sync
+    // assistant-ui composer state alone is not enough: the draftâ†’editor sync
     // effect only re-renders the editor when it is NOT focused
     // (document.activeElement !== editor), and the dictation/insert paths
-    // typically run while the editor has (or immediately regains) focus — so
+    // typically run while the editor has (or immediately regains) focus â€” so
     // the store would hold the text but the visible editor would stay empty
     // and there'd be nothing to send. Mirror appendExternalText here.
     const editor = editorRef.current
@@ -579,7 +579,7 @@ export function ChatBar({
     const found = detectTrigger(before ?? composerPlainText(editor))
 
     // The arg-stage popover is only useful for commands with an options screen.
-    // For a no-arg command it would dead-end on "No matches", so drop it — the
+    // For a no-arg command it would dead-end on "No matches", so drop it â€” the
     // directive is already complete.
     const detected =
       found?.kind === '/' && slashArgStage(found.query) && !desktopSlashCommandTakesArgs(slashCommandToken(found.query))
@@ -589,8 +589,8 @@ export function ChatBar({
     setTrigger(detected)
 
     // Only reset the highlight when the trigger actually changed (opened, or
-    // the query/kind differs). Re-detecting the *same* trigger — e.g. on a
-    // caret move (mouseup) or a stray refresh — must preserve the user's
+    // the query/kind differs). Re-detecting the *same* trigger â€” e.g. on a
+    // caret move (mouseup) or a stray refresh â€” must preserve the user's
     // current selection instead of snapping back to the first item.
     if (detected?.kind !== trigger?.kind || detected?.query !== trigger?.query) {
       setTriggerActive(0)
@@ -598,7 +598,7 @@ export function ChatBar({
   }, [trigger])
 
   // Pull the live contentEditable text into draftRef + the AUI composer state
-  // (which drives `hasComposerPayload` → the send button). Shared by the input
+  // (which drives `hasComposerPayload` â†’ the send button). Shared by the input
   // and compositionend paths so committed IME text reaches state through either.
   const flushEditorToDraft = (editor: HTMLDivElement) => {
     normalizeComposerEditorDom(editor)
@@ -615,7 +615,7 @@ export function ChatBar({
 
   const handleEditorInput = (event: FormEvent<HTMLDivElement>) => {
     // During IME composition the DOM contains uncommitted preedit text
-    // mixed with real content.  Skip state writes — compositionend flushes
+    // mixed with real content.  Skip state writes â€” compositionend flushes
     // the finalized text (see onCompositionEnd).
     if (composingRef.current) {
       return
@@ -644,7 +644,7 @@ export function ChatBar({
     // Trim surrounding whitespace so a copy that dragged along leading/trailing
     // blank lines (common when selecting from terminals, code blocks, web pages)
     // doesn't dump multiline padding into the composer. Internal newlines are
-    // preserved — only the edges are cleaned up.
+    // preserved â€” only the edges are cleaned up.
     const pastedText = event.clipboardData.getData('text').trim()
 
     if (!pastedText) {
@@ -681,7 +681,7 @@ export function ChatBar({
 
   // Suppress the "No matches" empty state once a slash command is past its name:
   // a no-arg command has nothing to offer, and a fully-typed arg commits on
-  // Space/Tab — neither should dead-end on a popover.
+  // Space/Tab â€” neither should dead-end on a popover.
   const argStageEmpty =
     trigger?.kind === '/' && slashArgStage(trigger.query) && !triggerLoading && !triggerItems.length
 
@@ -695,7 +695,7 @@ export function ChatBar({
     setTriggerActive(idx => Math.min(idx, Math.max(0, triggerItems.length - 1)))
   }, [triggerItems.length])
 
-  // Commit the literally-typed `/command arg` as a directive chip — used when
+  // Commit the literally-typed `/command arg` as a directive chip â€” used when
   // the completion list is empty because the arg is already fully typed (the
   // backend completer drops exact matches). Reuses the chip path via a
   // synthetic item whose serialized form is the verbatim text.
@@ -721,7 +721,7 @@ export function ChatBar({
       return
     }
 
-    // Action items (e.g. "Browse all sessions…") run a side effect instead of
+    // Action items (e.g. "Browse all sessionsâ€¦") run a side effect instead of
     // inserting a chip: strip the typed trigger token, then fire the action.
     const completionAction = (item.metadata as { action?: unknown } | undefined)?.action
     const runAction = typeof completionAction === 'string' ? COMPLETION_ACTIONS[completionAction] : undefined
@@ -745,7 +745,7 @@ export function ChatBar({
     const starter = serialized.endsWith(':')
 
     // Picking a bare arg-taking command (e.g. `/personality`) shouldn't commit
-    // it — expand to its options step so the popover shows the inline list, just
+    // it â€” expand to its options step so the popover shows the inline list, just
     // as typing `/personality ` by hand would. A serialized value with a space is
     // already an arg pick (`/personality alice`), so it commits normally.
     const command = (item.metadata as { command?: string } | undefined)?.command ?? ''
@@ -754,7 +754,7 @@ export function ChatBar({
 
     const text = starter || serialized.endsWith(' ') ? serialized : `${serialized} `
     const directive = !starter && serialized.match(/^@([^:]+):(.+)$/)
-    // No pill while expanding — the bare command stays plain text until an arg
+    // No pill while expanding â€” the bare command stays plain text until an arg
     // is picked, at which point a single pill is emitted for the full command.
     const slashKind = !expandsToArgs && trigger.kind === '/' ? slashChipKindForItem(item) : null
     const keepTriggerOpen = starter || expandsToArgs
@@ -828,12 +828,12 @@ export function ChatBar({
     // across browsers) and nativeEvent.isComposing (Chromium fallback).  Without
     // this guard, pressing Enter to finalise a Korean/Japanese/Chinese IME
     // preedit fires submitDraft() and splits the message mid-word.
-    if (composingRef.current || event.nativeEvent.isComposing) {
+    if (composingRef.current || event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) {
       return
     }
 
-    // Non-collapsed Backspace/Delete: native selection-delete is ~O(n²) on large
-    // drafts (Ctrl+A → Delete froze ~1.3s). Collapsed carets fall through.
+    // Non-collapsed Backspace/Delete: native selection-delete is ~O(nÂ²) on large
+    // drafts (Ctrl+A â†’ Delete froze ~1.3s). Collapsed carets fall through.
     if (
       (event.key === 'Backspace' || event.key === 'Delete') &&
       deleteSelectionInEditor(event.currentTarget)
@@ -902,7 +902,7 @@ export function ChatBar({
       }
     }
 
-    // Arg stage with nothing left to suggest — a fully-typed arg the backend
+    // Arg stage with nothing left to suggest â€” a fully-typed arg the backend
     // completer no longer echoes (it drops the exact match), e.g.
     // `/personality creative`. Space/Tab still commit what's typed as a single
     // directive chip; Enter falls through to submit (send it as-is).
@@ -922,11 +922,11 @@ export function ChatBar({
 
     // ArrowUp/ArrowDown navigate, in priority order: the queue (edit entries in
     // place) then sent-message history. The history ring is derived from live
-    // session messages each press — single source of truth, no mirror.
+    // session messages each press â€” single source of truth, no mirror.
     if (event.key === 'ArrowUp') {
       const currentDraft = draftRef.current
 
-      // Editing a queued turn → walk to the older entry.
+      // Editing a queued turn â†’ walk to the older entry.
       if (queueEdit && stepQueuedEdit(-1)) {
         event.preventDefault()
         triggerKeyConsumedRef.current = true
@@ -934,7 +934,7 @@ export function ChatBar({
         return
       }
 
-      // Empty composer + a queued turn → open the newest queued entry for edit
+      // Empty composer + a queued turn â†’ open the newest queued entry for edit
       // (the row's pencil), not a text recall. Enter saves it back to the queue.
       if (!currentDraft.trim() && !queueEdit && queuedPrompts.length > 0) {
         event.preventDefault()
@@ -944,7 +944,7 @@ export function ChatBar({
         return
       }
 
-      // Don't hijack a typed draft unless already browsing — they'd lose it.
+      // Don't hijack a typed draft unless already browsing â€” they'd lose it.
       if (currentDraft.trim() && !isBrowsingHistory(sessionId)) {
         return
       }
@@ -965,7 +965,7 @@ export function ChatBar({
     }
 
     if (event.key === 'ArrowDown') {
-      // Editing a queued turn → walk to the newer entry (past the newest exits).
+      // Editing a queued turn â†’ walk to the newer entry (past the newest exits).
       if (queueEdit) {
         event.preventDefault()
         triggerKeyConsumedRef.current = true
@@ -974,7 +974,7 @@ export function ChatBar({
         return
       }
 
-      // Browsing sent history → step toward the present, restoring the draft.
+      // Browsing sent history â†’ step toward the present, restoring the draft.
       if (isBrowsingHistory(sessionId)) {
         event.preventDefault()
         triggerKeyConsumedRef.current = true
@@ -990,7 +990,7 @@ export function ChatBar({
       return
     }
 
-    // Cmd/Ctrl+Enter is reserved for steering the live run — never a send.
+    // Cmd/Ctrl+Enter is reserved for steering the live run â€” never a send.
     // Steer when there's a steerable draft, otherwise swallow it so it can't
     // surprise-send. (Plain Enter still queues while busy / sends when idle.)
     if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !event.shiftKey) {
@@ -1025,7 +1025,7 @@ export function ChatBar({
         return
       }
 
-      // Empty Enter while busy is a no-op — interrupting is explicit (Stop/Esc),
+      // Empty Enter while busy is a no-op â€” interrupting is explicit (Stop/Esc),
       // never a stray Enter after sending. With a payload, submitDraft queues it.
       // Gate on the live DOM payload (not the render-lagged composer state) so a
       // message typed fast / via IME while busy still reaches submitDraft() and
@@ -1040,7 +1040,7 @@ export function ChatBar({
     }
 
     if (event.key === 'Escape') {
-      // Editing a queued turn → Esc cancels the edit, restoring the prior draft.
+      // Editing a queued turn â†’ Esc cancels the edit, restoring the prior draft.
       if (queueEdit) {
         event.preventDefault()
         exitQueuedEdit('cancel')
@@ -1060,7 +1060,7 @@ export function ChatBar({
   const handleEditorKeyUp = () => {
     // If this keyup belongs to a key the open trigger popover already consumed
     // in keydown (Arrow/Enter/Tab/Escape), skip the refresh. Those keys never
-    // edit text, and for Escape the keydown already closed the menu — a refresh
+    // edit text, and for Escape the keydown already closed the menu â€” a refresh
     // here would re-detect the still-present `/` and instantly reopen it. We
     // read a ref set during keydown rather than `trigger`, because by keyup
     // time React has re-rendered and `trigger` may already be null.
@@ -1173,7 +1173,7 @@ export function ChatBar({
     event.stopPropagation()
     resetDragState()
 
-    // Dropping straight onto the text box used to inline-ref *every* file —
+    // Dropping straight onto the text box used to inline-ref *every* file â€”
     // including OS/Finder drops, whose absolute local path a remote gateway
     // can't read and whose image bytes never reached vision. Split by origin:
     // in-app drags stay inline refs; OS drops go through the upload pipeline.
@@ -1221,7 +1221,7 @@ export function ChatBar({
   const stashAt = (scope: string | null, text = draftRef.current, attachments = $composerAttachments.get()) =>
     stashSessionDraft(scope, text, attachments)
 
-  // Per-thread draft swap — the composer's only session coupling. Lifecycle
+  // Per-thread draft swap â€” the composer's only session coupling. Lifecycle
   // never clears composer state; this effect alone stashes on leave, restores
   // on enter. Keyed writes are idempotent, so no skip-sentinel.
   useEffect(() => {
@@ -1240,7 +1240,7 @@ export function ChatBar({
   }, [activeQueueSessionKey]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Debounced stash into the active scope. Skipped while browsing history or
-  // editing a queued prompt — recalled text must not clobber the real draft.
+  // editing a queued prompt â€” recalled text must not clobber the real draft.
   useEffect(() => {
     if (isBrowsingHistory(sessionId) || queueEdit) {
       return
@@ -1374,7 +1374,7 @@ export function ChatBar({
 
   // Steer the live turn (nudge without interrupting). Clears the draft up front
   // for snappy feedback; if the gateway rejects (no live tool window) the words
-  // are re-queued so nothing is lost — same safety net as a plain queue.
+  // are re-queued so nothing is lost â€” same safety net as a plain queue.
   const steerDraft = useCallback(() => {
     if (!onSteer || !canSteer) {
       return
@@ -1449,7 +1449,7 @@ export function ChatBar({
       if (busy) {
         // Promote to the head, then interrupt. The gateway always emits a
         // settle (message.complete + session.info running:false) when the
-        // turn unwinds, and the busy→false auto-drain below sends this entry.
+        // turn unwinds, and the busyâ†’false auto-drain below sends this entry.
         promoteQueuedPrompt(activeQueueSessionKey, id)
         triggerHaptic('selection')
         void Promise.resolve(onCancel())
@@ -1506,7 +1506,7 @@ export function ChatBar({
 
   // Re-key on a runtime session-id change. A stable stored id (queueSessionKey)
   // never churns, so a change there is a real session switch and must NOT
-  // migrate; only the runtime-derived key (queueSessionKey falsy → key is
+  // migrate; only the runtime-derived key (queueSessionKey falsy â†’ key is
   // sessionId) churns on a backend bounce/resume of the same conversation.
   useEffect(() => {
     const prev = prevQueueKeyRef.current
@@ -1519,8 +1519,8 @@ export function ChatBar({
     migrateQueuedPrompts(prev, activeQueueSessionKey)
   }, [activeQueueSessionKey, queueSessionKey])
 
-  // Queued turns flow whenever the session is idle — on the busy→false settle
-  // edge, on mount/reconnect, and after a re-key — so a swallowed edge can't
+  // Queued turns flow whenever the session is idle â€” on the busyâ†’false settle
+  // edge, on mount/reconnect, and after a re-key â€” so a swallowed edge can't
   // strand them. To cancel queued turns, the user deletes them from the panel.
   useEffect(() => {
     if (shouldAutoDrain({ isBusy: busy, queueLength: queuedPrompts.length })) {
@@ -1568,7 +1568,7 @@ export function ChatBar({
     // Source the text from the DOM editor, not React state. The AUI composer
     // state (`draft`) and the derived `hasComposerPayload` lag the DOM by a
     // render, so on fast typing or IME composition the final keystroke(s) may
-    // not have synced yet — reading state here drops the message (Enter looks
+    // not have synced yet â€” reading state here drops the message (Enter looks
     // like it does nothing; typing a trailing space only "fixes" it because the
     // extra input event forces a state sync). draftRef is updated on every
     // input event; refresh it from the editor once more to also cover an
@@ -1591,7 +1591,7 @@ export function ChatBar({
       exitQueuedEdit('save')
     } else if (busy) {
       // Slash commands should execute immediately even while the agent is
-      // busy — they're client-side operations (/yolo, /skin, /new, /help,
+      // busy â€” they're client-side operations (/yolo, /skin, /new, /help,
       // etc.) or self-contained gateway RPCs (/status, /compress).  onSubmit
       // routes them to executeSlashCommand, which has its own per-command
       // busy guard for commands that genuinely need an idle session (skill
@@ -1605,7 +1605,7 @@ export function ChatBar({
         queueCurrentDraft()
       } else {
         // Stop button (the only way to reach here while busy with an empty
-        // composer — empty Enter is short-circuited in the keydown handler).
+        // composer â€” empty Enter is short-circuited in the keydown handler).
         triggerHaptic('cancel')
         void Promise.resolve(onCancel())
       }
@@ -1767,7 +1767,7 @@ export function ChatBar({
           // carried uncommitted preedit text), and Chromium does NOT reliably
           // emit a trailing input event after compositionend on Windows IMEs.
           // Without flushing here, committed multi-character IME input (e.g.
-          // Chinese "你好", Japanese, Korean) never reaches composer state, so
+          // Chinese "ä½ å¥½", Japanese, Korean) never reaches composer state, so
           // `hasComposerPayload` stays false and the send button stays hidden
           // until an unrelated edit forces a sync (#39614).
           flushEditorToDraft(event.currentTarget)

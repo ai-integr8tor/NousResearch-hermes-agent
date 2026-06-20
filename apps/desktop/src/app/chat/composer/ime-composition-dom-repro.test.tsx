@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render } from '@testing-library/react'
 import { useRef, useState } from 'react'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 // No global setupFiles registers auto-cleanup, so unmount between tests —
 // otherwise a second render() leaks the first editor and getByTestId('editor')
@@ -104,5 +104,51 @@ describe('composer IME composition — send button visibility (#39614)', () => {
       })
       expect(hasPayload).toBe(false)
     }
+  })
+})
+
+
+
+
+describe('Korean IME keyCode 229 guard (#44278)', () => {
+  it('229 keydown does not submit; full text sends after compositionend', async () => {
+    const onSubmit = vi.fn()
+    let composing = false
+
+    function Harness() {
+      const ref = useRef(null)
+      const plain = (el: HTMLElement) => el.textContent ?? ''
+      const submitDraft = () => {
+        const t = ref.current ? plain(ref.current) : ''
+        if (t.trim()) onSubmit(t)
+      }
+      const onKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+        if (composing || e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return
+        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitDraft() }
+      }
+      return (
+        <div contentEditable data-testid="editor" suppressContentEditableWarning ref={ref}
+          onCompositionStart={() => { composing = true }}
+          onCompositionEnd={() => { composing = false }}
+          onKeyDown={onKeyDown} />
+      )
+    }
+
+    const { getByTestId } = render(<Harness />)
+    const editor = getByTestId('editor')
+
+    await act(async () => {
+      fireEvent.compositionStart(editor)
+      editor.textContent = '안녕'
+      fireEvent.input(editor)
+      fireEvent.keyDown(editor, { key: 'Enter', keyCode: 229, isComposing: true })
+    })
+    expect(onSubmit).not.toHaveBeenCalled()
+
+    await act(async () => {
+      fireEvent.compositionEnd(editor)
+      fireEvent.keyDown(editor, { key: 'Enter' })
+    })
+    expect(onSubmit).toHaveBeenCalledWith('안녕')
   })
 })
