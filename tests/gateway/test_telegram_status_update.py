@@ -20,6 +20,10 @@ from gateway.config import PlatformConfig
 from gateway.platforms.base import SendResult
 
 
+def _status_key(chat_id: str, status_key: str, thread_id=None, dm_topic_id=None):
+    return (chat_id, status_key, thread_id, dm_topic_id)
+
+
 def _install_fake_telegram(monkeypatch):
     """Stub the python-telegram-bot package so TelegramAdapter can be imported."""
     fake_telegram = types.ModuleType("telegram")
@@ -85,7 +89,7 @@ async def test_first_call_sends_and_caches_message_id(adapter):
     assert result.message_id == "100"
     adapter.send.assert_awaited_once()
     adapter.edit_message.assert_not_awaited()
-    assert adapter._status_message_ids[("chat-1", "lifecycle")] == "100"
+    assert adapter._status_message_ids[_status_key("chat-1", "lifecycle")] == "100"
 
 
 @pytest.mark.asyncio
@@ -125,7 +129,7 @@ async def test_edit_failure_falls_back_to_fresh_send(adapter):
     assert adapter.send.await_count == 2
     assert adapter.edit_message.await_count == 1
     # Cache now points at the fresh message id.
-    assert adapter._status_message_ids[("chat-1", "lifecycle")] == "200"
+    assert adapter._status_message_ids[_status_key("chat-1", "lifecycle")] == "200"
 
 
 @pytest.mark.asyncio
@@ -141,8 +145,8 @@ async def test_distinct_status_keys_do_not_collide(adapter):
 
     assert adapter.send.await_count == 2
     adapter.edit_message.assert_not_awaited()
-    assert adapter._status_message_ids[("chat-1", "lifecycle")] == "100"
-    assert adapter._status_message_ids[("chat-1", "model-switch")] == "200"
+    assert adapter._status_message_ids[_status_key("chat-1", "lifecycle")] == "100"
+    assert adapter._status_message_ids[_status_key("chat-1", "model-switch")] == "200"
 
 
 @pytest.mark.asyncio
@@ -158,5 +162,60 @@ async def test_distinct_chat_ids_do_not_collide(adapter):
 
     assert adapter.send.await_count == 2
     adapter.edit_message.assert_not_awaited()
-    assert adapter._status_message_ids[("chat-1", "lifecycle")] == "100"
-    assert adapter._status_message_ids[("chat-2", "lifecycle")] == "200"
+    assert adapter._status_message_ids[_status_key("chat-1", "lifecycle")] == "100"
+    assert adapter._status_message_ids[_status_key("chat-2", "lifecycle")] == "200"
+
+
+@pytest.mark.asyncio
+async def test_distinct_thread_ids_do_not_collide(adapter):
+    """Same chat/status_key in different Telegram topics must not reuse a status bubble."""
+    adapter.send.side_effect = [
+        SendResult(success=True, message_id="100"),
+        SendResult(success=True, message_id="200"),
+    ]
+
+    await adapter.send_or_update_status(
+        "chat-1",
+        "provider-error",
+        "rate limited",
+        metadata={"thread_id": "11"},
+    )
+    await adapter.send_or_update_status(
+        "chat-1",
+        "provider-error",
+        "rate limited",
+        metadata={"thread_id": "22"},
+    )
+
+    assert adapter.send.await_count == 2
+    adapter.edit_message.assert_not_awaited()
+    assert adapter._status_message_ids[_status_key("chat-1", "provider-error", "11")] == "100"
+    assert adapter._status_message_ids[_status_key("chat-1", "provider-error", "22")] == "200"
+
+
+@pytest.mark.asyncio
+async def test_same_thread_id_edits_in_place(adapter):
+    """The routing key still edits in place within the same Telegram topic."""
+    adapter.send.return_value = SendResult(success=True, message_id="100")
+    adapter.edit_message.return_value = SendResult(success=True, message_id="100")
+
+    await adapter.send_or_update_status(
+        "chat-1",
+        "provider-error",
+        "rate limited",
+        metadata={"thread_id": "11"},
+    )
+    await adapter.send_or_update_status(
+        "chat-1",
+        "provider-error",
+        "still rate limited",
+        metadata={"thread_id": "11"},
+    )
+
+    adapter.send.assert_awaited_once()
+    adapter.edit_message.assert_awaited_once()
+    args, kwargs = adapter.edit_message.call_args
+    assert args[0] == "chat-1"
+    assert args[1] == "100"
+    assert args[2] == "still rate limited"
+    assert kwargs["metadata"] == {"thread_id": "11"}

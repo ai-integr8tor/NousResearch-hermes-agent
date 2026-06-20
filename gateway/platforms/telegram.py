@@ -526,9 +526,12 @@ class TelegramAdapter(BasePlatformAdapter):
         # "all"       — every message triggers a push notification (legacy
         #               behavior; opt-in via display.platforms.telegram.notifications).
         self._notifications_mode: str = "important"
-        # send_or_update_status() bookkeeping: {(chat_id, status_key) -> bot message_id}
+        # send_or_update_status() bookkeeping:
+        # {(chat_id, status_key, thread_id, dm_topic_id) -> bot message_id}
         # Tracks status bubbles owned by this adapter so subsequent calls with the
-        # same key edit the same message instead of appending new ones (#30045).
+        # same key and routing context edit the same message instead of appending
+        # new ones (#30045).  Include thread routing so status from one Telegram
+        # topic/lane never edits or reuses the bubble from another topic.
         self._status_message_ids: Dict[tuple, str] = {}
 
     def _notification_kwargs(
@@ -2691,7 +2694,12 @@ class TelegramAdapter(BasePlatformAdapter):
         message in place. If the edit fails (message deleted, too old, etc.)
         we drop the cached id and send fresh.
         """
-        key = (str(chat_id), str(status_key))
+        key = (
+            str(chat_id),
+            str(status_key),
+            self._metadata_thread_id(metadata),
+            self._metadata_direct_messages_topic_id(metadata),
+        )
         cached_id = self._status_message_ids.get(key)
         if cached_id is not None:
             result = await self.edit_message(
