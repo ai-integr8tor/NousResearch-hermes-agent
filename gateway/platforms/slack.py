@@ -201,6 +201,30 @@ def _extract_text_from_slack_blocks(blocks: list) -> str:
     return "\n".join(parts)
 
 
+def _dedupe_slack_block_text(blocks_text: str, *plain_text_candidates: str) -> str:
+    """Drop Slack rich_text's authored-message echo, preserving quoted extras.
+
+    Slack's plain ``text`` field already contains what the user typed, while
+    modern rich_text blocks often repeat that text before quote/list extras.
+    Compare against both the rewritten command text (``/cmd``) and the raw
+    Slack text (``!cmd``) so bang-command rewrites do not duplicate args.
+    """
+    text = (blocks_text or "").strip()
+    if not text:
+        return ""
+
+    for candidate in plain_text_candidates:
+        candidate = (candidate or "").strip()
+        if not candidate:
+            continue
+        if text == candidate:
+            return ""
+        prefix = f"{candidate}\n"
+        if text.startswith(prefix):
+            return text[len(prefix):].lstrip("\n").strip()
+    return text
+
+
 def _serialize_slack_blocks_for_agent(blocks: list, max_chars: int = 6000) -> str:
     """Return a compact, redacted JSON view of the current message's Block Kit payload."""
     if not blocks:
@@ -2287,6 +2311,14 @@ class SlackAdapter(BasePlatformAdapter):
             return
 
         original_text = event.get("text", "")
+        raw_original_text = original_text
+        team_hint = event.get("team") or event.get("team_id") or ""
+        bot_uid_hint = self._team_bot_user_ids.get(team_hint, self._bot_user_id)
+        command_probe_text = original_text.strip()
+        if bot_uid_hint:
+            mention_token = f"<@{bot_uid_hint}>"
+            if command_probe_text.startswith(mention_token):
+                command_probe_text = command_probe_text[len(mention_token):].lstrip()
 
         # Slack blocks native slash commands inside threads ("/queue is not
         # supported in threads. Sorry!").  As a workaround, recognise a
@@ -2295,11 +2327,11 @@ class SlackAdapter(BasePlatformAdapter):
         # gateway dispatcher) handles it like a normal slash command.  Only
         # rewrite when the first token resolves to a known gateway command
         # so casual messages like "!nice work" pass through unchanged.
-        if original_text.startswith("!"):
+        if command_probe_text.startswith("!"):
             try:
                 from hermes_cli.commands import is_gateway_known_command
 
-                first_token = original_text[1:].split(maxsplit=1)[0]
+                first_token = command_probe_text[1:].split(maxsplit=1)[0]
                 # Strip "@suffix" the same way get_command() does, so
                 # forms like ``!stop@hermes`` still resolve.
                 cmd_name = first_token.split("@", 1)[0].lower()
@@ -2308,11 +2340,12 @@ class SlackAdapter(BasePlatformAdapter):
                     and "/" not in cmd_name
                     and is_gateway_known_command(cmd_name)
                 ):
-                    original_text = "/" + original_text[1:]
+                    command_probe_text = "/" + command_probe_text[1:]
             except Exception:  # pragma: no cover - defensive
                 pass
 
-        text = original_text
+        is_command_text = command_probe_text.startswith("/")
+        text = command_probe_text if is_command_text else original_text
 
         # Extract quoted/forwarded content from Slack blocks.
         # Slack's modern composer embeds forwarded messages in the ``blocks``
@@ -2320,13 +2353,15 @@ class SlackAdapter(BasePlatformAdapter):
         # the plain ``text`` field.  Merge block text so the agent sees the
         # full message content.
         blocks = event.get("blocks")
-        if blocks:
+        if blocks and not is_command_text:
             blocks_text = _extract_text_from_slack_blocks(blocks)
             if blocks_text:
-                # Only append if the blocks contain text not already present
-                # in the plain text field (avoids duplication).
-                stripped_blocks = blocks_text.strip()
-                if stripped_blocks and stripped_blocks not in text.strip():
+                stripped_blocks = _dedupe_slack_block_text(
+                    blocks_text,
+                    text,
+                    raw_original_text,
+                )
+                if stripped_blocks:
                     logger.debug(
                         "Slack: extracted additional text from blocks "
                         "(likely quoted/forwarded content): %s",
@@ -2343,7 +2378,7 @@ class SlackAdapter(BasePlatformAdapter):
         # fields like title, title_link/from_url, text, footer, and fallback.
         # Without reading these, the agent never sees shared link previews.
         slack_attachments = event.get("attachments") or []
-        if slack_attachments:
+        if slack_attachments and not is_command_text:
             att_parts: list[str] = []
             for att in slack_attachments:
                 att_title = att.get("title", "")
@@ -2540,7 +2575,7 @@ class SlackAdapter(BasePlatformAdapter):
 
         # When entering a thread for the first time (no existing session),
         # fetch thread context so the agent understands the conversation.
-        if is_thread_reply and not self._has_active_session_for_thread(
+        if not is_command_text and is_thread_reply and not self._has_active_session_for_thread(
             channel_id=channel_id,
             thread_ts=event_thread_ts,
             user_id=user_id,
@@ -2556,7 +2591,7 @@ class SlackAdapter(BasePlatformAdapter):
 
         # Determine message type
         msg_type = MessageType.TEXT
-        if (original_text or "").startswith("/"):
+        if is_command_text:
             msg_type = MessageType.COMMAND
 
         # Handle file attachments
@@ -2739,6 +2774,8 @@ class SlackAdapter(BasePlatformAdapter):
                         ".cfg",
                     }
                     if (
+                        not is_command_text
+                        and
                         ext in TEXT_INJECT_EXTENSIONS
                         and len(raw_bytes) <= MAX_TEXT_INJECT_BYTES
                     ):
@@ -2767,7 +2804,7 @@ class SlackAdapter(BasePlatformAdapter):
                             exc_info=True,
                         )
 
-        if attachment_notices:
+        if attachment_notices and not is_command_text:
             notice_block = "[Slack attachment notice]\n" + "\n".join(
                 f"- {n}" for n in attachment_notices
             )
@@ -3543,11 +3580,29 @@ class SlackAdapter(BasePlatformAdapter):
         # Preserve DM semantics only for DM channel IDs; shared channels must
         # keep group semantics so different users do not collide into one
         # session key.
+        #
+        # Some Slack slash-command surfaces include thread context. Preserve it
+        # when present so session-scoped commands such as ``/model`` apply to
+        # the same Slack thread/session as the next normal threaded message.
+        # Prefer explicit parent-thread IDs over message timestamps; ``message_ts``
+        # is only a fallback for payloads that expose no thread parent.
+        thread_id = command.get("thread_ts")
+        if not thread_id:
+            message_payload = command.get("message")
+            if isinstance(message_payload, dict):
+                thread_id = message_payload.get("thread_ts")
+        if not thread_id:
+            container_payload = command.get("container")
+            if isinstance(container_payload, dict):
+                thread_id = container_payload.get("thread_ts")
+        if not thread_id:
+            thread_id = command.get("message_ts")
         is_dm = str(channel_id).startswith("D")
         source = self.build_source(
             chat_id=channel_id,
             chat_type="dm" if is_dm else "group",
             user_id=user_id,
+            thread_id=thread_id or None,
         )
 
         event = MessageEvent(

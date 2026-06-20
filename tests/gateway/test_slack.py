@@ -68,7 +68,7 @@ import gateway.platforms.slack as _slack_mod
 
 _slack_mod.SLACK_AVAILABLE = True
 
-from gateway.platforms.slack import SlackAdapter  # noqa: E402
+from gateway.platforms.slack import SlackAdapter, _dedupe_slack_block_text  # noqa: E402
 
 
 async def _pending_for_fake_task():
@@ -127,6 +127,31 @@ def _redirect_cache(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# TestSlackBlockTextDedupe
+# ---------------------------------------------------------------------------
+
+class TestSlackBlockTextDedupe:
+    def test_empty_blocks_text_returns_empty(self):
+        assert _dedupe_slack_block_text("   ", "hello") == ""
+
+    def test_exact_candidate_match_returns_empty(self):
+        assert _dedupe_slack_block_text("/queue summarize", "/queue summarize") == ""
+
+    def test_prefix_candidate_match_preserves_suffix(self):
+        assert (
+            _dedupe_slack_block_text(
+                "!queue summarize\n> Quoted line",
+                "/queue summarize",
+                "!queue summarize",
+            )
+            == "> Quoted line"
+        )
+
+    def test_no_candidate_match_returns_blocks_text(self):
+        assert _dedupe_slack_block_text("> Quoted line", "hello") == "> Quoted line"
+
+
+# ---------------------------------------------------------------------------
 # TestSlashCommandSessionIsolation
 # ---------------------------------------------------------------------------
 
@@ -165,6 +190,115 @@ class TestSlashCommandSessionIsolation:
         assert event.source.chat_type == "dm"
         assert event.source.chat_id == "D123"
         assert event.source.user_id == "U123"
+
+    @pytest.mark.asyncio
+    async def test_slash_command_preserves_thread_id_when_payload_includes_it(self, adapter):
+        """Thread-scoped /model must key to the same Slack thread/session."""
+        command = {
+            "command": "/model",
+            "text": "qwen --provider openrouter",
+            "user_id": "U123",
+            "channel_id": "C123",
+            "team_id": "T123",
+            "thread_ts": "1700000000.123456",
+        }
+
+        await adapter._handle_slash_command(command)
+
+        adapter.handle_message.assert_awaited_once()
+        event = adapter.handle_message.await_args.args[0]
+        assert event.text == "/model qwen --provider openrouter"
+        assert event.source.chat_type == "group"
+        assert event.source.chat_id == "C123"
+        assert event.source.user_id == "U123"
+        assert event.source.thread_id == "1700000000.123456"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("payload_key", "payload_value"),
+        [
+            ("message_ts", "1700000000.111111"),
+            ("message", {"thread_ts": "1700000000.222222"}),
+            ("container", {"thread_ts": "1700000000.333333"}),
+        ],
+    )
+    async def test_slash_command_accepts_thread_id_payload_variants(
+        self, adapter, payload_key, payload_value
+    ):
+        command = {
+            "command": "/model",
+            "text": "gpt-5.5",
+            "user_id": "U123",
+            "channel_id": "C123",
+            "team_id": "T123",
+            payload_key: payload_value,
+        }
+
+        await adapter._handle_slash_command(command)
+
+        event = adapter.handle_message.await_args.args[0]
+        expected_thread = (
+            payload_value if isinstance(payload_value, str) else payload_value["thread_ts"]
+        )
+        assert event.source.thread_id == expected_thread
+
+    @pytest.mark.asyncio
+    async def test_slash_command_prefers_thread_parent_over_message_timestamp(
+        self, adapter
+    ):
+        command = {
+            "command": "/model",
+            "text": "gpt-5.5",
+            "user_id": "U123",
+            "channel_id": "C123",
+            "team_id": "T123",
+            "message_ts": "1700000000.999999",
+            "message": {"thread_ts": "1700000000.222222"},
+            "container": {"thread_ts": "1700000000.333333"},
+        }
+
+        await adapter._handle_slash_command(command)
+
+        event = adapter.handle_message.await_args.args[0]
+        assert event.source.thread_id == "1700000000.222222"
+
+    @pytest.mark.asyncio
+    async def test_slash_command_prefers_top_level_thread_id_over_nested_payloads(
+        self, adapter
+    ):
+        command = {
+            "command": "/model",
+            "text": "gpt-5.5",
+            "user_id": "U123",
+            "channel_id": "C123",
+            "team_id": "T123",
+            "thread_ts": "1700000000.111111",
+            "message_ts": "1700000000.999999",
+            "message": {"thread_ts": "1700000000.222222"},
+            "container": {"thread_ts": "1700000000.333333"},
+        }
+
+        await adapter._handle_slash_command(command)
+
+        event = adapter.handle_message.await_args.args[0]
+        assert event.source.thread_id == "1700000000.111111"
+
+    @pytest.mark.asyncio
+    async def test_slash_command_ignores_malformed_nested_thread_payloads(self, adapter):
+        command = {
+            "command": "/model",
+            "text": "gpt-5.5",
+            "user_id": "U123",
+            "channel_id": "C123",
+            "team_id": "T123",
+            "message": "not-a-dict",
+            "container": ["not", "a", "dict"],
+        }
+
+        await adapter._handle_slash_command(command)
+
+        event = adapter.handle_message.await_args.args[0]
+        assert event.source.thread_id is None
 
 
 # ---------------------------------------------------------------------------
@@ -1161,6 +1295,211 @@ class TestBangPrefixCommands:
         assert msg_event.message_type == MessageType.COMMAND
 
     @pytest.mark.asyncio
+    async def test_bang_command_blocks_plain_text_not_duplicated(self, adapter):
+        """Slack rich_text blocks must not re-append the original !command text."""
+        evt = self._make_event("!reasoning medium")
+        evt["blocks"] = [{
+            "type": "rich_text",
+            "elements": [{
+                "type": "rich_text_section",
+                "elements": [{"type": "text", "text": "!reasoning medium"}],
+            }],
+        }]
+
+        await adapter._handle_slack_message(evt)
+
+        msg_event = adapter.handle_message.call_args[0][0]
+        assert msg_event.text == "/reasoning medium"
+        assert msg_event.get_command_args() == "medium"
+        assert msg_event.message_type == MessageType.COMMAND
+
+    @pytest.mark.asyncio
+    async def test_bang_model_minimax_blocks_args_are_exact(self, adapter):
+        """Regression: ``!model minimax`` must not become a spaced model name."""
+        evt = self._make_event("!model minimax")
+        evt["blocks"] = [{
+            "type": "rich_text",
+            "elements": [{
+                "type": "rich_text_section",
+                "elements": [{"type": "text", "text": "!model minimax"}],
+            }],
+        }]
+
+        await adapter._handle_slack_message(evt)
+
+        msg_event = adapter.handle_message.call_args[0][0]
+        assert msg_event.text == "/model minimax"
+        assert msg_event.get_command_args() == "minimax"
+        assert msg_event.message_type == MessageType.COMMAND
+
+    @pytest.mark.asyncio
+    async def test_bang_command_blocks_do_not_pollute_args(self, adapter):
+        """Command args must stay exact even when blocks contain quoted extras."""
+        evt = self._make_event("!queue summarize")
+        evt["blocks"] = [{
+            "type": "rich_text",
+            "elements": [
+                {
+                    "type": "rich_text_section",
+                    "elements": [{"type": "text", "text": "!queue summarize"}],
+                },
+                {
+                    "type": "rich_text_quote",
+                    "elements": [{
+                        "type": "rich_text_section",
+                        "elements": [{"type": "text", "text": "Quoted line"}],
+                    }],
+                },
+            ],
+        }]
+
+        await adapter._handle_slack_message(evt)
+
+        msg_event = adapter.handle_message.call_args[0][0]
+        assert msg_event.text == "/queue summarize"
+        assert msg_event.get_command_args() == "summarize"
+        assert "!queue summarize" not in msg_event.text
+        assert msg_event.message_type == MessageType.COMMAND
+
+    @pytest.mark.asyncio
+    async def test_mentioned_bang_model_command_blocks_args_are_exact(self, adapter):
+        """``<@bot> !model`` must strip the mention before command parsing."""
+        adapter._bot_user_id = "U_BOT"
+        evt = self._make_event(
+            "<@U_BOT> !model gpt-5.5",
+            channel_type="channel",
+            channel="C123",
+        )
+        evt["blocks"] = [{
+            "type": "rich_text",
+            "elements": [{
+                "type": "rich_text_section",
+                "elements": [{"type": "text", "text": "<@U_BOT> !model gpt-5.5"}],
+            }],
+        }]
+
+        await adapter._handle_slack_message(evt)
+
+        msg_event = adapter.handle_message.call_args[0][0]
+        assert msg_event.text == "/model gpt-5.5"
+        assert msg_event.get_command_args() == "gpt-5.5"
+        assert msg_event.message_type == MessageType.COMMAND
+
+    @pytest.mark.asyncio
+    async def test_bang_model_thread_context_does_not_pollute_args(self, adapter):
+        """Fetched thread context must not be prepended to command text."""
+        evt = self._make_event(
+            "!model gpt-5.5",
+            thread_ts="1111111111.000001",
+            channel_type="channel",
+            channel="C123",
+        )
+        adapter._bot_message_ts.add("1111111111.000001")
+
+        with patch.object(
+            adapter,
+            "_fetch_thread_context",
+            new_callable=AsyncMock,
+            return_value="[Thread context]\nnoise\n\n",
+        ) as fetch_context:
+            await adapter._handle_slack_message(evt)
+
+        fetch_context.assert_not_awaited()
+        msg_event = adapter.handle_message.call_args[0][0]
+        assert msg_event.text == "/model gpt-5.5"
+        assert msg_event.get_command_args() == "gpt-5.5"
+        assert msg_event.message_type == MessageType.COMMAND
+        assert msg_event.source.thread_id == "1111111111.000001"
+
+    @pytest.mark.asyncio
+    async def test_bang_model_attachments_do_not_pollute_args(self, adapter):
+        """Slack unfurls/attachments must not become model command args."""
+        evt = self._make_event("!model gpt-5.5")
+        evt["attachments"] = [{
+            "title": "Preview",
+            "title_link": "https://example.com/preview",
+            "text": "unfurl body",
+        }]
+
+        await adapter._handle_slack_message(evt)
+
+        msg_event = adapter.handle_message.call_args[0][0]
+        assert msg_event.text == "/model gpt-5.5"
+        assert msg_event.get_command_args() == "gpt-5.5"
+        assert "Preview" not in msg_event.text
+        assert msg_event.message_type == MessageType.COMMAND
+
+    @pytest.mark.asyncio
+    async def test_bang_model_text_file_does_not_pollute_args(self, adapter):
+        """Text-file snippets must not be injected into command args."""
+        evt = self._make_event("!model gpt-5.5")
+        evt["files"] = [{
+            "mimetype": "text/plain",
+            "name": "notes.txt",
+            "url_private_download": "https://files.slack.com/notes.txt",
+            "size": 11,
+        }]
+
+        with patch.object(
+            adapter,
+            "_download_slack_file_bytes",
+            new_callable=AsyncMock,
+            return_value=b"hello world",
+        ):
+            await adapter._handle_slack_message(evt)
+
+        msg_event = adapter.handle_message.call_args[0][0]
+        assert msg_event.text == "/model gpt-5.5"
+        assert msg_event.get_command_args() == "gpt-5.5"
+        assert "[Content of notes.txt]" not in msg_event.text
+        assert "hello world" not in msg_event.text
+        assert msg_event.message_type == MessageType.COMMAND
+
+    @pytest.mark.asyncio
+    async def test_bang_model_non_rich_blocks_do_not_pollute_args(self, adapter):
+        """Serialized Block Kit payload must not become command args."""
+        evt = self._make_event("!model gpt-5.5")
+        evt["blocks"] = [{
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "metadata from Slack block"},
+        }]
+
+        await adapter._handle_slack_message(evt)
+
+        msg_event = adapter.handle_message.call_args[0][0]
+        assert msg_event.text == "/model gpt-5.5"
+        assert msg_event.get_command_args() == "gpt-5.5"
+        assert "Slack Block Kit" not in msg_event.text
+        assert msg_event.message_type == MessageType.COMMAND
+
+    @pytest.mark.asyncio
+    async def test_bang_unknown_blocks_plain_text_not_duplicated(self, adapter):
+        """Unknown ! text is not a command, but block echoes still dedupe."""
+        evt = self._make_event("!nice work")
+        evt["blocks"] = [{
+            "type": "rich_text",
+            "elements": [
+                {
+                    "type": "rich_text_section",
+                    "elements": [{"type": "text", "text": "!nice work"}],
+                },
+                {
+                    "type": "rich_text_quote",
+                    "elements": [{
+                        "type": "rich_text_section",
+                        "elements": [{"type": "text", "text": "Quoted line"}],
+                    }],
+                },
+            ],
+        }]
+
+        await adapter._handle_slack_message(evt)
+
+        msg_event = adapter.handle_message.call_args[0][0]
+        assert msg_event.text == "!nice work\n> Quoted line"
+        assert msg_event.message_type != MessageType.COMMAND
+
+    @pytest.mark.asyncio
     async def test_bang_works_inside_thread(self, adapter):
         """The whole point: ``!stop`` inside a thread reply dispatches."""
         evt = self._make_event("!stop", thread_ts="1111111111.000001")
@@ -1587,6 +1926,36 @@ class TestIncomingDocumentHandling:
 
         msg_event = adapter.handle_message.call_args[0][0]
         assert msg_event.text == "hello world"
+
+    @pytest.mark.asyncio
+    async def test_rich_text_blocks_strip_plain_text_and_keep_quote(self, adapter):
+        """If blocks echo authored text plus a quote, keep only the quote extra."""
+        event = self._make_event(
+            text="Can you summarize this?",
+            blocks=[
+                {
+                    "type": "rich_text",
+                    "elements": [
+                        {
+                            "type": "rich_text_section",
+                            "elements": [{"type": "text", "text": "Can you summarize this?"}],
+                        },
+                        {
+                            "type": "rich_text_quote",
+                            "elements": [{
+                                "type": "rich_text_section",
+                                "elements": [{"type": "text", "text": "Quoted line"}],
+                            }],
+                        },
+                    ],
+                }
+            ],
+        )
+
+        await adapter._handle_slack_message(event)
+
+        msg_event = adapter.handle_message.call_args[0][0]
+        assert msg_event.text == "Can you summarize this?\n> Quoted line"
 
     @pytest.mark.asyncio
     async def test_rich_text_quotes_and_lists_are_extracted(self, adapter):
