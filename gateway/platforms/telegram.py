@@ -918,6 +918,44 @@ class TelegramAdapter(BasePlatformAdapter):
                 stack.append(context)
         return False
 
+    @staticmethod
+    def _looks_like_flood(exc: BaseException) -> bool:
+        """Return True iff the error indicates Telegram rejected the request
+        *before* processing (HTTP 429 ``RetryAfter`` / flood control).
+
+        When this returns True, the request is KNOWN not to have reached
+        Telegram, so a legacy MarkdownV2 resend is safe (no duplicate risk).
+        Used by the rich-send / rich-edit paths to decide whether to fall
+        back instead of suppressing the fallback (which would leave a
+        raw-markdown streaming preview stuck on screen).
+
+        Centralised so the four detection sites in this file -- two retry
+        loops (send + edit overflow split) and two rich-fallback branches
+        (_try_send_rich, _try_edit_rich) -- share one source of truth.
+        """
+        if getattr(exc, "retry_after", None) is not None:
+            return True
+        text = str(exc).lower()
+        return "retry after" in text or "flood" in text
+
+    @staticmethod
+    def _looks_like_timed_out(exc: BaseException) -> bool:
+        """Return True iff the error is a Telegram ``TimedOut`` (read timeout).
+
+        A read timeout may mean Telegram already processed the request, so
+        the caller should NOT legacy-resend (downgrade / duplicate risk).
+        Use :meth:`_looks_like_connect_timeout` separately to detect the
+        pre-connection case where the request never left the process.
+        """
+        text = str(exc).lower()
+        if "timed out" in text:
+            return True
+        try:
+            from telegram.error import TimedOut as _TimedOut
+        except (ImportError, AttributeError):
+            _TimedOut = None
+        return bool(_TimedOut and isinstance(exc, _TimedOut))
+
     def _coerce_bool_extra(self, key: str, default: bool = False) -> bool:
         value = self.config.extra.get(key) if getattr(self.config, "extra", None) else None
         if value is None:
@@ -1184,9 +1222,15 @@ class TelegramAdapter(BasePlatformAdapter):
     ) -> Optional[SendResult]:
         """Attempt a single ``sendRichMessage`` send.
 
-        Returns a :class:`SendResult` (success, or a transient failure that the
-        caller must NOT legacy-resend), or ``None`` to signal "fall back to the
-        legacy MarkdownV2 path" (permanent/capability error or DM-topic skip).
+        Returns one of:
+        - :class:`SendResult(success=True)` — message delivered as rich
+        - ``None`` — caller must fall back to the legacy MarkdownV2 path
+          (permanent/capability error, DM-topic skip, or transient error
+          where the request is KNOWN not to have reached Telegram — flood
+          control / connect timeout, no duplicate risk)
+        - :class:`SendResult(success=False)` — transient error where the
+          request MAY have reached Telegram (read timeout, network error
+          mid-response). Caller must NOT legacy-resend.
         """
         thread_id = self._metadata_thread_id(metadata)
         routing = self._compute_single_send_routing(chat_id, reply_to, metadata, thread_id)
@@ -1231,16 +1275,26 @@ class TelegramAdapter(BasePlatformAdapter):
                     self.name, exc,
                 )
                 return None
-            # Transient / network / unknown: the request may have reached
-            # Telegram. Do NOT legacy-resend (duplicate risk); surface a
-            # failure with retry semantics mirroring the legacy send() except.
-            err_str = str(exc).lower()
-            try:
-                from telegram.error import TimedOut as _TimedOut
-            except (ImportError, AttributeError):
-                _TimedOut = None
-            is_timeout = (_TimedOut and isinstance(exc, _TimedOut)) or "timed out" in err_str
+            # Flood control / connect-timeout: Telegram rejected the request
+            # before processing it. No duplicate risk -> safe to fall back to
+            # the legacy MarkdownV2 path so the user gets a rendered message
+            # instead of a stuck raw-markdown streaming preview.
+            is_timeout = self._looks_like_timed_out(exc)
             is_connect_timeout = self._looks_like_connect_timeout(exc)
+            is_flood = self._looks_like_flood(exc)
+            if is_connect_timeout or (not is_timeout and is_flood):
+                logger.warning(
+                    "[%s] sendRichMessage rejected before delivery "
+                    "(flood/connect) -- falling back to MarkdownV2: %s",
+                    self.name, exc,
+                )
+                return None
+            # Read timeout / network error: request may have reached Telegram.
+            # Legacy-resend would risk a duplicate; preserve the original
+            # retryable semantics so the caller's retry path (if any) still
+            # re-attempts the rich request -- a connect-timeout or non-timeout
+            # mid-response error stays retryable, only a true read timeout
+            # (where Telegram may have processed the request) is non-retryable.
             logger.warning(
                 "[%s] sendRichMessage transient failure (no legacy resend): %s",
                 self.name, exc,
@@ -1281,14 +1335,17 @@ class TelegramAdapter(BasePlatformAdapter):
 
         Uses ``editMessageText`` with the ``rich_message`` parameter so a
         streamed preview can finalize as rich (tables/task lists/details/math)
-        WITHOUT a fresh send + delete — no duplicate preview.  Mirrors
-        :meth:`_try_send_rich`'s error contract:
+        WITHOUT a fresh send + delete -- no duplicate preview.
 
-        - success → ``SendResult(success=True, message_id=...)``
-        - permanent / capability error → ``None`` (caller falls back to the
-          legacy MarkdownV2 edit; capability errors latch rich off)
-        - transient / unknown → ``SendResult(success=False)`` with retry
-          semantics (the message may already be edited; do NOT legacy-resend)
+        Error contract (mirrors :meth:`_try_send_rich`):
+
+        - success -> ``SendResult(success=True, message_id=...)``
+        - permanent / capability / pre-delivery transient (flood, connect) ->
+          ``None`` (caller falls back to legacy MarkdownV2 edit; capability
+          errors latch rich off)
+        - unknown transient (timeout / mid-response network error) ->
+          ``SendResult(success=False)`` -- the message may already be edited;
+          do NOT legacy-resend.
         """
         payload: Dict[str, Any] = {
             "chat_id": int(chat_id),
@@ -1318,13 +1375,24 @@ class TelegramAdapter(BasePlatformAdapter):
                 return None
             if "not modified" in str(exc).lower():
                 return SendResult(success=True, message_id=message_id)
-            err_str = str(exc).lower()
-            try:
-                from telegram.error import TimedOut as _TimedOut
-            except (ImportError, AttributeError):
-                _TimedOut = None
-            is_timeout = (_TimedOut and isinstance(exc, _TimedOut)) or "timed out" in err_str
+            # Flood control / connect-timeout: same pre-delivery signal as
+            # _try_send_rich -- Telegram rejected the request, safe to fall
+            # back to the legacy MarkdownV2 edit.
+            is_timeout = self._looks_like_timed_out(exc)
             is_connect_timeout = self._looks_like_connect_timeout(exc)
+            is_flood = self._looks_like_flood(exc)
+            if is_connect_timeout or (not is_timeout and is_flood):
+                logger.warning(
+                    "[%s] rich editMessageText rejected before delivery "
+                    "(flood/connect) -- falling back to MarkdownV2: %s",
+                    self.name, exc,
+                )
+                return None
+            # Read timeout / mid-response network error: message may already
+            # be edited; do NOT legacy-resend. Preserve the original retryable
+            # semantics so callers that drive a retry loop on this flag
+            # (typically the stream consumer's flood-strike backoff) still
+            # re-attempt the rich edit on transient-but-not-delivered errors.
             logger.warning(
                 "[%s] rich editMessageText transient failure (no legacy resend): %s",
                 self.name, exc,
@@ -2616,8 +2684,8 @@ class TelegramAdapter(BasePlatformAdapter):
                         else:
                             raise
                     except Exception as send_err:
-                        retry_after = getattr(send_err, "retry_after", None)
-                        if retry_after is not None or "retry after" in str(send_err).lower():
+                        if self._looks_like_flood(send_err):
+                            retry_after = getattr(send_err, "retry_after", None)
                             if _send_attempt < 2:
                                 wait = float(retry_after) if retry_after is not None else 1.0
                                 logger.warning(
@@ -2668,8 +2736,7 @@ class TelegramAdapter(BasePlatformAdapter):
             # Exceptions: a wrapped ConnectTimeout (no connection established)
             # and an httpx pool timeout (request explicitly not sent) -- both
             # are safe to re-send and must not be silently dropped.
-            _to = locals().get("_TimedOut")
-            is_timeout = (_to and isinstance(e, _to)) or "timed out" in err_str
+            is_timeout = self._looks_like_timed_out(e)
             is_connect_timeout = self._looks_like_connect_timeout(e)
             is_pool_timeout = self._looks_like_pool_timeout(e)
             return SendResult(success=False, error=str(e), retryable=(is_connect_timeout or is_pool_timeout or not is_timeout))
@@ -2805,8 +2872,8 @@ class TelegramAdapter(BasePlatformAdapter):
             # Flood control / RetryAfter — short waits are retried inline,
             # long waits return a failure immediately so streaming can fall back
             # to a normal final send instead of leaving a truncated partial.
-            retry_after = getattr(e, "retry_after", None)
-            if retry_after is not None or "retry after" in err_str:
+            if self._looks_like_flood(e):
+                retry_after = getattr(e, "retry_after", None)
                 wait = retry_after if retry_after else 1.0
                 logger.warning(
                     "[%s] Telegram flood control, waiting %.1fs",

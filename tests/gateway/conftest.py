@@ -39,6 +39,21 @@ from unittest.mock import MagicMock
 import pytest
 
 
+def _make_retry_after_init():
+    """Return an __init__ that matches python-telegram-bot's RetryAfter API.
+
+    The real class signature is ``RetryAfter(retry_after: int)``; the test
+    fixture previously modelled only the class-attribute form, which forced
+    callers to construct ``RetryAfter()`` and then mutate ``.retry_after``
+    post-hoc. Mirror the real API so test code reads like production code
+    and survives any switch back to the real library.
+    """
+    def __init__(self, retry_after=None):
+        Exception.__init__(self, f"Retry after {retry_after}")
+        self.retry_after = retry_after if retry_after is not None else 1
+    return __init__
+
+
 def _ensure_telegram_mock() -> None:
     """Install a comprehensive telegram mock in sys.modules.
 
@@ -67,7 +82,11 @@ def _ensure_telegram_mock() -> None:
     mod.error.BadRequest = type("BadRequest", (Exception,), {})
     mod.error.Forbidden = type("Forbidden", (Exception,), {})
     mod.error.InvalidToken = type("InvalidToken", (Exception,), {})
-    mod.error.RetryAfter = type("RetryAfter", (Exception,), {"retry_after": 1})
+    mod.error.RetryAfter = type(
+        "RetryAfter",
+        (Exception,),
+        {"retry_after": 1, "__init__": _make_retry_after_init()},
+    )
     mod.error.Conflict = type("Conflict", (Exception,), {})
 
     # Update.ALL_TYPES used in start_polling()
