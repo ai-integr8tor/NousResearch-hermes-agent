@@ -1693,10 +1693,10 @@ def run_curator_review(
 def _parse_review_reasoning_source(
     source: str,
     value: Any,
-) -> tuple[Optional[Dict[str, Any]], bool]:
+) -> tuple[Optional[Dict[str, Any]], bool, bool]:
     text = str(value or "").strip()
     if not text:
-        return None, False
+        return None, False, False
     parsed = parse_reasoning_effort(text)
     if parsed is None:
         logger.warning(
@@ -1704,17 +1704,28 @@ def _parse_review_reasoning_source(
             source,
             text,
         )
-        return None, False
-    return parsed, True
+        return None, True, True
+    return parsed, True, False
 
 
 def _resolve_review_reasoning_config(cfg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    aux = cfg.get("auxiliary", {}) if isinstance(cfg.get("auxiliary"), dict) else {}
+    cur_task = aux.get("curator", {}) if isinstance(aux.get("curator"), dict) else {}
+    parsed, present, invalid = _parse_review_reasoning_source(
+        "auxiliary.curator",
+        cur_task.get("reasoning_effort"),
+    )
+    if present and not invalid:
+        return parsed
+
     agent_cfg = cfg.get("agent", {}) if isinstance(cfg.get("agent"), dict) else {}
-    parsed, present = _parse_review_reasoning_source(
+    parsed, present, invalid = _parse_review_reasoning_source(
         "agent",
         agent_cfg.get("reasoning_effort"),
     )
-    return parsed if present else None
+    if present and not invalid:
+        return parsed
+    return None
 
 
 def _resolve_review_runtime(cfg: Dict[str, Any]) -> _ReviewRuntimeBinding:

@@ -937,6 +937,31 @@ def test_review_reasoning_empty_config_uses_provider_default(curator_env):
     assert curator._resolve_review_reasoning_config({}) is None
 
 
+def test_review_reasoning_honors_auxiliary_curator_override(curator_env):
+    """Canonical auxiliary.curator.reasoning_effort wins over agent reasoning."""
+    curator = curator_env["curator"]
+    cfg = {
+        "agent": {"reasoning_effort": "high"},
+        "auxiliary": {"curator": {"reasoning_effort": "xhigh"}},
+    }
+
+    assert curator._resolve_review_reasoning_config(cfg) == {
+        "enabled": True,
+        "effort": "xhigh",
+    }
+
+
+def test_review_reasoning_none_disables_and_stops_fallback(curator_env):
+    """The literal none is an explicit curator override, not an empty value."""
+    curator = curator_env["curator"]
+    cfg = {
+        "agent": {"reasoning_effort": "high"},
+        "auxiliary": {"curator": {"reasoning_effort": "none"}},
+    }
+
+    assert curator._resolve_review_reasoning_config(cfg) == {"enabled": False}
+
+
 def test_review_model_honors_auxiliary_curator_slot(curator_env):
     """auxiliary.curator.{provider,model} fully set → that pair wins."""
     curator = curator_env["curator"]
