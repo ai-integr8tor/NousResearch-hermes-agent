@@ -193,6 +193,14 @@ def build_models_payload(
                 if row.get("is_user_defined"):
                     continue
                 slug = row.get("slug", "")
+                # Skip user-defined providers — their models should never be
+                # filtered by this dedup (they ARE the de-duplication target,
+                # not the subject). Without this guard, custom_providers
+                # entries that is_aggregator considers aggregators (like any
+                # custom:* gateway) get ALL their models removed because every
+                # model ID they serve is also in user_models.
+                if row.get("is_user_defined"):
+                    continue
                 if not _is_aggregator(slug):
                     continue
                 original = row.get("models") or []
