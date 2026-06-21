@@ -16,7 +16,7 @@ import threading
 import uuid
 from pathlib import Path
 from datetime import datetime, timedelta
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any
 
 logger = logging.getLogger(__name__)
@@ -516,6 +516,7 @@ class SessionEntry:
     resume_pending: bool = False
     resume_reason: Optional[str] = None  # e.g. "restart_timeout"
     last_resume_marked_at: Optional[datetime] = None
+    notices_shown: Dict[str, bool] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         result = {
@@ -547,6 +548,11 @@ class SessionEntry:
             "was_auto_reset": self.was_auto_reset,
             "auto_reset_reason": self.auto_reset_reason,
             "reset_had_activity": self.reset_had_activity,
+            "notices_shown": {
+                str(k): True
+                for k, v in self.notices_shown.items()
+                if isinstance(k, str) and v
+            },
         }
         if self.origin:
             result["origin"] = self.origin.to_dict()
@@ -572,6 +578,15 @@ class SessionEntry:
                 last_resume_marked_at = datetime.fromisoformat(_lrma)
             except (TypeError, ValueError):
                 last_resume_marked_at = None
+
+        notices_shown: Dict[str, bool] = {}
+        raw_notices = data.get("notices_shown")
+        if isinstance(raw_notices, dict):
+            notices_shown = {
+                str(k): True
+                for k, v in raw_notices.items()
+                if isinstance(k, str) and v
+            }
 
         return cls(
             session_key=data["session_key"],
@@ -599,6 +614,7 @@ class SessionEntry:
             was_auto_reset=data.get("was_auto_reset", False),
             auto_reset_reason=data.get("auto_reset_reason"),
             reset_had_activity=data.get("reset_had_activity", False),
+            notices_shown=notices_shown,
         )
 
 
@@ -809,6 +825,27 @@ class SessionStore:
             except OSError as e:
                 logger.debug("Could not remove temp file %s: %s", tmp_path, e)
             raise
+
+    def mark_notice_shown_once(self, session_key: str, notice_key: str) -> bool:
+        """Atomically mark a gateway notice as shown for this session.
+
+        Returns True only for the first caller that marks ``notice_key`` for
+        ``session_key``. Later callers return False so they can suppress their
+        duplicate user-facing notice while preserving the durable session.
+        """
+        if not session_key or not notice_key:
+            return False
+        with self._lock:
+            self._ensure_loaded_locked()
+            entry = self._entries.get(session_key)
+            if entry is None:
+                return False
+            if entry.notices_shown.get(notice_key):
+                return False
+            entry.notices_shown[notice_key] = True
+            entry.updated_at = _now()
+            self._save()
+            return True
     
     def _resolve_profile_for_key(self, source: Optional[SessionSource] = None) -> Optional[str]:
         """Return the profile namespace for session keys, or None when off.

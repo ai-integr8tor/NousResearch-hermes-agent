@@ -64,6 +64,7 @@ from hermes_cli.fallback_config import get_fallback_chain
 # from _enforce_agent_cache_cap() and _session_expiry_watcher() below.
 _AGENT_CACHE_MAX_SIZE = 128
 _AGENT_CACHE_IDLE_TTL_SECS = 3600.0  # evict agents idle for >1h
+_CODEX_GPT55_AUTORAISE_NOTICE_KEY = "codex_gpt55_autoraise"
 _PLATFORM_CONNECT_TIMEOUT_SECS_DEFAULT = 30.0
 _ADAPTER_DISCONNECT_TIMEOUT_SECS_DEFAULT = 5.0
 _TELEGRAM_COMMAND_MENTION_RE = re.compile(r"(?<![\w:/])/([A-Za-z0-9][A-Za-z0-9_-]*)")
@@ -13746,6 +13747,23 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             except Exception:
                 pass
 
+    def _apply_gateway_notice_latch(self, agent: Any, session_key: str) -> None:
+        """Persist one-shot gateway notices across rebuilt agent instances."""
+        if not (
+            getattr(agent, "_compression_threshold_autoraised", None)
+            and getattr(agent, "_compression_warning", None)
+        ):
+            return
+        session_store = getattr(self, "session_store", None)
+        if session_store is None:
+            return
+        _first_notice = session_store.mark_notice_shown_once(
+            session_key,
+            _CODEX_GPT55_AUTORAISE_NOTICE_KEY,
+        )
+        if not _first_notice:
+            setattr(agent, "_compression_warning", None)
+
     @staticmethod
     def _init_cached_agent_for_turn(agent: Any, interrupt_depth: int) -> None:
         """Reset per-turn state on a cached agent before a new turn starts.
@@ -15394,6 +15412,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     session_db=self._session_db,
                     fallback_model=self._fallback_model,
                 )
+
+                self._apply_gateway_notice_latch(agent, session_key)
+
                 if _cache_lock and _cache is not None:
                     with _cache_lock:
                         _cache[session_key] = (agent, _sig, _current_msg_count)
