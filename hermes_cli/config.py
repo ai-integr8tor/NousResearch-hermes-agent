@@ -5134,6 +5134,28 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
                     "(LLM consolidation is now opt-in; pruning stays on)"
                 )
 
+    # ── Version 30 → 31: seed auxiliary.curator.reasoning_effort ──
+    # Curator LLM consolidation is a forked AIAgent, so reasoning must use
+    # the standard normalized reasoning_config path instead of provider-specific
+    # extra_body hacks. Empty string means no curator-specific override: inherit
+    # agent.reasoning_effort when set, otherwise let the provider default apply.
+    if current_ver < 31:
+        config = read_raw_config()
+        aux = config.get("auxiliary")
+        if not isinstance(aux, dict):
+            aux = {}
+        curator_aux = aux.get("curator")
+        if not isinstance(curator_aux, dict):
+            curator_aux = {}
+        if "reasoning_effort" not in curator_aux:
+            curator_aux["reasoning_effort"] = ""
+            aux["curator"] = curator_aux
+            config["auxiliary"] = aux
+            save_config(config)
+            results["config_added"].append("auxiliary.curator.reasoning_effort=")
+            if not quiet:
+                print("  ✓ Seeded auxiliary.curator.reasoning_effort: ''")
+
     # ── Post-migration: disable exfiltration-shaped MCP stdio entries ──
     # Users can hand-edit mcp_servers, and older installs may already contain a
     # malicious entry. Preserve the stanza for auditability but mark it

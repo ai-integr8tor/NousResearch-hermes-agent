@@ -675,6 +675,72 @@ class TestCuratorReasoningEffortConfig:
         slot = DEFAULT_CONFIG["auxiliary"]["curator"]
         assert slot["reasoning_effort"] == ""
 
+    def test_migration_seeds_curator_reasoning_effort_when_missing(self, tmp_path):
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump({
+                "_config_version": 30,
+                "agent": {"reasoning_effort": "high"},
+                "auxiliary": {
+                    "curator": {
+                        "provider": "openai-codex",
+                        "model": "gpt-5.5",
+                    },
+                },
+            }),
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            results = migrate_config(interactive=False, quiet=True)
+            raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+
+        assert raw["_config_version"] == DEFAULT_CONFIG["_config_version"]
+        assert raw["auxiliary"]["curator"]["reasoning_effort"] == ""
+        assert raw["agent"]["reasoning_effort"] == "high"
+        assert "auxiliary.curator.reasoning_effort=" in results["config_added"]
+
+    def test_migration_preserves_existing_curator_reasoning_effort(self, tmp_path):
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump({
+                "_config_version": 30,
+                "auxiliary": {
+                    "curator": {
+                        "provider": "openai-codex",
+                        "model": "gpt-5.5",
+                        "reasoning_effort": "xhigh",
+                    },
+                },
+            }),
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            results = migrate_config(interactive=False, quiet=True)
+            raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+
+        assert raw["auxiliary"]["curator"]["reasoning_effort"] == "xhigh"
+        assert "auxiliary.curator.reasoning_effort=" not in results["config_added"]
+
+    def test_migration_creates_curator_reasoning_path_when_auxiliary_missing(self, tmp_path):
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump({
+                "_config_version": 30,
+                "agent": {"reasoning_effort": "medium"},
+            }),
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            results = migrate_config(interactive=False, quiet=True)
+            raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+
+        assert raw["auxiliary"]["curator"]["reasoning_effort"] == ""
+        assert raw["agent"]["reasoning_effort"] == "medium"
+        assert "auxiliary.curator.reasoning_effort=" in results["config_added"]
+
 
 class TestAnthropicTokenMigration:
     """Test that config version 8→9 clears ANTHROPIC_TOKEN."""
