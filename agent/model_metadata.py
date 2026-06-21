@@ -48,7 +48,7 @@ def _resolve_requests_verify() -> bool | str:
 _PROVIDER_PREFIXES: frozenset[str] = frozenset({
     "openrouter", "nous", "openai-codex", "copilot", "copilot-acp",
     "gemini", "ollama-cloud", "zai", "kimi-coding", "kimi-coding-cn", "stepfun", "minimax", "minimax-oauth", "minimax-cn", "anthropic", "deepseek",
-    "opencode-zen", "opencode-go", "kilocode", "alibaba", "novita",
+    "opencode-zen", "opencode-go", "kilocode", "alibaba", "novita", "chutes",
     "qwen-oauth",
     "xiaomi",
     "arcee",
@@ -68,6 +68,7 @@ _PROVIDER_PREFIXES: frozenset[str] = frozenset({
     "xai", "x-ai", "x.ai", "grok",
     "nvidia", "nim", "nvidia-nim", "nemotron",
     "qwen-portal", "novita-ai", "novitaai",
+    "chutes-ai", "chutesai",
 })
 
 
@@ -444,6 +445,7 @@ _URL_TO_PROVIDER: Dict[str, str] = {
     "xiaomimimo.com": "xiaomi",
     "api.gmi-serving.com": "gmi",
     "api.novita.ai": "novita",
+    "llm.chutes.ai": "chutes",
     "tokenhub.tencentmaas.com": "tencent-tokenhub",
     "ollama.com": "ollama-cloud",
 }
@@ -668,8 +670,18 @@ def _extract_pricing(payload: Dict[str, Any]) -> Dict[str, Any]:
         pricing: Dict[str, Any] = {}
         for target, aliases in alias_map.items():
             for alias in aliases:
-                if alias in normalized and normalized[alias] not in {None, ""}:
-                    pricing[target] = normalized[alias]
+                if alias not in normalized:
+                    continue
+                value = normalized[alias]
+                # Skip nested shapes — e.g. Chutes' ``price`` field maps
+                # input/output to ``{tao, usd}`` sub-objects; only scalar
+                # per-token/per-request rates belong here. The tuple (not set)
+                # membership check below also avoids hashing unhashable values
+                # (a dict would raise ``TypeError: unhashable type``).
+                if isinstance(value, (dict, list)):
+                    continue
+                if value not in (None, ""):
+                    pricing[target] = value
                     break
         if pricing:
             return pricing
@@ -1761,6 +1773,16 @@ def get_model_context_length(
 
     if provider == "novita" or (base_url and base_url_host_matches(base_url, "api.novita.ai")):
         ctx = _resolve_endpoint_context_length(model, base_url or "https://api.novita.ai/openai/v1", api_key=api_key)
+        if ctx is not None:
+            if base_url:
+                save_context_length(model, base_url, ctx)
+            return ctx
+
+    if provider == "chutes" or (base_url and base_url_host_matches(base_url, "llm.chutes.ai")):
+        # Chutes exposes authoritative per-model context_length via /v1/models
+        # (e.g. Qwen3-32B = 40960, Kimi K2.6 = 262144) but is not in models.dev,
+        # so prefer that live value over the hardcoded family defaults.
+        ctx = _resolve_endpoint_context_length(model, base_url or "https://llm.chutes.ai/v1", api_key=api_key)
         if ctx is not None:
             if base_url:
                 save_context_length(model, base_url, ctx)

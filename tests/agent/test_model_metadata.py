@@ -845,7 +845,7 @@ class TestGetModelContextLength:
 
         result = get_model_context_length(
             "zai-org/GLM-5-TEE",
-            base_url="https://llm.chutes.ai/v1",
+            base_url="https://custom-llm.example/v1",
             api_key="test-key",
         )
 
@@ -867,7 +867,7 @@ class TestGetModelContextLength:
         # GLM-5-TEE matches the "glm" entry in DEFAULT_CONTEXT_LENGTHS
         result = get_model_context_length(
             "zai-org/GLM-5-TEE",
-            base_url="https://llm.chutes.ai/v1",
+            base_url="https://custom-llm.example/v1",
             api_key="test-key",
         )
         assert result == 202752  # "glm" entry in DEFAULT_CONTEXT_LENGTHS
@@ -906,6 +906,64 @@ class TestGetModelContextLength:
         )
 
         assert result == 131072
+
+    @patch("agent.model_metadata.fetch_model_metadata")
+    @patch("agent.model_metadata.fetch_endpoint_model_metadata")
+    def test_chutes_uses_live_catalog_context(self, mock_endpoint_fetch, mock_fetch):
+        """Chutes is a recognized provider, so it skips the generic
+        custom-endpoint branch — but its /v1/models catalog carries the
+        authoritative per-model context_length (not in models.dev). The
+        dedicated chutes branch must prefer that live value over the
+        hardcoded family default (Qwen3-32B is 40960, not the 131072 the
+        ``qwen3`` catch-all would return)."""
+        mock_fetch.return_value = {}
+        mock_endpoint_fetch.return_value = {
+            "Qwen/Qwen3-32B-TEE": {"context_length": 40960}
+        }
+        result = get_model_context_length(
+            "Qwen/Qwen3-32B-TEE",
+            base_url="https://llm.chutes.ai/v1",
+            api_key="cpk_test",
+            provider="chutes",
+        )
+        assert result == 40960
+
+    @patch("agent.model_metadata.fetch_endpoint_model_metadata")
+    def test_chutes_null_catalog_context_falls_through(self, mock_endpoint_fetch):
+        """A few Chutes catalog entries report ``context_length: null`` (e.g.
+        Mistral-Nemo, Nemotron). The live-probe must return ``None`` for those
+        so resolution falls through to the family defaults, rather than
+        crashing or caching a bogus value."""
+        from agent.model_metadata import _resolve_endpoint_context_length
+        mock_endpoint_fetch.return_value = {
+            "unsloth/Mistral-Nemo-Instruct-2407-TEE": {"context_length": None}
+        }
+        result = _resolve_endpoint_context_length(
+            "unsloth/Mistral-Nemo-Instruct-2407-TEE",
+            "https://llm.chutes.ai/v1",
+            api_key="cpk_test",
+        )
+        assert result is None
+
+    def test_extract_pricing_handles_nested_price_objects(self):
+        """Chutes' /v1/models returns a nested ``price`` field that maps
+        input/output to ``{tao, usd}`` sub-objects, alongside a flat
+        ``pricing`` field of scalar rates. _extract_pricing must not crash on
+        the nested dicts (regression: ``TypeError: unhashable type: 'dict'``
+        from set-membership hashing of a dict value) and should use the flat
+        scalar rates."""
+        from agent.model_metadata import _extract_pricing
+        payload = {
+            "id": "Qwen/Qwen3-32B-TEE",
+            "price": {
+                "input": {"tao": 0.0004, "usd": 0.104},
+                "output": {"tao": 0.0019, "usd": 0.416},
+            },
+            "pricing": {"prompt": 0.104, "completion": 0.416, "input_cache_read": 0.052},
+        }
+        result = _extract_pricing(payload)  # must not raise
+        assert result.get("prompt") == 0.104
+        assert result.get("completion") == 0.416
 
     @patch("agent.model_metadata.fetch_model_metadata")
     def test_config_context_length_overrides_all(self, mock_fetch):

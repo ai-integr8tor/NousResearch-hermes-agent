@@ -517,6 +517,14 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "deepseek/deepseek-r1-0528",
         "qwen/qwen3-235b-a22b-fp8",
     ],
+    "chutes": [
+        "deepseek-ai/DeepSeek-V3.2-TEE",
+        "Qwen/Qwen3.5-397B-A17B-TEE",
+        "zai-org/GLM-5.1-TEE",
+        "moonshotai/Kimi-K2.6-TEE",
+        "MiniMaxAI/MiniMax-M2.5-TEE",
+        "google/gemma-4-31B-turbo-TEE",
+    ],
 }
 
 # ---------------------------------------------------------------------------
@@ -1015,6 +1023,7 @@ CANONICAL_PROVIDERS: list[ProviderEntry] = [
     ProviderEntry("nous",           "Nous Portal",              "Nous Portal (Everything your agent needs, 300+ models with bundled tool use)"),
     ProviderEntry("openrouter",     "OpenRouter",               "OpenRouter (Pay-per-use API aggregator)"),
     ProviderEntry("novita",         "NovitaAI",                 "NovitaAI (Cloud: Model API, Agent Sandbox, GPU Cloud)"),
+    ProviderEntry("chutes",         "Chutes",                   "Chutes (Decentralized inference, OpenAI-compatible, TEE confidential compute)"),
     ProviderEntry("lmstudio",       "LM Studio",                "LM Studio (Local desktop app with built-in model server)"),
     ProviderEntry("anthropic",      "Anthropic",                "Anthropic (Claude models via API key or Claude Code)"),
     ProviderEntry("openai-codex",   "OpenAI Codex",             "OpenAI Codex (Codex CLI via ChatGPT subscription or API key)"),
@@ -1227,6 +1236,8 @@ _PROVIDER_ALIASES = {
     "huggingface-hub": "huggingface",
     "novita-ai": "novita",
     "novitaai": "novita",
+    "chutes-ai": "chutes",
+    "chutesai": "chutes",
     "mimo": "xiaomi",
     "xiaomi-mimo": "xiaomi",
     "tencent": "tencent-tokenhub",
@@ -1539,7 +1550,7 @@ def _resolve_nous_pricing_credentials() -> tuple[str, str]:
 
 
 def get_pricing_for_provider(provider: str, *, force_refresh: bool = False) -> dict[str, dict[str, str]]:
-    """Return live pricing for providers that support it (openrouter, nous, novita)."""
+    """Return live pricing for providers that support it (openrouter, nous, novita, chutes)."""
     normalized = normalize_provider(provider)
     if normalized == "openrouter":
         return fetch_models_with_pricing(
@@ -1549,6 +1560,8 @@ def get_pricing_for_provider(provider: str, *, force_refresh: bool = False) -> d
         )
     if normalized == "novita":
         return _fetch_novita_pricing(force_refresh=force_refresh)
+    if normalized == "chutes":
+        return _fetch_chutes_pricing(force_refresh=force_refresh)
     if normalized == "nous":
         api_key, base_url = _resolve_nous_pricing_credentials()
         if base_url:
@@ -1618,6 +1631,71 @@ def _fetch_novita_pricing(
             "prompt": str(float(inp or 0) / 10_000 / 1_000_000),
             "completion": str(float(out or 0) / 10_000 / 1_000_000),
         }
+
+    _pricing_cache[cache_key] = result
+    return result
+
+
+def _fetch_chutes_pricing(
+    timeout: float = 8.0,
+    *,
+    force_refresh: bool = False,
+) -> dict[str, dict[str, str]]:
+    """Fetch pricing from the Chutes /v1/models catalog.
+
+    Chutes returns OpenAI-style per-model pricing under ``pricing`` with
+    ``prompt``/``completion`` (and an optional ``input_cache_read`` rate)
+    expressed in USD per million tokens. Convert to the per-token strings used
+    by the shared pricing formatter.
+
+    Results are cached in ``_pricing_cache`` keyed on the resolved base URL.
+    """
+    api_key = os.getenv("CHUTES_API_KEY", "").strip()
+    if not api_key:
+        return {}
+
+    base_url = os.getenv("CHUTES_BASE_URL", "").strip() or "https://llm.chutes.ai/v1"
+    cache_key = base_url.rstrip("/")
+    if not force_refresh and cache_key in _pricing_cache:
+        return _pricing_cache[cache_key]
+
+    url = cache_key + "/models"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Accept": "application/json",
+        "User-Agent": _HERMES_USER_AGENT,
+    }
+
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            payload = json.loads(resp.read().decode())
+    except Exception:
+        _pricing_cache[cache_key] = {}
+        return {}
+
+    result: dict[str, dict[str, str]] = {}
+    for item in payload.get("data", []):
+        if not isinstance(item, dict):
+            continue
+        mid = item.get("id")
+        if not mid:
+            continue
+        pricing = item.get("pricing")
+        if not isinstance(pricing, dict):
+            continue
+        inp = pricing.get("prompt")
+        out = pricing.get("completion")
+        if inp is None and out is None:
+            continue
+        entry = {
+            "prompt": str(float(inp or 0) / 1_000_000),
+            "completion": str(float(out or 0) / 1_000_000),
+        }
+        cache_read = pricing.get("input_cache_read")
+        if cache_read:
+            entry["input_cache_read"] = str(float(cache_read) / 1_000_000)
+        result[str(mid)] = entry
 
     _pricing_cache[cache_key] = result
     return result
