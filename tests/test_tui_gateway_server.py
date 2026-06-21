@@ -7890,3 +7890,62 @@ def test_start_agent_build_passes_session_model_override(monkeypatch):
         assert session["agent"].model == "claude-sonnet-4.6"
     finally:
         server._sessions.clear()
+
+
+def test_save_cfg_uses_atomic_write_and_preserves_config_on_failure(tmp_path, monkeypatch):
+    """A crash mid-write must not truncate the existing config.yaml.
+
+    Salvage of #13357 by @Junass1. ``_save_cfg`` previously did a bare
+    ``open(path, "w")`` + ``yaml.safe_dump`` — if the dump raised partway
+    (disk full, serialization error) the operator's config.yaml was left
+    truncated/empty. Routing through ``utils.atomic_yaml_write`` (temp file +
+    fsync + os.replace) keeps the prior file intact on failure.
+    """
+    import yaml
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.safe_dump({"existing": True}), encoding="utf-8")
+
+    monkeypatch.setattr(server, "_hermes_home", tmp_path)
+    server._cfg_cache = None
+    server._cfg_mtime = None
+    server._cfg_path = None
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("disk full")
+
+    # Patch the symbol where _save_cfg looks it up (utils module).
+    monkeypatch.setattr("utils.atomic_yaml_write", _boom)
+
+    try:
+        server._save_cfg({"new": True})
+    except RuntimeError as exc:
+        assert str(exc) == "disk full"
+    else:
+        raise AssertionError("expected _save_cfg to propagate the write failure")
+
+    # Original config must survive a failed write untouched.
+    assert yaml.safe_load(config_path.read_text(encoding="utf-8")) == {"existing": True}
+
+
+def test_save_cfg_writes_config_atomically_on_success(tmp_path, monkeypatch):
+    """On success the config round-trips and no temp files are left behind."""
+    import yaml
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.safe_dump({"existing": True}), encoding="utf-8")
+
+    monkeypatch.setattr(server, "_hermes_home", tmp_path)
+    server._cfg_cache = None
+    server._cfg_mtime = None
+    server._cfg_path = None
+
+    new_cfg = {"model": {"provider": "anthropic", "default": "claude"}, "kept": 1}
+    server._save_cfg(new_cfg)
+
+    assert yaml.safe_load(config_path.read_text(encoding="utf-8")) == new_cfg
+    # No leftover atomic temp files in the target directory.
+    leftovers = [p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
+    assert leftovers == [], f"unexpected temp files left behind: {leftovers}"
+    # Cache is refreshed to the freshly written config.
+    assert server._cfg_cache == new_cfg
