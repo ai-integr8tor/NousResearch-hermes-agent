@@ -1313,6 +1313,7 @@ class ProcessRegistry:
             all_sessions = list(self._running.values()) + list(self._finished.values())
 
         all_sessions = [self._refresh_detached_session(s) for s in all_sessions]
+        all_sessions = [s for s in all_sessions if s is not None]
 
         if task_id:
             all_sessions = [s for s in all_sessions if s.task_id == task_id]
@@ -1328,6 +1329,13 @@ class ProcessRegistry:
                 "uptime_seconds": int(time.time() - s.started_at),
                 "status": "exited" if s.exited else "running",
                 "output_preview": s.output_buffer[-200:] if s.output_buffer else "",
+                # Non-secret lifecycle metadata used by observability surfaces.
+                # Do not expose raw session_key here; callers that need identity
+                # should use the boolean linkage signal only or derive their own
+                # redacted/hash value from in-memory state they already own.
+                "task_id": s.task_id,
+                "has_session_key": bool(s.session_key),
+                "pid_scope": s.pid_scope,
             }
             if s.exited:
                 entry["exit_code"] = s.exit_code

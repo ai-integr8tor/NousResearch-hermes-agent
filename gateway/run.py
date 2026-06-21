@@ -2693,6 +2693,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         # Track background tasks to prevent garbage collection mid-execution
         self._background_tasks: set = set()
+        # Agent Floor live-pulse heartbeat is observability-only and is not
+        # counted in _background_tasks, otherwise the heartbeat would make the
+        # gateway look perpetually busy.
+        self._agent_floor_live_pulse_heartbeat_task: Optional[asyncio.Task] = None
 
 
     def _wire_teams_pipeline_runtime(self) -> None:
@@ -3468,6 +3472,54 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
     def _running_agent_count(self) -> int:
         return len(self._running_agents)
+
+    def _write_agent_floor_live_pulse(self) -> None:
+        """Best-effort non-secret live pulse for Mission Control / Agent Floor."""
+        try:
+            from gateway.live_pulse import write_live_pulse
+
+            write_live_pulse(
+                running_agents=getattr(self, "_running_agents", {}) or {},
+                running_started=getattr(self, "_running_agents_ts", {}) or {},
+                pending_sentinel=_AGENT_PENDING_SENTINEL,
+                background_tasks=getattr(self, "_background_tasks", set()) or set(),
+                pending_approvals=getattr(self, "_pending_approvals", {}) or {},
+                session_platform_resolver=lambda key: key.split(":", 1)[0] if key else "unknown",
+            )
+        except Exception:
+            logger.debug("Failed to write Agent Floor live pulse", exc_info=True)
+
+    async def _agent_floor_live_pulse_heartbeat(self) -> None:
+        """Keep Agent Floor's non-secret live pulse fresh while gateway runs."""
+        try:
+            from gateway.live_pulse import HEARTBEAT_INTERVAL_SECONDS
+        except Exception:
+            HEARTBEAT_INTERVAL_SECONDS = 30
+
+        while self._running:
+            self._write_agent_floor_live_pulse()
+            try:
+                await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                await asyncio.sleep(30)
+
+    def _start_agent_floor_live_pulse_heartbeat(self) -> None:
+        task = getattr(self, "_agent_floor_live_pulse_heartbeat_task", None)
+        if task is not None and not task.done():
+            return
+        task = asyncio.create_task(self._agent_floor_live_pulse_heartbeat())
+        self._agent_floor_live_pulse_heartbeat_task = task
+        task.add_done_callback(
+            lambda done: setattr(self, "_agent_floor_live_pulse_heartbeat_task", None)
+        )
+
+    def _stop_agent_floor_live_pulse_heartbeat(self) -> None:
+        task = getattr(self, "_agent_floor_live_pulse_heartbeat_task", None)
+        if task is not None and not task.done():
+            task.cancel()
+        self._agent_floor_live_pulse_heartbeat_task = None
 
     def _status_action_label(self) -> str:
         return "restart" if self._restart_requested else "shutdown"
@@ -5657,6 +5709,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         self._running = True
         self._update_runtime_status("running")
+        self._start_agent_floor_live_pulse_heartbeat()
         
         # Emit gateway:startup hook
         hook_count = len(self.hooks.loaded_hooks)
@@ -6629,6 +6682,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     continue
                 _task.cancel()
             self._background_tasks.clear()
+            self._stop_agent_floor_live_pulse_heartbeat()
 
             self.adapters.clear()
             for _session_key in list(self._running_agents):
@@ -13392,6 +13446,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         self._running_agents_ts.pop(session_key, None)
         if hasattr(self, "_busy_ack_ts"):
             self._busy_ack_ts.pop(session_key, None)
+        self._write_agent_floor_live_pulse()
         return True
 
     def _clear_session_boundary_security_state(self, session_key: str) -> None:
@@ -16041,6 +16096,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 )
                 return
             self._running_agents[session_key] = agent_holder[0]
+            self._write_agent_floor_live_pulse()
             if self._draining:
                 self._update_runtime_status("draining")
         

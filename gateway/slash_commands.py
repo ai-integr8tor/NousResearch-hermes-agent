@@ -640,6 +640,20 @@ class GatewaySlashCommandsMixin:
             if hasattr(t, "done") and not t.done()
         ]
 
+        try:
+            from gateway.live_pulse import write_live_pulse
+
+            write_live_pulse(
+                running_agents=running_agents,
+                running_started=running_started,
+                pending_sentinel=_AGENT_PENDING_SENTINEL,
+                background_tasks=set(background_tasks),
+                pending_approvals=getattr(self, "_pending_approvals", {}) or {},
+                session_platform_resolver=lambda key: key.split(":", 1)[0] if key else "unknown",
+            )
+        except Exception:
+            logger.debug("Failed to write Agent Floor live pulse from /agents", exc_info=True)
+
         lines = [
             t("gateway.agents.header"),
             "",
