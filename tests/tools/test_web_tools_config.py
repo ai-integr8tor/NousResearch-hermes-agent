@@ -259,6 +259,7 @@ class TestBackendSelection:
         "TOOL_GATEWAY_SCHEME",
         "TOOL_GATEWAY_USER_TOKEN",
         "TAVILY_API_KEY",
+        "KEENABLE_API_KEY",
     )
 
     def setup_method(self):
@@ -581,6 +582,7 @@ class TestCheckWebApiKey:
         "TOOL_GATEWAY_SCHEME",
         "TOOL_GATEWAY_USER_TOKEN",
         "TAVILY_API_KEY",
+        "KEENABLE_API_KEY",
     )
 
     def setup_method(self):
@@ -621,6 +623,13 @@ class TestCheckWebApiKey:
 
     def test_tavily_key_only(self):
         with patch.dict(os.environ, {"TAVILY_API_KEY": "tvly-test"}):
+            from tools.web_tools import check_web_api_key
+            assert check_web_api_key() is True
+
+    def test_keenable_key_only(self):
+        # KEENABLE_API_KEY present → web tools available, consistent with
+        # _get_backend() auto-selecting keenable for the same env.
+        with patch.dict(os.environ, {"KEENABLE_API_KEY": "keen-test"}):
             from tools.web_tools import check_web_api_key
             assert check_web_api_key() is True
 

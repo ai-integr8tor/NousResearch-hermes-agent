@@ -1194,12 +1194,15 @@ def check_web_api_key() -> bool:
     configured = _load_web_config().get("backend", "").lower().strip()
     if configured in {"exa", "parallel", "firecrawl", "tavily", "keenable", "searxng", "brave-free", "ddgs", "xai"}:
         return _is_backend_available(configured)
-    # keenable is omitted here on purpose: it's serviceable keyless, but must
-    # not flip the no-config auto-detect to "available" (it's opt-in only).
+    # keenable can't go through _is_backend_available here: it's serviceable
+    # keyless (always True), which would flip the no-config path to "available"
+    # and make it a silent default (#46350). Gate it on the key instead so it
+    # contributes only when KEENABLE_API_KEY is set — matching is_available()
+    # and the _get_backend() auto-detect candidate.
     return any(
         _is_backend_available(backend)
         for backend in ("exa", "parallel", "firecrawl", "tavily", "searxng", "brave-free", "ddgs", "xai")
-    )
+    ) or _has_env("KEENABLE_API_KEY")
 
 
 def check_auxiliary_model() -> bool:
