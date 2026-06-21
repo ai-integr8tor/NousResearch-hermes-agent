@@ -126,6 +126,11 @@ interface FilesystemTabProps extends FileTreeBodyProps {
   onRefresh: () => void
 }
 
+// Sidebar palette: all buttons always visible (folders + refresh); collapse-all
+// hides once no folders are expanded.
+const HEADER_ACTION_CLASS =
+  'text-sidebar-foreground/70 hover:bg-sidebar-accent! hover:text-sidebar-accent-foreground! focus-visible:ring-sidebar-ring'
+
 // Sidebar palette + hover-reveal: header actions stay reachable while moving
 // from the project label to the action buttons.
 const HEADER_ACTION_CLASS =
@@ -169,7 +174,7 @@ function FilesystemTab({
         </div>
         <Button
           aria-label={r.refreshTree}
-          className={HEADER_ACTION_LABEL_REVEAL}
+          className={HEADER_ACTION_CLASS}
           disabled={!hasCwd || loading}
           onClick={onRefresh}
           size="icon-xs"
