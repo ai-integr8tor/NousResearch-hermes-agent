@@ -139,8 +139,11 @@ def finalize_turn(
     # scaffolding has been removed. Otherwise a later user "continue" turn
     # can replay assistant("(empty)") / recovery nudges and fall into the
     # same empty-response loop again.
-    agent._drop_trailing_empty_response_scaffolding(messages)
-    agent._persist_session(messages, conversation_history)
+    try:
+        agent._drop_trailing_empty_response_scaffolding(messages)
+        agent._persist_session(messages, conversation_history)
+    except Exception as exc:
+        logger.warning("turn finalization persist failed: %s", exc)
 
     # ── Turn-exit diagnostic log ─────────────────────────────────────
     # Always logged at INFO so agent.log captures WHY every turn ended.
