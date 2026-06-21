@@ -1,6 +1,6 @@
 ---
 name: systematic-debugging
-description: "4-phase root cause debugging: understand bugs before fixing."
+description: "4-phase root-cause method for a specific, reproducible software defect or incorrect behavior: understand before fixing. Load only when chasing a concrete failure, not for performance/optimization or research loops, or green-field design where nothing is broken yet."
 version: 1.1.0
 author: Hermes Agent (adapted from obra/superpowers)
 license: MIT

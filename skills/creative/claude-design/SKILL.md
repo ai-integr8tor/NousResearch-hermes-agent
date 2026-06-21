@@ -1,6 +1,6 @@
 ---
 name: claude-design
-description: Design one-off HTML artifacts (landing, deck, prototype).
+description: "Hand-code a from-scratch single-file HTML/CSS design artifact (landing page, deck, prototype, component lab) when no brand or token system is dictated. Not for known-brand looks (use popular-web-designs) or design-token spec files (use design-md)."
 version: 1.0.0
 author: BadTechBandit
 license: MIT

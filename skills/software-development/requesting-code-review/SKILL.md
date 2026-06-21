@@ -1,6 +1,6 @@
 ---
 name: requesting-code-review
-description: "Pre-commit review: security scan, quality gates, auto-fix."
+description: "Review a concrete code diff you are about to commit: security scan, quality check, auto-fix. Load only to review changed source files, not when gate/verify/quality refer to CI, benchmark, or acceptance gates or a research loop's offline checker."
 version: 2.0.0
 author: Hermes Agent (adapted from obra/superpowers + MorAlekss)
 license: MIT

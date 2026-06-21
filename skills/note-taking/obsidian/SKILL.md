@@ -1,6 +1,6 @@
 ---
 name: obsidian
-description: Read, search, create, and edit notes in the Obsidian vault.
+description: "Obsidian vault file operations: read, search, create, append, and wikilink notes in the local Obsidian markdown vault. Not for generic note-taking or to-do apps that do not name Obsidian."
 platforms: [linux, macos, windows]
 ---
 

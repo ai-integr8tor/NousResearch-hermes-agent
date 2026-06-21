@@ -1,6 +1,6 @@
 ---
 name: spike
-description: "Throwaway experiments to validate an idea before build."
+description: "Time-boxed throwaway CODE spike to answer one specific technical feasibility question before building a feature. Not for research/optimization loops, benchmark or kernel tuning, or any context where experiment/validate/prove refers to offline gates or external checkers rather than throwaway exploratory code."
 version: 1.0.0
 author: Hermes Agent (adapted from gsd-build/get-shit-done)
 license: MIT

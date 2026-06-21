@@ -1,6 +1,6 @@
 ---
 name: codex
-description: "Delegate coding to OpenAI Codex CLI (features, PRs)."
+description: "Use when you want to actively hand a coding task to the OpenAI Codex CLI tool (drive features/PRs through it). Do NOT load merely because the name Codex appears in a prompt as a collaborator, agent, or workspace owner."
 version: 1.0.0
 author: Hermes Agent
 license: MIT

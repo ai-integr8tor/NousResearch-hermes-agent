@@ -1,6 +1,6 @@
 ---
 name: dogfood
-description: "Exploratory QA of web apps: find bugs, evidence, reports."
+description: "Use to manually exercise a running web app in a real browser to hunt UI/UX and functional bugs, capturing console errors and screenshots into a QA report. Not for unit/integration test writing or code review."
 version: 1.0.0
 platforms: [linux, macos, windows]
 metadata:

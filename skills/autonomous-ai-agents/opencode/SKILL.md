@@ -1,6 +1,6 @@
 ---
 name: opencode
-description: "Delegate coding to OpenCode CLI (features, PR review)."
+description: "Use when you want to actively hand a coding task to the OpenCode CLI tool (features, PR review). Do NOT load merely because OpenCode is mentioned in passing."
 version: 1.2.0
 author: Hermes Agent
 license: MIT

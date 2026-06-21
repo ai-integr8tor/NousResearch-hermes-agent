@@ -1,6 +1,6 @@
 ---
 name: hermes-agent
-description: "Configure, extend, or contribute to Hermes Agent."
+description: "Load when working on the Hermes Agent framework itself: editing its config (hermes.toml, profiles, providers), extending its source, or contributing code to the repo. Not when Hermes Agent is merely mentioned as the runtime executing some other task."
 version: 2.1.0
 author: Hermes Agent + Teknium
 license: MIT
