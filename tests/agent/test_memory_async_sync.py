@@ -103,7 +103,7 @@ def test_no_providers_does_not_create_executor():
     mgr = MemoryManager()
     mgr.sync_all("hi", "hey")
     mgr.queue_prefetch_all("hi")
-    assert mgr._sync_executor is None
+    assert not mgr._sync_executors
 
 
 def test_shutdown_all_is_bounded_with_wedged_provider():
