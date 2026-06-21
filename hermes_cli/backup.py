@@ -150,6 +150,29 @@ def _should_exclude(rel_path: Path) -> bool:
     return False
 
 
+# Per-file size cap. A backup ships portable config/state, not bulk data
+# (VM images, model weights, datasets) that accumulates inside profile working
+# dirs. Without a cap, a single multi-GB blob -- e.g. a Docker.raw under a
+# profile -- makes the backup hang and can fill the disk. Overridable via the
+# ``HERMES_BACKUP_MAX_FILE_MB`` env var (set to 0 to disable the cap).
+_DEFAULT_MAX_FILE_MB = 2048
+
+
+def _max_backup_file_bytes() -> int:
+    """Return the per-file size cap in bytes (0 means no cap)."""
+    raw = os.getenv("HERMES_BACKUP_MAX_FILE_MB", "").strip()
+    if not raw:
+        mb = float(_DEFAULT_MAX_FILE_MB)
+    else:
+        try:
+            mb = float(raw)
+        except ValueError:
+            mb = float(_DEFAULT_MAX_FILE_MB)
+    if mb <= 0:
+        return 0
+    return int(mb * 1024 * 1024)
+
+
 def _should_skip_backup_file(abs_path: Path, rel_path: Path, out_path: Path) -> bool:
     """Return True when a candidate file should not be written to a backup zip."""
     if _should_exclude(rel_path):
@@ -236,6 +259,8 @@ def run_backup(args) -> None:
     print(f"Scanning {display_hermes_home()} ...")
     files_to_add: list[tuple[Path, Path]] = []  # (absolute, relative)
     skipped_dirs = set()
+    skipped_large: list[tuple[Path, int]] = []  # (relative, size) -- over the size cap
+    max_file_bytes = _max_backup_file_bytes()
 
     for dirpath, dirnames, filenames in os.walk(hermes_root, followlinks=False):
         dp = Path(dirpath)
@@ -259,6 +284,18 @@ def run_backup(args) -> None:
 
             if _should_skip_backup_file(fpath, rel, out_path):
                 continue
+
+            # Skip oversized files (see _max_backup_file_bytes): a multi-GB
+            # blob under a profile would otherwise hang the backup / fill
+            # the disk. Overridable via HERMES_BACKUP_MAX_FILE_MB.
+            if max_file_bytes:
+                try:
+                    fsize = fpath.stat().st_size
+                except OSError:
+                    fsize = 0
+                if fsize > max_file_bytes:
+                    skipped_large.append((rel, fsize))
+                    continue
 
             files_to_add.append((fpath, rel))
 
@@ -321,6 +358,18 @@ def run_backup(args) -> None:
         print(f"\n  Excluded directories:")
         for d in sorted(skipped_dirs):
             print(f"    {d}/")
+
+    if skipped_large:
+        total_skipped = sum(sz for _, sz in skipped_large)
+        print(
+            f"\n  Skipped {len(skipped_large)} large file(s) over "
+            f"{_format_size(max_file_bytes)} ({_format_size(total_skipped)} total; "
+            f"set HERMES_BACKUP_MAX_FILE_MB to change, 0 to disable):"
+        )
+        for rel, sz in sorted(skipped_large, key=lambda x: -x[1])[:10]:
+            print(f"    {rel} ({_format_size(sz)})")
+        if len(skipped_large) > 10:
+            print(f"    ... and {len(skipped_large) - 10} more")
 
     if errors:
         print(f"\n  Warnings ({len(errors)} files skipped):")

@@ -2077,3 +2077,74 @@ class TestRestoreCronJobsIfEmptied:
         result = restore_cron_jobs_if_emptied(snap_id, hermes_home=hermes_home)
         assert result is not None
         assert result["job_count"] == 2
+
+
+class TestBackupSizeCap:
+    """Per-file size cap keeps bulk data (VM images, model weights, datasets)
+    out of the portable config/state backup.
+
+    Regression guard: a multi-GB ``Docker.raw`` under a profile working dir once
+    made ``hermes update --backup`` hang and nearly fill the disk because the
+    backup walker had only name/suffix/dir exclusions and no size limit.
+    """
+
+    def _tree_with_big_file(self, home: Path, big_bytes: int) -> None:
+        (home / "config.yaml").write_text("model:\n  default: x\n")
+        prof = home / "profiles" / "p"
+        prof.mkdir(parents=True)
+        (prof / "small.txt").write_text("ok")
+        with open(prof / "blob.bin", "wb") as fh:
+            fh.write(b"\0" * big_bytes)
+
+    def test_skips_file_over_cap(self, tmp_path, monkeypatch):
+        from hermes_cli.backup import run_backup
+
+        home = tmp_path / ".hermes"
+        home.mkdir()
+        self._tree_with_big_file(home, big_bytes=200 * 1024)  # 200 KB
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        monkeypatch.setenv("HERMES_BACKUP_MAX_FILE_MB", "0.05")  # ~50 KB cap
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        out_zip = tmp_path / "backup.zip"
+        run_backup(Namespace(output=str(out_zip)))
+
+        with zipfile.ZipFile(out_zip) as zf:
+            names = zf.namelist()
+        assert "config.yaml" in names
+        assert "profiles/p/small.txt" in names
+        assert "profiles/p/blob.bin" not in names  # over the cap -> skipped
+
+    def test_cap_disabled_includes_large(self, tmp_path, monkeypatch):
+        from hermes_cli.backup import run_backup
+
+        home = tmp_path / ".hermes"
+        home.mkdir()
+        self._tree_with_big_file(home, big_bytes=200 * 1024)
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        monkeypatch.setenv("HERMES_BACKUP_MAX_FILE_MB", "0")  # disabled
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        out_zip = tmp_path / "backup.zip"
+        run_backup(Namespace(output=str(out_zip)))
+
+        with zipfile.ZipFile(out_zip) as zf:
+            assert "profiles/p/blob.bin" in zf.namelist()
+
+    def test_default_cap_value(self, monkeypatch):
+        import hermes_cli.backup as backup_mod
+
+        monkeypatch.delenv("HERMES_BACKUP_MAX_FILE_MB", raising=False)
+        assert (
+            backup_mod._max_backup_file_bytes()
+            == backup_mod._DEFAULT_MAX_FILE_MB * 1024 * 1024
+        )
+
+    def test_invalid_env_falls_back_to_default(self, monkeypatch):
+        import hermes_cli.backup as backup_mod
+
+        monkeypatch.setenv("HERMES_BACKUP_MAX_FILE_MB", "not-a-number")
+        assert (
+            backup_mod._max_backup_file_bytes()
+            == backup_mod._DEFAULT_MAX_FILE_MB * 1024 * 1024
+        )
