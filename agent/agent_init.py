@@ -304,6 +304,7 @@ def init_agent(
     agent.memory_notifications = "on"  # Memory update notifications: "off", "on", "verbose"
     agent.skip_context_files = skip_context_files
     agent.load_soul_identity = load_soul_identity
+    agent.skip_memory = skip_memory            # was missing: getattr default kept fast-path dead
     agent.pass_session_id = pass_session_id
     agent._credential_pool = credential_pool
     agent.log_prefix_chars = log_prefix_chars
@@ -758,6 +759,18 @@ def init_agent(
             if agent.provider == "copilot-acp":
                 client_kwargs["command"] = agent.acp_command
                 client_kwargs["args"] = agent.acp_args
+            elif agent.provider == "claude-code-acp":
+                # Inject transport overrides, sandbox/session context so
+                # the ACP client honours user-supplied acp_command/acp_args
+                # (e.g. /custom/npx, --debug, --model opus) and can build
+                # per-session sandboxes with the agent's persona, memory,
+                # platform, and available tools.
+                client_kwargs["acp_command"] = agent.acp_command
+                client_kwargs["acp_args"] = agent.acp_args
+                client_kwargs["agent"] = agent
+                client_kwargs["hermes_home"] = get_hermes_home()
+                client_kwargs["hermes_session_id"] = getattr(agent, "session_id", None)
+                client_kwargs["platform"] = getattr(agent, "platform", None)
             effective_base = base_url
             if base_url_host_matches(effective_base, "openrouter.ai"):
                 from agent.auxiliary_client import build_or_headers
