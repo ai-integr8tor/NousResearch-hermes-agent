@@ -1026,11 +1026,9 @@ _JSON_MEDIA_TOOL_PATH_FIELDS = ("host_image", "image", "agent_visible_image")
 # pattern so a bare ``MEDIA:`` token in prose (no deliverable extension) is never
 # auto-appended. Kept local to the auto-append path; the producer-tool allowlist
 # below is the primary guard, this is the secondary precision guard.
+from gateway.platforms.base import _MEDIA_EXT_ALTERNATION  # noqa: E402
 _TOOL_MEDIA_RE = re.compile(
-    r'MEDIA:((?:[A-Za-z]:[/\\]|/|~\/)\S+\.(?:png|jpe?g|gif|webp|'
-    r'mp4|mov|avi|mkv|webm|ogg|opus|mp3|wav|m4a|'
-    r'flac|epub|pdf|zip|rar|7z|docx?|xlsx?|pptx?|'
-    r'txt|csv|apk|ipa))',
+    r'MEDIA:((?:[A-Za-z]:[/\\]|/|~\/)\S+\.(?:' + _MEDIA_EXT_ALTERNATION + r'))',
     re.IGNORECASE,
 )
 
@@ -15543,10 +15541,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     _hc = _hm.get("content", "")
                     if "MEDIA:" in _hc:
                         _TOOL_MEDIA_RE = re.compile(
-                            r'MEDIA:((?:[A-Za-z]:[/\\]|/|~\/)\S+\.(?:png|jpe?g|gif|webp|'
-                            r'mp4|mov|avi|mkv|webm|ogg|opus|mp3|wav|m4a|'
-                            r'flac|epub|pdf|zip|rar|7z|docx?|xlsx?|pptx?|'
-                            r'txt|csv|apk|ipa))',
+                            r'MEDIA:((?:[A-Za-z]:[/\\]|/|~\/)\S+\.(?:' + _MEDIA_EXT_ALTERNATION + r'))',
                             re.IGNORECASE
                         )
                         for _match in _TOOL_MEDIA_RE.finditer(_hc):
