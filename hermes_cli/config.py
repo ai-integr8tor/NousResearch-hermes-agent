@@ -1514,6 +1514,7 @@ DEFAULT_CONFIG = {
             "api_key": "",
             "timeout": 600,
             "extra_body": {},
+            "reasoning_effort": "",
         },
         # Monitor — urgency/importance classifier used by the important-mail
         # monitor catalog automation (cron/scripts/classify_items.py). Scores
@@ -2787,7 +2788,7 @@ DEFAULT_CONFIG = {
 
 
     # Config schema version - bump this when adding new required fields
-    "_config_version": 30,
+    "_config_version": 31,
 }
 
 # =============================================================================

@@ -1293,6 +1293,7 @@ def test_curator_slot_is_canonical_aux_task():
     assert slot["provider"] == "auto"
     assert slot["model"] == ""
     assert slot["timeout"] > 0, "curator timeout should be set (reviews run long)"
+    assert slot["reasoning_effort"] == ""
 
     # 2. hermes_cli/main.py _AUX_TASKS — CLI picker
     aux_keys = {k for k, _name, _desc in _AUX_TASKS}

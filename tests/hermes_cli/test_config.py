@@ -670,6 +670,12 @@ class TestConfigVersionDetection:
             assert check_config_version() == (latest, latest)
 
 
+class TestCuratorReasoningEffortConfig:
+    def test_default_config_exposes_curator_reasoning_effort(self):
+        slot = DEFAULT_CONFIG["auxiliary"]["curator"]
+        assert slot["reasoning_effort"] == ""
+
+
 class TestAnthropicTokenMigration:
     """Test that config version 8→9 clears ANTHROPIC_TOKEN."""
 
