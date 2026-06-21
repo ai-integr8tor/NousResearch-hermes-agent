@@ -69,6 +69,12 @@ def test_resume_pending_is_cleared_only_after_successful_turn():
     assert _should_clear_resume_pending_after_turn({"failed": True}) is False
     assert _should_clear_resume_pending_after_turn({"partial": True}) is False
     assert _should_clear_resume_pending_after_turn({"error": "boom"}) is False
+    assert _should_clear_resume_pending_after_turn(
+        {"final_response": "⚠️ Provider authentication failed: credential_pool_exhausted"}
+    ) is False
+    assert _should_clear_resume_pending_after_turn(
+        {"final_response": "⏱️ The model provider is rate-limiting requests. Please wait."}
+    ) is False
 
 
 def _make_source(platform=Platform.TELEGRAM, chat_id="123", user_id="u1"):
@@ -350,6 +356,38 @@ class TestGetOrCreateResumePending:
         assert second.auto_reset_reason is None
         # Flag is NOT cleared on read — only on successful turn completion.
         assert second.resume_pending is True
+
+    def test_existing_session_refreshes_origin_message_id(self, tmp_path):
+        """The persisted origin must track the latest triggering message id."""
+        store = _make_store(tmp_path)
+        source = _make_source()
+        source.message_id = "first-message"
+        first = store.get_or_create_session(source)
+
+        later_source = _make_source()
+        later_source.message_id = "latest-message"
+        second = store.get_or_create_session(later_source)
+
+        assert second.session_id == first.session_id
+        assert second.origin is not None
+        assert second.origin.message_id == "latest-message"
+
+    def test_resume_pending_refreshes_origin_message_id_before_return(self, tmp_path):
+        """The resume_pending early-return path must not keep a stale anchor."""
+        store = _make_store(tmp_path)
+        source = _make_source()
+        source.message_id = "first-message"
+        first = store.get_or_create_session(source)
+        store.mark_resume_pending(first.session_key)
+
+        later_source = _make_source()
+        later_source.message_id = "latest-message"
+        second = store.get_or_create_session(later_source)
+
+        assert second.session_id == first.session_id
+        assert second.resume_pending is True
+        assert second.origin is not None
+        assert second.origin.message_id == "latest-message"
 
     def test_suspended_still_creates_new_session(self, tmp_path):
         """Regression guard — suspended must still force a clean slate."""
@@ -959,6 +997,93 @@ async def test_startup_auto_resume_schedules_fresh_pending_sessions():
 
 
 @pytest.mark.asyncio
+async def test_startup_auto_resume_uses_last_user_message_id_as_reply_anchor():
+    """Synthetic resume turns must not reply to stale SessionEntry.origin ids."""
+    runner, adapter = make_restart_runner()
+    source = SessionSource(
+        platform=Platform.TELEGRAM,
+        chat_id="resume-chat",
+        chat_type="dm",
+        user_id="u1",
+        thread_id="topic-1",
+        message_id="old-origin-anchor",
+    )
+    pending_entry = SessionEntry(
+        session_key="agent:main:telegram:dm:resume-chat:topic-1",
+        session_id="sid",
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        origin=source,
+        platform=Platform.TELEGRAM,
+        chat_type="dm",
+        resume_pending=True,
+        resume_reason="restart_timeout",
+        last_resume_marked_at=datetime.now(),
+    )
+    runner.session_store._entries = {pending_entry.session_key: pending_entry}
+    runner.session_store.load_transcript = MagicMock(return_value=[
+        {
+            "role": "user",
+            "content": "finish this",
+            "message_id": "fresh-user-anchor",
+            "timestamp": time.time() - 20,
+        },
+        {"role": "tool", "content": "partial result", "timestamp": time.time() - 10},
+    ])
+    adapter.handle_message = AsyncMock()
+
+    scheduled = runner._schedule_resume_pending_sessions()
+    await asyncio.sleep(0)
+
+    assert scheduled == 1
+    event = adapter.handle_message.await_args.args[0]
+    assert event.internal is True
+    assert event.message_id == "fresh-user-anchor"
+    assert event.reply_to_message_id == "fresh-user-anchor"
+    assert event.source.message_id == "fresh-user-anchor"
+
+
+@pytest.mark.asyncio
+async def test_startup_auto_resume_clears_stale_origin_reply_anchor_when_no_user_anchor():
+    runner, adapter = make_restart_runner()
+    source = SessionSource(
+        platform=Platform.TELEGRAM,
+        chat_id="resume-chat",
+        chat_type="dm",
+        user_id="u1",
+        thread_id="topic-1",
+        message_id="old-origin-anchor",
+    )
+    pending_entry = SessionEntry(
+        session_key="agent:main:telegram:dm:resume-chat:topic-1",
+        session_id="sid",
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        origin=source,
+        platform=Platform.TELEGRAM,
+        chat_type="dm",
+        resume_pending=True,
+        resume_reason="restart_timeout",
+        last_resume_marked_at=datetime.now(),
+    )
+    runner.session_store._entries = {pending_entry.session_key: pending_entry}
+    runner.session_store.load_transcript = MagicMock(return_value=[
+        {"role": "user", "content": "finish this", "timestamp": time.time() - 20},
+        {"role": "tool", "content": "partial result", "timestamp": time.time() - 10},
+    ])
+    adapter.handle_message = AsyncMock()
+
+    scheduled = runner._schedule_resume_pending_sessions()
+    await asyncio.sleep(0)
+
+    assert scheduled == 1
+    event = adapter.handle_message.await_args.args[0]
+    assert event.message_id is None
+    assert event.reply_to_message_id is None
+    assert event.source.message_id is None
+
+
+@pytest.mark.asyncio
 async def test_startup_auto_resume_includes_crash_recovery():
     """Crash-recovered sessions (reason=restart_interrupted) are also auto-resumed.
 
@@ -1147,12 +1272,12 @@ async def test_reconnect_reschedules_pending_after_late_platform_connect():
     runner.session_store._entries = {pending_entry.session_key: pending_entry}
     adapter.handle_message = AsyncMock()
 
-    # Platform was not connected at gateway startup → session skipped.
+    # Platform was not connected at gateway startup -> session skipped.
     runner.adapters = {}
     assert runner._schedule_resume_pending_sessions() == 0
     adapter.handle_message.assert_not_called()
 
-    # Platform reconnects → its pending session is retried.
+    # Platform reconnects -> its pending session is retried.
     runner.adapters = {Platform.TELEGRAM: adapter}
     scheduled = runner._schedule_resume_pending_sessions(platform=Platform.TELEGRAM)
     await asyncio.sleep(0)
@@ -1244,6 +1369,278 @@ async def test_auto_resume_skips_sessions_with_running_agent():
     scheduled = runner._schedule_resume_pending_sessions(platform=Platform.TELEGRAM)
 
     assert scheduled == 0
+    adapter.handle_message.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_startup_auto_resume_skips_empty_bound_dm_topic_transcript():
+    """Do not synthesize a blank turn for a stale Telegram DM-topic binding."""
+    runner, adapter = make_restart_runner()
+    source = make_restart_source(
+        chat_id="topic-chat",
+        chat_type="dm",
+        thread_id="topic-1",
+    )
+    pending_entry = SessionEntry(
+        session_key="agent:main:telegram:dm:topic-chat:topic-1",
+        session_id="fresh-empty-session",
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        origin=source,
+        platform=Platform.TELEGRAM,
+        chat_type="dm",
+        resume_pending=True,
+        resume_reason="restart_timeout",
+        last_resume_marked_at=datetime.now(),
+    )
+    runner.session_store._entries = {pending_entry.session_key: pending_entry}
+    runner.session_store.clear_resume_pending = MagicMock(return_value=True)
+    runner._session_db = MagicMock()
+    runner._session_db.get_telegram_topic_binding.return_value = {
+        "session_id": "bound-empty-session",
+    }
+    runner._session_db.message_count.return_value = 0
+    adapter.handle_message = AsyncMock()
+
+    scheduled = runner._schedule_resume_pending_sessions()
+
+    assert scheduled == 0
+    adapter.handle_message.assert_not_called()
+    runner.session_store.load_transcript.assert_called_once_with(
+        "bound-empty-session"
+    )
+    runner._session_db.message_count.assert_called_once_with("bound-empty-session")
+    runner.session_store.clear_resume_pending.assert_called_once_with(
+        pending_entry.session_key
+    )
+
+
+@pytest.mark.asyncio
+async def test_startup_auto_resume_uses_bound_dm_topic_transcript_when_present():
+    runner, adapter = make_restart_runner()
+    source = make_restart_source(
+        chat_id="topic-chat",
+        chat_type="dm",
+        thread_id="topic-1",
+    )
+    pending_entry = SessionEntry(
+        session_key="agent:main:telegram:dm:topic-chat:topic-1",
+        session_id="fresh-session",
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        origin=source,
+        platform=Platform.TELEGRAM,
+        chat_type="dm",
+        resume_pending=True,
+        resume_reason="restart_timeout",
+        last_resume_marked_at=datetime.now(),
+    )
+    runner.session_store._entries = {pending_entry.session_key: pending_entry}
+    runner._session_db = MagicMock()
+    runner._session_db.get_telegram_topic_binding.return_value = {
+        "session_id": "bound-session",
+    }
+    runner._session_db.message_count.return_value = 3
+    adapter.handle_message = AsyncMock()
+
+    scheduled = runner._schedule_resume_pending_sessions()
+    await asyncio.sleep(0)
+
+    assert scheduled == 1
+    runner.session_store.load_transcript.assert_called_once_with("bound-session")
+    runner._session_db.message_count.assert_called_once_with("bound-session")
+    adapter.handle_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_startup_auto_resume_skips_completed_reply_after_marker():
+    """Do not synthesize a blank resume turn after a completed drain reply.
+
+    The gateway marks active sessions resume_pending before waiting for drain.
+    If the agent finishes and persists a normal assistant answer during that
+    window, startup recovery must clear the stale marker instead of repeating
+    the just-delivered response.
+    """
+    runner, adapter = make_restart_runner()
+    marker = datetime.now()
+    source = make_restart_source(chat_id="done-chat", chat_type="dm", thread_id="topic-1")
+    session_key = "agent:main:telegram:dm:done-chat:topic-1"
+    pending_entry = SessionEntry(
+        session_key=session_key,
+        session_id="sid",
+        created_at=marker - timedelta(seconds=10),
+        updated_at=marker,
+        origin=source,
+        platform=Platform.TELEGRAM,
+        chat_type="dm",
+        resume_pending=True,
+        resume_reason="restart_timeout",
+        last_resume_marked_at=marker,
+    )
+    runner.session_store._entries = {session_key: pending_entry}
+    runner.session_store.clear_resume_pending = MagicMock(return_value=True)
+    runner._session_db = MagicMock()
+    runner._session_db.get_telegram_topic_binding.return_value = None
+    runner._session_db.message_count.return_value = 2
+    runner._session_db.get_messages.return_value = [
+        {
+            "role": "user",
+            "content": "question",
+            "timestamp": (marker - timedelta(seconds=5)).timestamp(),
+        },
+        {
+            "role": "assistant",
+            "content": "completed answer",
+            "timestamp": (marker + timedelta(seconds=1)).timestamp(),
+        },
+    ]
+    adapter.handle_message = AsyncMock()
+
+    scheduled = runner._schedule_resume_pending_sessions()
+
+    assert scheduled == 0
+    runner._session_db.get_messages.assert_called_once_with("sid")
+    runner.session_store.clear_resume_pending.assert_called_once_with(session_key)
+    adapter.handle_message.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_startup_auto_resume_keeps_unfinished_tool_tail_after_marker():
+    """A post-marker interrupted tool tail is still eligible for recovery."""
+    runner, adapter = make_restart_runner()
+    marker = datetime.now()
+    source = make_restart_source(chat_id="tool-chat")
+    session_key = "agent:main:telegram:dm:tool-chat"
+    pending_entry = SessionEntry(
+        session_key=session_key,
+        session_id="sid",
+        created_at=marker - timedelta(seconds=10),
+        updated_at=marker,
+        origin=source,
+        platform=Platform.TELEGRAM,
+        chat_type="dm",
+        resume_pending=True,
+        resume_reason="restart_timeout",
+        last_resume_marked_at=marker,
+    )
+    runner.session_store._entries = {session_key: pending_entry}
+    runner._session_db = MagicMock()
+    runner._session_db.get_telegram_topic_binding.return_value = None
+    runner._session_db.message_count.return_value = 2
+    runner._session_db.get_messages.return_value = [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{"id": "c1"}],
+            "timestamp": (marker - timedelta(seconds=1)).timestamp(),
+        },
+        {
+            "role": "tool",
+            "content": '{"output": "[Command interrupted]", "exit_code": 130}',
+            "timestamp": (marker + timedelta(seconds=1)).timestamp(),
+        },
+    ]
+    adapter.handle_message = AsyncMock()
+
+    scheduled = runner._schedule_resume_pending_sessions()
+    await asyncio.sleep(0)
+
+    assert scheduled == 1
+    adapter.handle_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_startup_auto_resume_skips_visible_reply_even_with_later_tool_tail():
+    """A visible post-marker reply means startup must not loop on blank resume."""
+    runner, adapter = make_restart_runner()
+    marker = datetime.now()
+    source = make_restart_source(chat_id="loop-chat")
+    session_key = "agent:main:telegram:dm:loop-chat"
+    pending_entry = SessionEntry(
+        session_key=session_key,
+        session_id="sid",
+        created_at=marker - timedelta(seconds=10),
+        updated_at=marker,
+        origin=source,
+        platform=Platform.TELEGRAM,
+        chat_type="dm",
+        resume_pending=True,
+        resume_reason="shutdown_timeout",
+        last_resume_marked_at=marker,
+    )
+    runner.session_store._entries = {session_key: pending_entry}
+    runner.session_store.clear_resume_pending = MagicMock(return_value=True)
+    runner._session_db = MagicMock()
+    runner._session_db.get_telegram_topic_binding.return_value = None
+    runner._session_db.message_count.return_value = 3
+    runner._session_db.get_messages.return_value = [
+        {
+            "role": "user",
+            "content": "",
+            "timestamp": (marker + timedelta(milliseconds=100)).timestamp(),
+        },
+        {
+            "role": "assistant",
+            "content": "checking service status",
+            "timestamp": (marker + timedelta(milliseconds=200)).timestamp(),
+        },
+        {
+            "role": "tool",
+            "content": '{"output": "service status"}',
+            "timestamp": (marker + timedelta(milliseconds=300)).timestamp(),
+        },
+    ]
+    adapter.handle_message = AsyncMock()
+
+    scheduled = runner._schedule_resume_pending_sessions()
+
+    assert scheduled == 0
+    runner.session_store.clear_resume_pending.assert_called_once_with(session_key)
+    adapter.handle_message.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_startup_auto_resume_skips_visible_tail_even_when_marker_is_newer():
+    """A refreshed marker must not hide that the transcript tail already answered."""
+    runner, adapter = make_restart_runner()
+    marker = datetime.now()
+    source = make_restart_source(chat_id="newer-marker-chat")
+    session_key = "agent:main:telegram:dm:newer-marker-chat"
+    pending_entry = SessionEntry(
+        session_key=session_key,
+        session_id="sid",
+        created_at=marker - timedelta(seconds=10),
+        updated_at=marker,
+        origin=source,
+        platform=Platform.TELEGRAM,
+        chat_type="dm",
+        resume_pending=True,
+        resume_reason="shutdown_timeout",
+        last_resume_marked_at=marker,
+    )
+    runner.session_store._entries = {session_key: pending_entry}
+    runner.session_store.clear_resume_pending = MagicMock(return_value=True)
+    runner._session_db = MagicMock()
+    runner._session_db.get_telegram_topic_binding.return_value = None
+    runner._session_db.message_count.return_value = 2
+    runner._session_db.get_messages.return_value = [
+        {
+            "role": "user",
+            "content": "",
+            "timestamp": (marker - timedelta(seconds=3)).timestamp(),
+        },
+        {
+            "role": "assistant",
+            "content": "already answered",
+            "timestamp": (marker - timedelta(milliseconds=200)).timestamp(),
+        },
+    ]
+    adapter.handle_message = AsyncMock()
+
+    scheduled = runner._schedule_resume_pending_sessions()
+
+    assert scheduled == 0
+    runner.session_store.clear_resume_pending.assert_called_once_with(session_key)
     adapter.handle_message.assert_not_called()
 
 
@@ -1409,6 +1806,43 @@ async def test_restart_home_channel_notification_not_deduped_across_threads():
     assert len(adapter.sent) == 2
     assert adapter.sent_calls[0][2] == {"thread_id": "topic-7"}
     assert adapter.sent_calls[1][2] is None
+
+
+@pytest.mark.asyncio
+async def test_shutdown_notification_prefers_live_cached_reply_anchor():
+    """Active-turn notices should reply to the current message, not old origin."""
+    runner, adapter = make_restart_runner()
+    runner._restart_requested = True
+    session_key = "agent:main:telegram:dm:999:topic-7"
+    runner.session_store._entries[session_key] = MagicMock(
+        origin=SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="999",
+            chat_type="dm",
+            user_id="u1",
+            thread_id="topic-7",
+            message_id="old-origin-anchor",
+        )
+    )
+    runner._cache_session_source(
+        session_key,
+        SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="999",
+            chat_type="dm",
+            user_id="u1",
+            thread_id="topic-7",
+            message_id="fresh-live-anchor",
+        ),
+    )
+    runner._running_agents[session_key] = MagicMock()
+
+    await runner._notify_active_sessions_of_shutdown()
+
+    assert len(adapter.sent_calls) == 1
+    metadata = adapter.sent_calls[0][2]
+    assert metadata["thread_id"] == "topic-7"
+    assert metadata["telegram_reply_to_message_id"] == "fresh-live-anchor"
 
 
 @pytest.mark.asyncio
