@@ -5971,6 +5971,15 @@ def _error_fingerprint(error_text: str) -> str:
     return fp.lower().strip()
 
 
+_PROTOCOL_REPROMPT_COMMENT = (
+    "⚠️ Your previous attempt ended without calling kanban_complete or "
+    "kanban_block. You MUST call exactly one of them before finishing. If the "
+    "deliverables already exist and all acceptance criteria pass, call "
+    "kanban_complete with a summary; if something still blocks completion, call "
+    "kanban_block with the reason."
+)
+
+
 def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     """Reclaim ``running`` tasks whose worker PID is no longer alive.
 
@@ -5986,9 +5995,14 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     When the reap registry shows the worker exited cleanly (rc=0) but
     the task was still ``running`` in the DB, treat it as a protocol
     violation (worker answered conversationally without calling
-    ``kanban_complete`` / ``kanban_block``) and trip the circuit breaker
-    on the first occurrence — retrying a worker whose CLI keeps
-    returning 0 without a terminal transition just loops forever.
+    ``kanban_complete`` / ``kanban_block``). The FIRST such violation does
+    NOT trip the breaker immediately: it counts toward the normal
+    consecutive-failure limit (not the trip-on-1 path), so the task is
+    re-queued for one more attempt and a re-prompt comment is posted telling
+    the next worker to finalize — local models routinely drop the closing
+    call. A repeat offence then blocks, and the counter resets on a
+    successful completion, so a worker that keeps returning 0 can't loop
+    forever.
 
     When the reap registry shows the worker exited with the rate-limit
     sentinel (``KANBAN_RATE_LIMIT_EXIT_CODE``), the worker bailed on a
@@ -6150,13 +6164,28 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                 conn, tid,
                 error=error_text,
                 outcome="crashed",
-                failure_limit=1 if (protocol_violation or is_systemic) else None,
+                # A protocol violation (clean rc=0 exit, no terminal call) no
+                # longer trips on the first occurrence — local models often
+                # drop the closing kanban_complete/kanban_block call. Fall
+                # through to the normal consecutive-failure limit so the worker
+                # gets one re-prompted retry (comment below) and only a repeat
+                # offence blocks; the counter resets on success. A genuinely
+                # systemic crash still trips at once.
+                failure_limit=1 if is_systemic else None,
                 release_claim=False,
                 end_run=False,
                 event_payload_extra={"pid": pid, "claimer": claimer},
             )
             if tripped:
                 auto_blocked.append(tid)
+            elif protocol_violation:
+                # Re-queued for one more attempt — tell the next worker
+                # explicitly to finalize (the dispatched prompt includes card
+                # comments). Best-effort; never break dispatch on it.
+                try:
+                    add_comment(conn, tid, "dispatcher", _PROTOCOL_REPROMPT_COMMENT)
+                except Exception as exc:
+                    _log.warning("protocol re-prompt comment failed for %s: %s", tid, exc)
     # Stash auto-blocked ids on the function for the dispatch loop to pick up.
     # Keeps the public return type (``list[str]``) stable for direct callers
     # and tests that destructure the result; ``dispatch_once`` reads this

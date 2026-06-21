@@ -1224,8 +1224,10 @@ def test_kanban_guidance_in_worker_prompt(monkeypatch, tmp_path):
 
 
 def test_kanban_guidance_prompt_size_bounded(monkeypatch, tmp_path):
-    """Sanity: the guidance block is under 4 KB so it doesn't blow
-    up the cached prompt."""
+    """Sanity: the guidance block stays bounded so it doesn't blow up the
+    cached prompt. Ceiling is ~4.5 KB since adding the explicit terminal-call
+    rule (every turn ends with kanban_complete/kanban_block) — local models
+    drop the closing call without it, which costs far more than the bytes."""
     monkeypatch.setenv("HERMES_KANBAN_TASK", "t_fake")
     home = tmp_path / ".hermes"
     home.mkdir()
@@ -1234,7 +1236,7 @@ def test_kanban_guidance_prompt_size_bounded(monkeypatch, tmp_path):
     monkeypatch.setattr(_P, "home", lambda: tmp_path)
 
     from agent.prompt_builder import KANBAN_GUIDANCE
-    assert 1_500 < len(KANBAN_GUIDANCE) < 4_096, (
+    assert 1_500 < len(KANBAN_GUIDANCE) < 4_608, (
         f"KANBAN_GUIDANCE is {len(KANBAN_GUIDANCE)} chars — too short (missing?) or too long"
     )
 

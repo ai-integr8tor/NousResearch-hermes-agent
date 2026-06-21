@@ -788,6 +788,45 @@ def test_detect_crashed_workers_isolated_failure_normal_retry(
             )
 
 
+def test_detect_crashed_workers_protocol_violation_reprompts_then_blocks(
+    kanban_home, monkeypatch,
+):
+    """A clean rc=0 exit without a terminal call is re-prompted once (re-queued
+    + a reminder comment) and only blocks on the repeat — local models routinely
+    drop the closing kanban_complete/kanban_block call, so the first miss must
+    not silently burn a breaker slot."""
+    import hermes_cli.kanban_db as _kb
+
+    monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: False)
+    monkeypatch.setattr(_kb, "_classify_worker_exit", lambda _pid: ("clean_exit", 0))
+
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="proto", assignee="a")
+        host = _kb._claimer_id().split(":", 1)[0]
+
+        def _set_running(pid):
+            conn.execute(
+                "UPDATE tasks SET status='running', worker_pid=?, claim_lock=? "
+                "WHERE id=?",
+                (pid, f"{host}:w", tid),
+            )
+            conn.commit()
+
+        # First violation → re-queued (NOT blocked) + a re-prompt comment.
+        _set_running(91001)
+        kb.detect_crashed_workers(conn)
+        assert kb.get_task(conn, tid).status == "ready", "first violation must re-queue"
+        assert any(
+            "kanban_complete or kanban_block" in c.body
+            for c in kb.list_comments(conn, tid)
+        ), "expected a re-prompt comment after the first protocol violation"
+
+        # Repeat violation → now blocks.
+        _set_running(91002)
+        kb.detect_crashed_workers(conn)
+        assert kb.get_task(conn, tid).status == "blocked", "repeat violation must block"
+
+
 def test_detect_crashed_workers_skips_freshly_claimed_tasks(
     kanban_home, monkeypatch,
 ):
