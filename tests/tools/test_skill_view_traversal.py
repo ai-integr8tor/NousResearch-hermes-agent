@@ -27,9 +27,9 @@ def fake_skills(tmp_path):
     (refs / "api.md").write_text("API docs here")
 
     # Create a sensitive file outside skills dir (simulating .env)
-    (tmp_path / ".env").write_text("SECRET_API_KEY=sk-do-not-leak")
+    (tmp_path / ".env").write_text("SECRET_API_KEY=***")
 
-    with patch("tools.skills_tool.SKILLS_DIR", skills_dir):
+    with patch("tools.skills_tool.get_hermes_home", return_value=tmp_path):
         yield {"skills_dir": skills_dir, "skill_dir": skill_dir, "tmp_path": tmp_path}
 
 
