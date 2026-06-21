@@ -119,6 +119,7 @@ def setup_module(monkeypatch, tmp_path):
     monkeypatch.setattr(module, "CLIENT_SECRET_PATH", tmp_path / "google_client_secret.json")
     monkeypatch.setattr(module, "TOKEN_PATH", tmp_path / "google_token.json")
     monkeypatch.setattr(module, "PENDING_AUTH_PATH", tmp_path / "google_oauth_pending.json", raising=False)
+    monkeypatch.setattr(module.gauth, "hermes_home", lambda: tmp_path)
 
     client_secret = {
         "installed": {
@@ -146,6 +147,21 @@ class TestGetAuthUrl:
         flow = FakeFlow.created[-1]
         assert flow.autogenerate_code_verifier is True
         assert flow.authorization_kwargs == {"access_type": "offline", "prompt": "consent"}
+
+
+class TestAuthContextStorePrecedence:
+    def test_store_backed_default_ignores_stale_legacy_files(self, setup_module):
+        setup_module.CLIENT_SECRET_PATH.write_text(json.dumps({"installed": {"client_id": "legacy-client"}}))
+        setup_module.TOKEN_PATH.write_text(json.dumps({"token": "legacy-token"}))
+        setup_module.PENDING_AUTH_PATH.write_text(json.dumps({"state": "legacy-state"}))
+
+        setup_module.gauth.set_client_secret("default", {"installed": {"client_id": "store-client"}})
+        setup_module.gauth.set_token_payload("default", {"token": "store-token"})
+        setup_module.gauth.set_pending_auth("default", {"state": "store-state"})
+
+        assert setup_module._client_secret_payload("default")["installed"]["client_id"] == "store-client"
+        assert setup_module._token_payload("default")["token"] == "store-token"
+        assert setup_module._pending_payload("default")["state"] == "store-state"
 
 
 class TestExchangeAuthCode:
