@@ -4176,6 +4176,7 @@ class BasePlatformAdapter(ABC):
             await self._stop_typing_refresh(
                 event.source.chat_id,
                 typing_task,
+                metadata=_thread_metadata,
             )
         
         try:
