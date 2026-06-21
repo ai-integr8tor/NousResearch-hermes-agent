@@ -98,10 +98,15 @@ JUDGE_SYSTEM_PROMPT = (
     "agent's most recent response. Your only job is to decide whether "
     "the goal is fully satisfied based on that response.\n\n"
     "A goal is DONE only when:\n"
-    "- The response explicitly confirms the goal was completed, OR\n"
     "- The response clearly shows the final deliverable was produced, OR\n"
-    "- The response explains the goal is unachievable / blocked / needs "
-    "user input (treat this as DONE with reason describing the block).\n\n"
+    "- The response includes concrete verification/evidence that every "
+    "required part was completed.\n\n"
+    "A goal is NOT done when the agent merely summarizes partial work, "
+    "apologizes that the task is too long/large, says it cannot finish, "
+    "or asks the user to continue later. Treat those as CONTINUE.\n"
+    "If the response identifies a real external blocker requiring user action "
+    "(for example missing credentials, missing approval, unavailable data), "
+    "treat it as DONE only when the blocker is specific and actionable.\n\n"
     "Otherwise the goal is NOT done — CONTINUE.\n\n"
     "Reply ONLY with a single JSON object on one line:\n"
     '{\"done\": <true|false>, \"reason\": \"<one-sentence rationale>\"}'
@@ -293,6 +298,58 @@ def _truncate(text: str, limit: int) -> str:
 
 
 _JSON_OBJECT_RE = re.compile(r"\{.*?\}", re.DOTALL)
+
+# Model-backed judges can be overly credulous when the agent itself says it is
+# stopping early ("sorry, this is too long", "I can't complete this here").
+# Goal Mode's core promise is stricter than ordinary chat: an apology/summary is
+# not completion. This deterministic backstop catches high-signal surrender
+# phrasing before a "done" verdict can close the loop, while leaving concrete
+# completions and actionable external blockers to the judge.
+_PREMATURE_STOP_PATTERNS = [
+    re.compile(pattern, re.IGNORECASE | re.DOTALL)
+    for pattern in (
+        r"\b(?:can't|cannot|unable\s+to)\s+(?:complete|finish)\b.{0,160}\b(?:whole|entire|full|all\s+of\s+the|all\s+of\s+it|whole\s+thing)\b",
+        r"\b(?:can't|cannot|unable\s+to)\s+(?:complete|finish)\b.{0,80}\b(?:this|it|task|goal|request)\b.{0,80}\b(?:here|in\s+this\s+response|in\s+one\s+response|continue\s+later|summary|partial)\b",
+        r"\b(?:can't|cannot|unable\s+to)\s+(?:complete|finish)\b.{0,80}\bbecause\b.{0,120}\b(?:need\s+more\s+time|no\s+access|need\s+access|lack\s+permission|lacks\s+permission|need\s+permission)\b",
+        r"\b(?:task|goal|request)\s+is\s+(?:too\s+)?(?:long|large|big|broad|complex)\b.{0,160}\b(?:can't|cannot|unable|only\s+(?:provide|give)|summary|summari[sz]e)\b",
+        r"\b(?:only|just)\s+(?:provide|give)\s+(?:a\s+)?summary\b.{0,160}\b(?:instead\s+of\s+complet|what\s+i\s+tried|partial)\b",
+        r"\bhere(?:'s|\s+is)\s+(?:a\s+)?summary\s+of\s+what\s+i\s+tried\b",
+    )
+]
+
+_ACTIONABLE_BLOCKER_RE = re.compile(
+    r"\b(?:because|due\s+to)\b.{0,120}\b(?:missing|unavailable|no|lacks?|requires?)\b"
+    r".{0,120}\b(?:credential|api\s+key|token|private\s+api|secret|password|data|file|document|input|csv)\b"
+    r"|\b(?:please|need\s+you\s+to)\b.{0,120}\b(?:provide|approve|grant|upload)\b.{0,120}\b(?:credential|api\s+key|token|permission|approval|access|data|file|document|input|csv)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+
+_STRONG_COMPLETION_EVIDENCE_RE = re.compile(
+    r"\bdone:\b|\b(?:test|tests|pytest)\b.{0,80}\bpassed\b|\bverified\b.{0,80}\bpassed\b",
+    re.IGNORECASE | re.DOTALL,
+)
+
+_NEGATED_COMPLETION_EVIDENCE_RE = re.compile(
+    r"\b(?:no|zero|0)\s+(?:test|tests)?\s*passed\b|\b(?:failed|failing|failure|error)\b.{0,80}\bpassed\b",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _looks_like_premature_stop(last_response: str) -> bool:
+    """Return True when the assistant is obviously giving up, not finishing.
+
+    This targets surrender language rather than every apology. A concrete
+    completion or a specific user-action blocker should still be allowed to end
+    the loop when the judge says done.
+    """
+    text = (last_response or "").strip()
+    if not text:
+        return False
+    if _STRONG_COMPLETION_EVIDENCE_RE.search(text) and not _NEGATED_COMPLETION_EVIDENCE_RE.search(text):
+        return False
+    if _ACTIONABLE_BLOCKER_RE.search(text):
+        return False
+    return any(pattern.search(text) for pattern in _PREMATURE_STOP_PATTERNS)
 
 
 def _goal_judge_max_tokens() -> int:
@@ -655,6 +712,15 @@ class GoalManager:
         verdict, reason, parse_failed = judge_goal(
             state.goal, last_response, subgoals=state.subgoals or None
         )
+
+        if verdict == "done" and _looks_like_premature_stop(last_response):
+            verdict = "continue"
+            parse_failed = False
+            reason = (
+                "assistant response looked like a premature stop/apology, "
+                "not concrete goal completion"
+            )
+
         state.last_verdict = verdict
         state.last_reason = reason
 
