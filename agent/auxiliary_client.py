@@ -100,11 +100,30 @@ class _OpenAIProxy:
 OpenAI = _OpenAIProxy()  # module-level name, resolves lazily on call/isinstance
 
 from agent.credential_pool import load_pool
-from hermes_cli.config import get_hermes_home
+from hermes_cli.config import get_hermes_home, load_env
 from hermes_constants import OPENROUTER_BASE_URL
 from utils import base_url_host_matches, base_url_hostname, env_float, model_forces_max_completion_tokens, normalize_proxy_env_vars
 
 logger = logging.getLogger(__name__)
+
+
+def _get_env_prefer_dotenv(key: str) -> str:
+    """Resolve *key* from ``~/.hermes/.env`` (preferred) then ``os.environ``.
+
+    Mirrors :meth:`agent.credential_pool.CredentialPool._get_env_prefer_dotenv`
+    so the auxiliary client and the credential pool agree on the lookup
+    order. Without this, callers whose key only lives in ``~/.hermes/.env``
+    (written by ``hermes setup``) but not in their shell environment
+    receive an empty value here while the credential pool finds the same
+    key via the pool entry — causing a silent 401 ``Missing Authentication
+    header`` against OpenRouter (#47030).
+    """
+    try:
+        env_file = load_env() or {}
+    except Exception:
+        env_file = {}
+    val = (env_file.get(key) or os.environ.get(key) or "")
+    return str(val).strip()
 
 
 def _safe_isinstance(obj: Any, maybe_type: Any) -> bool:
@@ -1542,24 +1561,46 @@ def _resolve_api_key_provider() -> Tuple[Optional[OpenAI], Optional[str]]:
 
 
 
-def _try_openrouter(explicit_api_key: str = None, model: str = None) -> Tuple[Optional[OpenAI], Optional[str]]:
+def _try_openrouter(
+    explicit_api_key: str = None,
+    model: str = None,
+    *,
+    explicit_base_url: str = None,
+) -> Tuple[Optional[OpenAI], Optional[str]]:
+    """Build an OpenAI client for OpenRouter.
+
+    Lookup order for the API key:
+      1. ``explicit_api_key`` (caller-supplied override)
+      2. Credential pool entry, if any (covers ``hermes auth add openrouter``)
+      3. ``_get_env_prefer_dotenv("OPENROUTER_API_KEY")`` — prefers
+         ``~/.hermes/.env`` (written by ``hermes setup``) over ``os.environ``
+         so a key set via the setup wizard is visible to the auxiliary
+         client (#47030).
+
+    The base URL is taken from the pool entry's ``runtime_base_url`` if
+    present, otherwise from ``explicit_base_url`` (e.g. a user's
+    ``auxiliary.vision.base_url``), otherwise from the module constant
+    ``OPENROUTER_BASE_URL``.
+    """
     pool_present, entry = _select_pool_entry("openrouter")
     if pool_present:
         or_key = explicit_api_key or _pool_runtime_api_key(entry)
         if not or_key:
             _mark_provider_unhealthy("openrouter", ttl=60)
             return None, None
-        base_url = _pool_runtime_base_url(entry, OPENROUTER_BASE_URL) or OPENROUTER_BASE_URL
+        base_url = (_pool_runtime_base_url(entry, explicit_base_url or OPENROUTER_BASE_URL)
+                    or explicit_base_url or OPENROUTER_BASE_URL)
         logger.debug("Auxiliary client: OpenRouter via pool")
         return OpenAI(api_key=or_key, base_url=base_url,
                        default_headers=build_or_headers()), model or _OPENROUTER_MODEL
 
-    or_key = explicit_api_key or os.getenv("OPENROUTER_API_KEY")
+    or_key = explicit_api_key or _get_env_prefer_dotenv("OPENROUTER_API_KEY")
     if not or_key:
         _mark_provider_unhealthy("openrouter", ttl=60)
         return None, None
+    base_url = (explicit_base_url or OPENROUTER_BASE_URL).strip().rstrip("/")
     logger.debug("Auxiliary client: OpenRouter")
-    return OpenAI(api_key=or_key, base_url=OPENROUTER_BASE_URL,
+    return OpenAI(api_key=or_key, base_url=base_url,
                    default_headers=build_or_headers()), model or _OPENROUTER_MODEL
 
 
@@ -1571,7 +1612,7 @@ def _describe_openrouter_unavailable() -> str:
             return "OpenRouter credential pool has no usable entries (credentials may be exhausted)"
         if not _pool_runtime_api_key(entry):
             return "OpenRouter credential pool entry is missing a runtime API key"
-    if not str(os.getenv("OPENROUTER_API_KEY") or "").strip():
+    if not _get_env_prefer_dotenv("OPENROUTER_API_KEY"):
         return "OPENROUTER_API_KEY not set"
     return "no usable OpenRouter credentials found"
 
@@ -3595,7 +3636,10 @@ def resolve_provider_client(
 
     # ── OpenRouter ───────────────────────────────────────────
     if provider == "openrouter":
-        client, default = _try_openrouter(explicit_api_key=explicit_api_key)
+        client, default = _try_openrouter(
+            explicit_api_key=explicit_api_key,
+            explicit_base_url=explicit_base_url,
+        )
         if client is None:
             logger.warning(
                 "resolve_provider_client: openrouter requested but %s",

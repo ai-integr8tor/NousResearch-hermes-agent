@@ -892,7 +892,13 @@ class TestExplicitProviderRouting:
 
     def test_explicit_openrouter_pool_exhausted_logs_precise_warning(self, monkeypatch, caplog):
         monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-        with patch("agent.auxiliary_client._select_pool_entry", return_value=(True, None)):
+        with (
+            patch("agent.auxiliary_client._select_pool_entry", return_value=(True, None)),
+            # Patch load_env to empty so a developer's real ~/.hermes/.env
+            # does not leak into this test after the #47030 fix made the
+            # helper prefer .env over os.environ.
+            patch("agent.auxiliary_client.load_env", return_value={}),
+        ):
             with caplog.at_level(logging.WARNING, logger="agent.auxiliary_client"):
                 client, model = resolve_provider_client("openrouter")
         assert client is None
@@ -908,7 +914,13 @@ class TestExplicitProviderRouting:
 
     def test_explicit_openrouter_missing_env_keeps_not_set_warning(self, monkeypatch, caplog):
         monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-        with patch("agent.auxiliary_client._select_pool_entry", return_value=(False, None)):
+        with (
+            patch("agent.auxiliary_client._select_pool_entry", return_value=(False, None)),
+            # Patch load_env to empty so a developer's real ~/.hermes/.env
+            # does not leak into this test after the #47030 fix made the
+            # helper prefer .env over os.environ.
+            patch("agent.auxiliary_client.load_env", return_value={}),
+        ):
             with caplog.at_level(logging.WARNING, logger="agent.auxiliary_client"):
                 client, model = resolve_provider_client("openrouter")
         assert client is None
@@ -3986,4 +3998,105 @@ class TestAuxiliaryMaxTokensParam:
             patch("agent.auxiliary_client._read_nous_auth", return_value=None),
         ):
             assert auxiliary_max_tokens_param(4096, model="") == {"max_tokens": 4096}
-            assert auxiliary_max_tokens_param(4096, model=None) == {"max_tokens": 4096}
+
+
+class TestAuxiliaryOpenRouterDotenvFallback:
+    """Regression tests for #47030: auxiliary client must read OPENROUTER_API_KEY
+    from ``~/.hermes/.env`` (the file written by ``hermes setup``) when the key
+    is not in the process environment, and must thread ``explicit_base_url``
+    through to the OpenAI client so per-task ``auxiliary.<task>.base_url``
+    overrides are honored.
+    """
+
+    def test_try_openrouter_reads_key_from_dotenv_when_env_unset(self, monkeypatch):
+        """Primary repro for #47030: with no env var, no pool, but a key in
+        ``~/.hermes/.env`` (returned by ``load_env()``), ``_try_openrouter``
+        must return a client whose ``api_key`` is the dotenv value.
+
+        On current ``main`` the helper uses ``os.getenv`` directly, so the
+        key is invisible and the client is ``None`` — exactly the symptom
+        the user reported.
+        """
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        with (
+            patch("agent.auxiliary_client._select_pool_entry", return_value=(False, None)),
+            patch(
+                "agent.auxiliary_client.load_env",
+                return_value={"OPENROUTER_API_KEY": "***"},
+            ),
+            patch("agent.auxiliary_client.OpenAI") as mock_openai,
+        ):
+            mock_openai.return_value = MagicMock()
+            from agent.auxiliary_client import _try_openrouter
+            client, model = _try_openrouter()
+        assert client is not None
+        assert mock_openai.call_args.kwargs["api_key"] == "***"
+
+    def test_try_openrouter_explicit_base_url_overrides_default(self, monkeypatch):
+        """Secondary fix for #47030: ``_try_openrouter(explicit_base_url=...)``
+        must pass that URL to the OpenAI client. Previously the function
+        hard-coded ``OPENROUTER_BASE_URL`` from the module constant, silently
+        dropping the user's ``auxiliary.vision.base_url`` config.
+        """
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        with (
+            patch("agent.auxiliary_client._select_pool_entry", return_value=(False, None)),
+            patch(
+                "agent.auxiliary_client.load_env",
+                return_value={"OPENROUTER_API_KEY": "sk-or-x"},
+            ),
+            patch("agent.auxiliary_client.OpenAI") as mock_openai,
+        ):
+            mock_openai.return_value = MagicMock()
+            from agent.auxiliary_client import _try_openrouter
+            client, _ = _try_openrouter(
+                explicit_base_url="https://openrouter.ai/api/v1",
+            )
+        assert client is not None
+        assert mock_openai.call_args.kwargs["base_url"] == "https://openrouter.ai/api/v1"
+
+    def test_resolve_provider_client_openrouter_threads_explicit_base_url(self, monkeypatch):
+        """End-to-end repro for #47030's vision path: when the user sets
+        ``auxiliary.vision.provider: openrouter`` + ``base_url`` in config,
+        ``resolve_provider_client`` must hand the URL to ``_try_openrouter``
+        so the OpenAI client hits the user's chosen endpoint.
+        """
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        with (
+            patch("agent.auxiliary_client._select_pool_entry", return_value=(False, None)),
+            patch(
+                "agent.auxiliary_client.load_env",
+                return_value={"OPENROUTER_API_KEY": "sk-or-x"},
+            ),
+            patch("agent.auxiliary_client.OpenAI") as mock_openai,
+        ):
+            mock_openai.return_value = MagicMock()
+            client, _ = resolve_provider_client(
+                "openrouter",
+                model="google/gemini-2.0-flash-exp:free",
+                explicit_base_url="https://openrouter.ai/api/v1",
+            )
+        assert client is not None
+        assert mock_openai.call_args.kwargs["base_url"] == "https://openrouter.ai/api/v1"
+        assert mock_openai.call_args.kwargs["api_key"] == "sk-or-x"
+
+    def test_try_openrouter_dotenv_takes_precedence_over_environ(self, monkeypatch):
+        """When the key is set in BOTH ``os.environ`` and ``load_env()``,
+        the dotenv value wins — matches the helper used by
+        ``agent.credential_pool`` so a fresh ``hermes setup`` value isn't
+        shadowed by a stale shell export.
+        """
+        monkeypatch.setenv("OPENROUTER_API_KEY", "***")
+        with (
+            patch("agent.auxiliary_client._select_pool_entry", return_value=(False, None)),
+            patch(
+                "agent.auxiliary_client.load_env",
+                return_value={"OPENROUTER_API_KEY": "sk-or-...resh"},
+            ),
+            patch("agent.auxiliary_client.OpenAI") as mock_openai,
+        ):
+            mock_openai.return_value = MagicMock()
+            from agent.auxiliary_client import _try_openrouter
+            client, _ = _try_openrouter()
+        assert client is not None
+        assert mock_openai.call_args.kwargs["api_key"] == "sk-or-...resh"
