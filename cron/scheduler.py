@@ -2169,14 +2169,6 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
         if verbose:
             logger.info("%s - %s job(s) due", _hermes_now().strftime('%H:%M:%S'), len(due_jobs))
 
-        # Advance next_run_at for all recurring jobs FIRST, under the file lock,
-        # before any execution begins.  This preserves at-most-once semantics.
-        # For parallel jobs that are already running, advance_next_run keeps
-        # bumping next_run_at forward so the grace window never expires.
-        # mark_job_run() overwrites next_run_at on completion.
-        for job in due_jobs:
-            advance_next_run(job["id"])
-
         # Resolve max parallel workers: env var > config.yaml > unbounded.
         # Set HERMES_CRON_MAX_PARALLEL=1 to restore old serial behaviour.
         _max_workers: Optional[int] = None
@@ -2222,11 +2214,13 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
         _all_futures: list = []
 
         def _submit_with_guard(job: dict, pool: concurrent.futures.ThreadPoolExecutor):
-            """Submit a job fire-and-forget with the in-flight dedup guard.
+            """Advance and submit a due job with the in-flight dedup guard.
 
             Returns the future, or None if the job was skipped because a prior
-            tick's run of the same job is still in flight.  The running-set
-            membership is released in the worker's finally block.
+            tick's run of the same job is still in flight. Skipped jobs are
+            intentionally left due so manual triggers are not consumed without
+            execution or visible status. The running-set membership is released
+            in the worker's finally block.
             """
             job_id = job["id"]
             with _running_lock:
@@ -2234,16 +2228,25 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
                     logger.info("Job '%s' already running — skipping", job.get("name", job_id))
                     return None
                 _running_job_ids.add(job_id)
-            _ctx = contextvars.copy_context()
+            try:
+                # Advance only after the in-flight guard accepts the job, and
+                # still before the worker can start. mark_job_run() overwrites
+                # next_run_at on completion.
+                advance_next_run(job_id)
+                _ctx = contextvars.copy_context()
 
-            def _run_and_release(j=job, ctx=_ctx):
-                try:
-                    return ctx.run(_process_job, j)
-                finally:
-                    with _running_lock:
-                        _running_job_ids.discard(j["id"])
+                def _run_and_release(j=job, ctx=_ctx):
+                    try:
+                        return ctx.run(_process_job, j)
+                    finally:
+                        with _running_lock:
+                            _running_job_ids.discard(j["id"])
 
-            return pool.submit(_run_and_release)
+                return pool.submit(_run_and_release)
+            except Exception:
+                with _running_lock:
+                    _running_job_ids.discard(job_id)
+                raise
 
         # Sequential pass for env-mutating (workdir) jobs.
         # Queued to a persistent single-thread pool so they run one at a time

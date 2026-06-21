@@ -1306,6 +1306,41 @@ class TestRunJobSessionPersistence:
         assert error is None
         assert final_response == "all good"
 
+    def test_tick_does_not_advance_skipped_already_running_job(self, tmp_path):
+        """A stale/in-flight running guard must not consume a manual trigger.
+
+        When a due job is already present in ``_running_job_ids``, tick() skips
+        dispatch. It must leave ``next_run_at`` due instead of advancing it as
+        if the job ran.
+        """
+        from cron import scheduler as sched_mod
+        from cron.scheduler import tick
+
+        job = {
+            "id": "stale-running-job",
+            "name": "stale-running-test",
+            "prompt": "do something",
+            "schedule": "every 1h",
+            "enabled": True,
+            "next_run_at": "2020-01-01T00:00:00",
+            "deliver": "local",
+            "last_status": None,
+        }
+
+        sched_mod._running_job_ids.add(job["id"])
+        try:
+            with patch("cron.scheduler._hermes_home", tmp_path), \
+                 patch("cron.scheduler.get_due_jobs", return_value=[job]), \
+                 patch("cron.scheduler.advance_next_run") as mock_advance, \
+                 patch("cron.scheduler.run_job") as mock_run:
+                executed = tick(verbose=False)
+        finally:
+            sched_mod._running_job_ids.discard(job["id"])
+
+        assert executed == 0
+        mock_run.assert_not_called()
+        mock_advance.assert_not_called()
+
     def test_tick_marks_empty_response_as_error(self, tmp_path):
         """When run_job returns success=True but final_response is empty,
         tick() should mark the job as error so last_status != 'ok'.
