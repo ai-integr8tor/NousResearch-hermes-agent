@@ -23,6 +23,13 @@ logger = logging.getLogger(__name__)
 
 _EXPECTED_WRITE_ERRNOS = {errno.EACCES, errno.EPERM, errno.EROFS}
 
+
+def _normalize_path_input(filepath: str) -> str:
+    """Normalize common shell-escaped space sequences in file-tool paths."""
+    if not filepath or "\\ " not in filepath:
+        return filepath
+    return filepath.replace("\\ ", " ")
+
 # ---------------------------------------------------------------------------
 # Read-size guard: cap the character count returned to the model.
 # We're model-agnostic so we can't count tokens; characters are a safe proxy.
@@ -239,6 +246,7 @@ def _resolve_path_for_task(filepath: str, task_id: str = "default") -> Path:
     See :func:`_resolve_base_dir` for how the base is chosen. Absolute input
     paths are returned resolved-but-unanchored.
     """
+    filepath = _normalize_path_input(filepath)
     p = Path(filepath).expanduser()
     if p.is_absolute():
         return p.resolve()
@@ -261,6 +269,7 @@ def _path_resolution_warning(filepath: str, resolved: Path, task_id: str = "defa
     (no ``cd`` run yet) is warned on the very first write.
     """
     try:
+        filepath = _normalize_path_input(filepath)
         if Path(filepath).expanduser().is_absolute():
             return None
         workspace_root = _authoritative_workspace_root(task_id)
@@ -285,6 +294,7 @@ def _path_resolution_warning(filepath: str, resolved: Path, task_id: str = "defa
 
 def _is_blocked_device_path(path: str) -> bool:
     """Return True for concrete device/fd paths that can hang reads."""
+    path = _normalize_path_input(path)
     normalized = os.path.expanduser(path)
     if normalized in _BLOCKED_DEVICE_PATHS:
         return True
@@ -309,6 +319,7 @@ def _is_blocked_device(filepath: str) -> bool:
     they resolve to terminal-specific paths. Then check the resolved path so a
     workspace symlink to /dev/zero cannot bypass the guard.
     """
+    filepath = _normalize_path_input(filepath)
     normalized = os.path.expanduser(filepath)
     if _is_blocked_device_path(normalized):
         return True
@@ -352,6 +363,7 @@ def _get_hermes_config_resolved() -> str | None:
 
 def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None:
     """Return an error message if the path targets a sensitive system location."""
+    filepath = _normalize_path_input(filepath)
     try:
         resolved = str(_resolve_path_for_task(filepath, task_id))
     except (OSError, ValueError):
@@ -455,6 +467,7 @@ def _check_cross_profile_path(filepath: str, task_id: str = "default") -> str | 
     # Resolve via the task's cwd so a relative ``skills/foo/SKILL.md``
     # in a session that cd'd into ``~/.hermes/profiles/other/`` is
     # classified against the right base.
+    filepath = _normalize_path_input(filepath)
     try:
         resolved = str(_resolve_path_for_task(filepath, task_id))
     except (OSError, ValueError):
