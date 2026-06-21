@@ -1130,6 +1130,7 @@ CREATE TABLE IF NOT EXISTS kanban_notify_subs (
     thread_id     TEXT NOT NULL DEFAULT '',
     user_id       TEXT,
     notifier_profile TEXT,
+    trigger_agent INTEGER NOT NULL DEFAULT 0,
     created_at    INTEGER NOT NULL,
     last_event_id INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (task_id, platform, chat_id, thread_id)
@@ -1145,6 +1146,87 @@ CREATE INDEX IF NOT EXISTS idx_runs_task             ON task_runs(task_id, start
 CREATE INDEX IF NOT EXISTS idx_runs_status           ON task_runs(status);
 CREATE INDEX IF NOT EXISTS idx_attachments_task      ON task_attachments(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_notify_task           ON kanban_notify_subs(task_id);
+
+-- ---------------------------------------------------------------------------
+-- Shadow ACK delivery ledger (M1 root ACK).
+-- Durable, queryable records for terminal-state delivery without changing
+-- live notifier behavior. All writes are shadow-only; readers can join to
+-- kanban_notify_subs and task_events for a complete picture.
+-- ---------------------------------------------------------------------------
+
+-- Terminal work verdict recorded at completion time. Independent of whether
+-- the origin ACK/wake actually reached a target.
+CREATE TABLE IF NOT EXISTS ack_task_verdict (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id       TEXT NOT NULL,
+    run_id        INTEGER,
+    event_id      INTEGER,
+    verdict       TEXT,
+    status        TEXT,
+    summary_ref   TEXT,
+    summary_safe  TEXT,
+    created_at    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ack_task_verdict_task ON ack_task_verdict(task_id);
+
+-- Explicit subscription / origin_return path for a task. This shadows the
+-- existing kanban_notify_subs row at terminal time; it must NOT be inferred
+-- from prose body text.
+CREATE TABLE IF NOT EXISTS ack_subscription (
+    id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id                TEXT NOT NULL,
+    subscription_id        INTEGER,
+    platform               TEXT,
+    chat_id                TEXT,
+    thread_id              TEXT,
+    notifier_profile       TEXT,
+    desired_delivery_mode  TEXT,
+    active_wake_required   INTEGER NOT NULL DEFAULT 0,
+    operator_receipt_required INTEGER NOT NULL DEFAULT 0,
+    created_at             INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ack_subscription_task ON ack_subscription(task_id);
+
+-- Passive terminal delivery attempt (gateway notifier text/artifact send).
+CREATE TABLE IF NOT EXISTS ack_passive_delivery (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id         TEXT NOT NULL,
+    subscription_id INTEGER,
+    message_id      TEXT,
+    status          TEXT,
+    error_safe      TEXT,
+    correlation_id  TEXT,
+    created_at      INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ack_passive_delivery_task ON ack_passive_delivery(task_id);
+
+-- Active wake attempt (synthetic inbound triggered by terminal state).
+CREATE TABLE IF NOT EXISTS ack_active_wake (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id         TEXT NOT NULL,
+    subscription_id INTEGER,
+    triggered_agent INTEGER NOT NULL DEFAULT 0,
+    trigger_error   TEXT,
+    correlation_id  TEXT,
+    status          TEXT,
+    accepted_by_session INTEGER NOT NULL DEFAULT 0,
+    started_by_session  INTEGER NOT NULL DEFAULT 0,
+    target_session_key  TEXT,
+    created_at      INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ack_active_wake_task ON ack_active_wake(task_id);
+
+-- Operator receipt state for human-in-the-loop ACK tracking.
+CREATE TABLE IF NOT EXISTS ack_operator_receipt (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id      TEXT NOT NULL,
+    status       TEXT NOT NULL,
+    actor        TEXT,
+    actor_ref    TEXT,
+    correlation_id TEXT,
+    created_at   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ack_operator_receipt_task ON ack_operator_receipt(task_id);
 """
 
 
@@ -1703,6 +1785,21 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             conn, "tasks", "session_id", "session_id TEXT"
         )
 
+    notify_table_exists = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='kanban_notify_subs'"
+    ).fetchone() is not None
+    if notify_table_exists:
+        notify_cols = {
+            row["name"] for row in conn.execute("PRAGMA table_info(kanban_notify_subs)")
+        }
+        if "trigger_agent" not in notify_cols:
+            _add_column_if_missing(
+                conn,
+                "kanban_notify_subs",
+                "trigger_agent",
+                "trigger_agent INTEGER NOT NULL DEFAULT 0",
+            )
+
     # Indexes over additive ``tasks`` columns must be created after the
     # columns exist. Keeping them in SCHEMA_SQL breaks legacy boards: SQLite
     # parses each statement in ``executescript`` against the live schema, so a
@@ -1743,6 +1840,22 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             _add_column_if_missing(
                 conn, "kanban_notify_subs", "notifier_profile", "notifier_profile TEXT"
             )
+
+    active_wake_table_exists = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='ack_active_wake'"
+    ).fetchone() is not None
+    if active_wake_table_exists:
+        wake_cols = {
+            row["name"] for row in conn.execute("PRAGMA table_info(ack_active_wake)")
+        }
+        for col, ddl in (
+            ("status", "status TEXT"),
+            ("accepted_by_session", "accepted_by_session INTEGER NOT NULL DEFAULT 0"),
+            ("started_by_session", "started_by_session INTEGER NOT NULL DEFAULT 0"),
+            ("target_session_key", "target_session_key TEXT"),
+        ):
+            if col not in wake_cols:
+                _add_column_if_missing(conn, "ack_active_wake", col, ddl)
 
     # One-shot backfill: any task that is 'running' before runs existed
     # had its claim_lock / claim_expires / worker_pid on the task row.
@@ -2276,6 +2389,54 @@ def create_task(
                         "INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (?, ?)",
                         (pid, task_id),
                     )
+                if parents:
+                    # ACK-edge inheritance: if a parent/root task is already
+                    # wired for terminal notifications, every child in the
+                    # durable graph must inherit that return path. Otherwise a
+                    # child can BLOCK while the origin lane never hears it.
+                    placeholders = ",".join("?" * len(parents))
+                    parent_subs = conn.execute(
+                        "SELECT * FROM kanban_notify_subs "
+                        f"WHERE task_id IN ({placeholders}) "
+                        "ORDER BY created_at ASC",
+                        parents,
+                    ).fetchall()
+                    for sub in parent_subs:
+                        conn.execute(
+                            """
+                            INSERT OR IGNORE INTO kanban_notify_subs
+                                (task_id, platform, chat_id, thread_id, user_id,
+                                 notifier_profile, trigger_agent, created_at)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                task_id,
+                                sub["platform"],
+                                sub["chat_id"],
+                                sub["thread_id"] or "",
+                                sub["user_id"],
+                                sub["notifier_profile"],
+                                1 if sub["trigger_agent"] else 0,
+                                now,
+                            ),
+                        )
+                        if sub["trigger_agent"]:
+                            conn.execute(
+                                """
+                                UPDATE kanban_notify_subs
+                                   SET trigger_agent = 1
+                                 WHERE task_id = ?
+                                   AND platform = ?
+                                   AND chat_id = ?
+                                   AND thread_id = ?
+                                """,
+                                (
+                                    task_id,
+                                    sub["platform"],
+                                    sub["chat_id"],
+                                    sub["thread_id"] or "",
+                                ),
+                            )
                 _append_event(
                     conn,
                     task_id,
@@ -3559,6 +3720,128 @@ def _scan_prose_for_phantom_ids(
     return [m for m in unique if m not in existing]
 
 
+# Substrings that, when present in a terminal task's summary / result /
+# metadata, mean the origin wake/ACK relay did NOT reach a live target even
+# though the task itself reached a terminal verdict. Worker CLI sessions
+# frequently cannot send messages, so the gateway relay path is the only way
+# the origin learns the task finished — when that path emits one of these
+# strings the completion is durable but the ACK is missing. Matched
+# case-insensitively. See :func:`classify_ack_relay`.
+ACK_RELAY_FAILURE_PATTERNS: tuple[str, ...] = (
+    "no messaging targets",
+    "origin relay could not be sent",
+    "no live gateway runner",
+)
+
+
+def _parse_task_verdict(text: str) -> Optional[str]:
+    """Extract a ``Verdict: <X>`` token from terminal handoff text.
+
+    Review / fan-in tasks encode their work decision as a ``Verdict:``
+    line (e.g. ``Verdict: GO`` / ``Verdict: BLOCK``). Returns the
+    normalised upper-case token (``-`` folded to ``_``) or ``None`` when
+    no verdict line is present. Deliberately verdict-only: it says
+    nothing about whether the origin was woken — that is ``ack_status``.
+    """
+    if not text:
+        return None
+    m = re.search(r"verdict\s*[:=]\s*([A-Za-z][A-Za-z_-]*)", text, re.IGNORECASE)
+    if not m:
+        return None
+    return m.group(1).strip().upper().replace("-", "_")
+
+
+def _has_origin_return_intent(text: Optional[str]) -> bool:
+    """Return True when task prose declares explicit origin/return ACK intent.
+
+    A generic prose mention of the word ``origin`` is not enough: ordinary
+    tasks may ask to research the origin of a bug/topic without asking the
+    control plane to wake a return target.  Treat only labelled return-target
+    declarations and structured origin fields as ACK intent.
+    """
+    if not text:
+        return False
+    for line in str(text).splitlines():
+        if re.match(
+            r"^\s*(?:origin(?:\s*/\s*return[_-]?to)?|return[_-]?to|return\s+to)\s*[:=]",
+            line,
+            re.IGNORECASE,
+        ):
+            return True
+        if re.match(
+            r"^\s*origin_(?:platform|chat_id|thread_id|user_id)\s*[:=]",
+            line,
+            re.IGNORECASE,
+        ):
+            return True
+    return False
+
+
+def classify_ack_relay(
+    summary: Optional[str] = None,
+    result: Optional[str] = None,
+    metadata: Optional[dict] = None,
+    *,
+    notify_subs: Optional[list] = None,
+    task_body: Optional[str] = None,
+) -> dict:
+    """Classify a terminal task's handoff into separate verdict + ack signals.
+
+    Returns a dict with:
+
+    * ``task_verdict`` — the work decision (``"GO"`` / ``"BLOCK"`` / …) parsed
+      from a ``Verdict:`` line, or ``None``.
+    * ``ack_status`` — one of:
+        - ``"failed"``: a relay-failure pattern was found in the text/metadata
+          (the origin ACK demonstrably could not be delivered).
+        - ``"missing_subscription"``: task body declares Origin/return_to
+          intent, ``notify_subs`` was supplied, and zero subscription rows
+          existed at terminal time. This is a typed control-plane delivery
+          problem, not a successful ACK.
+        - ``"ambiguous"``: no failure string, but a verdict is present and
+          ``notify_subs`` was supplied and empty — the origin relay had no
+          target at terminal time, but no explicit origin intent was found.
+        - ``"unknown"``: no positive or negative ACK signal.
+    * ``relay_failure`` — ``True`` iff a failure pattern matched.
+    * ``matched`` — the failure substrings found (lower-cased), in pattern order.
+
+    ``task_verdict`` and ``ack_status`` are intentionally independent so a
+    done BLOCK/GO task is never treated as proof the origin was woken.
+    """
+    haystack_parts: list[str] = []
+    for part in (summary, result):
+        if part:
+            haystack_parts.append(str(part))
+    if isinstance(metadata, dict):
+        try:
+            haystack_parts.append(json.dumps(metadata, ensure_ascii=False))
+        except Exception:
+            haystack_parts.append(str(metadata))
+    haystack = "\n".join(haystack_parts)
+    hay_lower = haystack.lower()
+
+    matched = [p for p in ACK_RELAY_FAILURE_PATTERNS if p in hay_lower]
+    relay_failure = bool(matched)
+
+    verdict = _parse_task_verdict(haystack)
+
+    if relay_failure:
+        ack_status = "failed"
+    elif notify_subs is not None and len(notify_subs) == 0 and _has_origin_return_intent(task_body):
+        ack_status = "missing_subscription"
+    elif verdict is not None and notify_subs is not None and len(notify_subs) == 0:
+        ack_status = "ambiguous"
+    else:
+        ack_status = "unknown"
+
+    return {
+        "task_verdict": verdict,
+        "ack_status": ack_status,
+        "relay_failure": relay_failure,
+        "matched": matched,
+    }
+
+
 class HallucinatedCardsError(ValueError):
     """Raised by ``complete_task`` when ``created_cards`` contains ids
     that don't exist or weren't created by the completing worker.
@@ -3643,6 +3926,11 @@ def complete_task(
             raise HallucinatedCardsError(phantom_cards, task_id)
     else:
         verified_cards = []
+
+    task_row = conn.execute(
+        "SELECT body FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    task_body = task_row["body"] if task_row else None
 
     with write_txn(conn):
         if expected_run_id is None:
@@ -3747,6 +4035,58 @@ def complete_task(
                     },
                     run_id=run_id,
                 )
+    # Durable ACK/relay classification. The work verdict can be terminal
+    # (done, BLOCK/GO) while the origin wake/ACK relay never reached a
+    # target — worker CLI sessions often cannot send messages, so a relay
+    # failure string in the handoff (or an empty notify list at terminal
+    # time) means the origin may be silently waiting. Record a durable
+    # ``ack_relay_status`` event so diagnostics can surface it; keep
+    # ``task_verdict`` and ``ack_status`` as distinct payload fields so a
+    # done verdict is never mistaken for a delivered ACK. Emitted at most
+    # once per terminal transition (this block only runs when the status
+    # update above flipped exactly one row), so it cannot storm.
+    ack = classify_ack_relay(
+        summary=summary,
+        result=result,
+        metadata=metadata,
+        notify_subs=list_notify_subs(conn, task_id),
+        task_body=task_body,
+    )
+    if ack["ack_status"] in ("failed", "ambiguous", "missing_subscription"):
+        event_kind = (
+            "delivery_problem"
+            if ack["ack_status"] == "missing_subscription"
+            else "ack_relay_status"
+        )
+        payload = {
+            "ack_status": ack["ack_status"],
+            "task_verdict": ack["task_verdict"],
+            "matched": ack["matched"],
+            "source": "completion",
+        }
+        if ack["ack_status"] == "missing_subscription":
+            payload["problem_type"] = "missing_subscription"
+        with write_txn(conn):
+            _append_event(
+                conn,
+                task_id,
+                event_kind,
+                payload,
+                run_id=run_id,
+            )
+    # Shadow ACK ledger: record the terminal verdict and any explicit
+    # subscription snapshot. This is intentionally independent of live
+    # notifier behavior and independent of the ack_relay_status event.
+    # Only explicit kanban_notify_subs rows are shadow-copied; prose
+    # Origin/return_to bodies are NOT treated as subscriptions.
+    _shadow_write_ack_ledger_on_complete(
+        conn,
+        task_id=task_id,
+        run_id=run_id,
+        event_id=None,
+        summary=summary,
+        result=result,
+    )
     # Successful completion — wipe the consecutive-failures counter.
     # Failure history stays on the event log for audit; the counter
     # just tracks "is there a current pathology the breaker should
@@ -3758,6 +4098,54 @@ def complete_task(
     _cleanup_workspace(conn, task_id)
     return True
 
+
+def _shadow_write_ack_ledger_on_complete(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    run_id: Optional[int],
+    event_id: Optional[int],
+    summary: Optional[str],
+    result: Optional[str],
+) -> None:
+    """Write shadow ACK ledger rows for a completed task.
+
+    Records ``ack_task_verdict`` (work decision) and, iff an explicit
+    ``kanban_notify_subs`` row exists, an ``ack_subscription`` snapshot.
+    Does nothing for tasks without an explicit subscription, so a task
+    with only a prose ``Origin/return_to`` body gets a verdict row but no
+    invented subscription row.
+    """
+    from hermes_cli import kanban_db_ack_ledger as _ack
+
+    verdict = _parse_task_verdict(" ".join(filter(None, [summary, result])))
+    _ack.record_ack_task_verdict(
+        conn,
+        task_id=task_id,
+        run_id=run_id,
+        event_id=event_id,
+        verdict=verdict,
+        status="done",
+        summary_ref=None,
+        summary_safe=summary if summary is not None else result,
+    )
+
+    subs = list_notify_subs(conn, task_id)
+    if not subs:
+        return
+    for sub in subs:
+        _ack.record_ack_subscription(
+            conn,
+            task_id=task_id,
+            subscription_id=None,
+            platform=sub.get("platform"),
+            chat_id=sub.get("chat_id"),
+            thread_id=sub.get("thread_id") or "",
+            notifier_profile=sub.get("notifier_profile"),
+            desired_delivery_mode="passive",
+            active_wake_required=bool(sub.get("trigger_agent")),
+            operator_receipt_required=False,
+        )
 
 # ---------------------------------------------------------------------------
 # Workspace / tmux cleanup
@@ -4135,6 +4523,10 @@ def block_task(
     expected_run_id: Optional[int] = None,
 ) -> bool:
     """Transition ``running -> blocked``."""
+    task_row = conn.execute(
+        "SELECT body FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    task_body = task_row["body"] if task_row else None
     with write_txn(conn):
         if expected_run_id is None:
             cur = conn.execute(
@@ -4179,7 +4571,27 @@ def block_task(
                 summary=reason,
             )
         _append_event(conn, task_id, "blocked", {"reason": reason}, run_id=run_id)
-        return True
+    ack = classify_ack_relay(
+        summary=reason,
+        notify_subs=list_notify_subs(conn, task_id),
+        task_body=task_body,
+    )
+    if ack["ack_status"] == "missing_subscription":
+        with write_txn(conn):
+            _append_event(
+                conn,
+                task_id,
+                "delivery_problem",
+                {
+                    "ack_status": "missing_subscription",
+                    "problem_type": "missing_subscription",
+                    "task_verdict": ack["task_verdict"],
+                    "matched": ack["matched"],
+                    "source": "block",
+                },
+                run_id=run_id,
+            )
+    return True
 
 
 
@@ -7598,30 +8010,58 @@ def add_notify_sub(
     thread_id: Optional[str] = None,
     user_id: Optional[str] = None,
     notifier_profile: Optional[str] = None,
+    trigger_agent: bool = False,
 ) -> None:
-    """Register a gateway source that wants terminal-state notifications
-    for ``task_id``. Idempotent on (task, platform, chat, thread)."""
+    """Register a gateway source that wants terminal-state notifications.
+
+    Idempotent on (task, platform, chat, thread). Repeated calls preserve the
+    original notifier owner while allowing a later caller to upgrade the edge
+    to active-wake semantics.
+    """
     now = int(time.time())
     with write_txn(conn):
         conn.execute(
             """
             INSERT OR IGNORE INTO kanban_notify_subs
-                (task_id, platform, chat_id, thread_id, user_id, notifier_profile, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                (task_id, platform, chat_id, thread_id, user_id,
+                 notifier_profile, trigger_agent, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (task_id, platform, chat_id, thread_id or "", user_id, notifier_profile, now),
+            (
+                task_id,
+                platform,
+                chat_id,
+                thread_id or "",
+                user_id,
+                notifier_profile,
+                1 if trigger_agent else 0,
+                now,
+            ),
         )
         if notifier_profile:
-            # Self-heal legacy rows that predate notifier ownership by
-            # backfilling only when the existing value is unset.
             conn.execute(
                 """
                 UPDATE kanban_notify_subs
                    SET notifier_profile = ?
-                 WHERE task_id = ? AND platform = ? AND chat_id = ? AND thread_id = ?
+                 WHERE task_id = ?
+                   AND platform = ?
+                   AND chat_id = ?
+                   AND thread_id = ?
                    AND (notifier_profile IS NULL OR notifier_profile = '')
                 """,
                 (notifier_profile, task_id, platform, chat_id, thread_id or ""),
+            )
+        if trigger_agent:
+            conn.execute(
+                """
+                UPDATE kanban_notify_subs
+                   SET trigger_agent = 1
+                 WHERE task_id = ?
+                   AND platform = ?
+                   AND chat_id = ?
+                   AND thread_id = ?
+                """,
+                (task_id, platform, chat_id, thread_id or ""),
             )
 
 

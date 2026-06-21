@@ -1,4 +1,5 @@
 import asyncio
+import json
 import pytest
 
 from pathlib import Path
@@ -77,6 +78,242 @@ async def test_notifier_unsubs_after_completed_event(kanban_home):
         conn.close()
     assert subs == [], "Subscription should be unsub after completed event"
 
+
+
+
+def test_notify_sub_trigger_agent_persists_and_preserves_owner(kanban_home):
+    import hermes_cli.kanban_db as kb
+
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="trigger sub task", assignee="worker1")
+        kb.add_notify_sub(
+            conn,
+            task_id=tid,
+            platform="telegram",
+            chat_id="chat1",
+            notifier_profile="owner-a",
+        )
+        kb.add_notify_sub(
+            conn,
+            task_id=tid,
+            platform="telegram",
+            chat_id="chat1",
+            notifier_profile="owner-b",
+            trigger_agent=True,
+        )
+        subs = kb.list_notify_subs(conn, tid)
+    finally:
+        conn.close()
+
+    assert len(subs) == 1
+    assert subs[0]["notifier_profile"] == "owner-a"
+    assert int(subs[0]["trigger_agent"]) == 1
+
+
+def test_child_task_inherits_parent_notify_subscription(kanban_home):
+    import hermes_cli.kanban_db as kb
+
+    conn = kb.connect()
+    try:
+        parent = kb.create_task(conn, title="root", assignee=None)
+        kb.add_notify_sub(
+            conn,
+            task_id=parent,
+            platform="discord",
+            chat_id="1499390151393284106",
+            thread_id="123",
+            user_id="u1",
+            notifier_profile="default",
+            trigger_agent=True,
+        )
+        child = kb.create_task(
+            conn,
+            title="review child",
+            assignee="ccreviewer",
+            parents=[parent],
+        )
+        subs = kb.list_notify_subs(conn, child)
+    finally:
+        conn.close()
+
+    assert len(subs) == 1
+    assert subs[0]["platform"] == "discord"
+    assert subs[0]["chat_id"] == "1499390151393284106"
+    assert subs[0]["thread_id"] == "123"
+    assert subs[0]["user_id"] == "u1"
+    assert subs[0]["notifier_profile"] == "default"
+    assert int(subs[0]["trigger_agent"]) == 1
+
+
+def test_cli_create_body_origin_return_to_does_not_create_notify_subscription(kanban_home):
+    import hermes_cli.kanban as kc
+    import hermes_cli.kanban_db as kb
+
+    body = "Origin/return_to: Discord Devhub #research (<#1499390151393284106>)\nDo the work."
+    out = kc.run_slash(
+        "create 'origin prose task' "
+        f"--body {json.dumps(body)} "
+        "--assignee ccreviewer --json"
+    )
+    payload = json.loads(out)
+    task_id = payload["id"]
+
+    conn = kb.connect()
+    try:
+        subs = kb.list_notify_subs(conn, task_id)
+    finally:
+        conn.close()
+
+    assert "ack_subscription" not in payload
+    assert subs == []
+
+
+def test_cli_create_explicit_origin_flags_create_notify_subscription(kanban_home):
+    import hermes_cli.kanban as kc
+    import hermes_cli.kanban_db as kb
+
+    out = kc.run_slash(
+        "create 'explicit origin task' "
+        "--body 'Do the work.' "
+        "--assignee ccreviewer "
+        "--origin-platform discord "
+        "--origin-chat-id 1499390151393284106 "
+        "--origin-thread-id 123 "
+        "--notifier-profile gateway-a "
+        "--ack-trigger-agent "
+        "--json"
+    )
+    payload = json.loads(out)
+    task_id = payload["id"]
+
+    conn = kb.connect()
+    try:
+        subs = kb.list_notify_subs(conn, task_id)
+    finally:
+        conn.close()
+
+    assert payload["ack_subscription"] == {
+        "task_id": task_id,
+        "platform": "discord",
+        "chat_id": "1499390151393284106",
+        "thread_id": "123",
+        "trigger_agent": True,
+        "notifier_profile": "gateway-a",
+    }
+    assert len(subs) == 1
+    assert subs[0]["platform"] == "discord"
+    assert subs[0]["chat_id"] == "1499390151393284106"
+    assert subs[0]["thread_id"] == "123"
+    assert subs[0]["notifier_profile"] == "gateway-a"
+    assert int(subs[0]["trigger_agent"]) == 1
+
+
+def test_cli_create_explicit_ack_trigger_agent_upgrades_idempotent_subscription(kanban_home):
+    import hermes_cli.kanban as kc
+    import hermes_cli.kanban_db as kb
+
+    cmd = (
+        "create 'origin flags task' --assignee ccreviewer "
+        "--idempotency-key ack-replay-1 "
+        "--origin-platform discord --origin-chat-id 1499390151393284106 "
+        "--origin-thread-id 987654321 --origin-user-id u1 "
+        "--notifier-profile gateway-owner --json"
+    )
+    first = json.loads(kc.run_slash(cmd))
+    replay = json.loads(kc.run_slash(cmd + " --ack-trigger-agent"))
+    assert replay["id"] == first["id"]
+
+    conn = kb.connect()
+    try:
+        subs = kb.list_notify_subs(conn, first["id"])
+    finally:
+        conn.close()
+
+    assert len(subs) == 1
+    assert subs[0]["platform"] == "discord"
+    assert subs[0]["chat_id"] == "1499390151393284106"
+    assert subs[0]["thread_id"] == "987654321"
+    assert subs[0]["user_id"] == "u1"
+    assert subs[0]["notifier_profile"] == "gateway-owner"
+    assert int(subs[0]["trigger_agent"]) == 1
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "Origin/return_to: Discord Devhub #research (<#1499390151393284106>)\nDo the work.",
+        "return-to: discord:#hermes-main:1497895797579190357\nDo the work.",
+    ],
+)
+def test_completion_origin_intent_without_subscription_emits_missing_subscription(kanban_home, body):
+    import hermes_cli.kanban_db as kb
+
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="origin missing sub", body=body, assignee="worker1")
+        assert kb.list_notify_subs(conn, tid) == []
+        assert kb.complete_task(conn, tid, summary="Verdict: GO\nEvidence: done") is True
+        events = conn.execute(
+            "SELECT kind, payload FROM task_events WHERE task_id = ? ORDER BY id",
+            (tid,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    delivery = [e for e in events if e["kind"] == "delivery_problem"]
+    assert len(delivery) == 1
+    payload = json.loads(delivery[0]["payload"])
+    assert payload["problem_type"] == "missing_subscription"
+    assert payload["ack_status"] == "missing_subscription"
+    assert payload["task_verdict"] == "GO"
+
+
+def test_completion_generic_origin_prose_without_subscription_is_not_missing_subscription(kanban_home):
+    import hermes_cli.kanban_db as kb
+
+    body = "Research the origin of this bug. No return target here."
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="ordinary origin prose", body=body, assignee="worker1")
+        assert kb.list_notify_subs(conn, tid) == []
+        assert kb.complete_task(conn, tid, summary="Verdict: GO\nEvidence: done") is True
+        events = conn.execute(
+            "SELECT kind, payload FROM task_events WHERE task_id = ? ORDER BY id",
+            (tid,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert [e for e in events if e["kind"] == "delivery_problem"] == []
+    relay = [e for e in events if e["kind"] == "ack_relay_status"]
+    assert len(relay) == 1
+    payload = json.loads(relay[0]["payload"])
+    assert payload["ack_status"] == "ambiguous"
+    assert payload.get("problem_type") != "missing_subscription"
+
+
+def test_completion_structured_origin_fields_without_subscription_emit_missing_subscription(kanban_home):
+    import hermes_cli.kanban_db as kb
+
+    body = "origin_platform: discord\norigin_chat_id: 1499390151393284106\nDo the work."
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="structured origin missing sub", body=body, assignee="worker1")
+        assert kb.list_notify_subs(conn, tid) == []
+        assert kb.complete_task(conn, tid, summary="Verdict: GO\nEvidence: done") is True
+        events = conn.execute(
+            "SELECT kind, payload FROM task_events WHERE task_id = ? ORDER BY id",
+            (tid,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    delivery = [e for e in events if e["kind"] == "delivery_problem"]
+    assert len(delivery) == 1
+    payload = json.loads(delivery[0]["payload"])
+    assert payload["problem_type"] == "missing_subscription"
+    assert payload["ack_status"] == "missing_subscription"
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('kind', ["gave_up", "crashed", "timed_out"])
@@ -477,6 +714,8 @@ async def test_gateway_create_autosubscribes_on_explicit_board(kanban_home):
     assert len(subs) == 1
     assert subs[0]["chat_id"] == "chat1"
     assert subs[0]["thread_id"] == "th1"
+    assert subs[0]["user_id"] == "u1"
+    assert int(subs[0]["trigger_agent"]) == 0
 
     conn = kb.connect(board="default")
     try:
@@ -653,3 +892,471 @@ async def test_notifier_artifact_delivery_skips_missing_files(kanban_home, tmp_p
     # Only the real file was uploaded.
     assert len(documents_uploaded) == 1
     assert "real.pdf" in documents_uploaded[0]
+
+
+# ---------------------------------------------------------------------------
+# ACK/relay status classification + durable event on terminal completion.
+# task_verdict (the work decision) is tracked separately from ack_status
+# (whether the origin wake/ACK relay actually reached a target).
+# ---------------------------------------------------------------------------
+
+
+def test_classify_ack_relay_detects_no_messaging_targets():
+    res = kb.classify_ack_relay(
+        summary="Verdict: BLOCK\nReview failed. no messaging targets",
+    )
+    assert res["task_verdict"] == "BLOCK"
+    assert res["ack_status"] == "failed"
+    assert res["relay_failure"] is True
+    assert "no messaging targets" in res["matched"]
+
+
+def test_classify_ack_relay_parses_go_verdict_without_relay_failure():
+    res = kb.classify_ack_relay(summary="Verdict: GO\nAll good, merged.")
+    assert res["task_verdict"] == "GO"
+    # No relay-failure string and no notify context -> not a hard failure.
+    assert res["relay_failure"] is False
+    assert res["ack_status"] == "unknown"
+
+
+def test_classify_ack_relay_empty_notify_after_terminal_is_ambiguous():
+    # A done task carrying a verdict but with zero notify subscriptions is
+    # ambiguous: the subs may have been delivered+removed, or there may
+    # never have been an origin target. Not a confirmed failure.
+    res = kb.classify_ack_relay(summary="Verdict: GO", notify_subs=[])
+    assert res["task_verdict"] == "GO"
+    assert res["relay_failure"] is False
+    assert res["ack_status"] == "ambiguous"
+
+
+def test_classify_ack_relay_scans_result_and_metadata():
+    res = kb.classify_ack_relay(
+        result="done",
+        metadata={"relay": "trigger_error no live gateway runner"},
+    )
+    assert res["relay_failure"] is True
+    assert res["ack_status"] == "failed"
+
+
+def test_complete_task_emits_ack_relay_status_event_on_relay_failure(kanban_home):
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="review task", assignee="reviewer")
+        kb.complete_task(
+            conn, tid,
+            summary="Verdict: BLOCK\norigin relay could not be sent",
+        )
+        events = kb.list_events(conn, tid)
+    finally:
+        conn.close()
+    ack = [e for e in events if e.kind == "ack_relay_status"]
+    assert len(ack) == 1, "exactly one durable ack_relay_status event"
+    payload = ack[0].payload
+    assert payload["ack_status"] == "failed"
+    assert payload["task_verdict"] == "BLOCK"
+    assert "origin relay could not be sent" in payload["matched"]
+
+
+def test_complete_task_clean_summary_emits_no_ack_relay_event(kanban_home):
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="leaf task", assignee="worker")
+        # Has a live notify sub, so the empty-notify ambiguity does not apply.
+        kb.add_notify_sub(conn, task_id=tid, platform="telegram", chat_id="c1")
+        kb.complete_task(conn, tid, summary="Verdict: GO\nshipped.")
+        events = kb.list_events(conn, tid)
+    finally:
+        conn.close()
+    assert [e for e in events if e.kind == "ack_relay_status"] == []
+
+
+def test_complete_task_ack_relay_event_emitted_once_no_storm(kanban_home):
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="fanin task", assignee="reviewer")
+        kb.complete_task(conn, tid, summary="Verdict: BLOCK no messaging targets")
+        # A second completion call on an already-done task is a no-op and
+        # must not append another ack_relay_status event.
+        kb.complete_task(conn, tid, summary="Verdict: BLOCK no messaging targets")
+        events = kb.list_events(conn, tid)
+    finally:
+        conn.close()
+    assert len([e for e in events if e.kind == "ack_relay_status"]) == 1
+
+# ---------------------------------------------------------------------------
+# Active-wake notifier receipts
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_notifier_trigger_agent_false_sends_passive_only(kanban_home):
+    """If subscription trigger_agent is false, only passive adapter.send runs."""
+    import hermes_cli.kanban_db as kb
+    from gateway.run import GatewayRunner
+    from gateway.config import Platform
+
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="passive task", assignee="worker1")
+        kb.add_notify_sub(
+            conn,
+            task_id=tid,
+            platform="telegram",
+            chat_id="chat1",
+            trigger_agent=False,
+        )
+        kb.complete_task(conn, tid, result="done")
+    finally:
+        conn.close()
+
+    runner = object.__new__(GatewayRunner)
+    runner._running = True
+    runner._kanban_sub_fail_counts = {}
+
+    fake_adapter = MagicMock()
+
+    async def _send_and_stop(chat_id, msg, metadata=None):
+        runner._running = False
+
+    fake_adapter.send = AsyncMock(side_effect=_send_and_stop)
+    runner.adapters = {Platform.TELEGRAM: fake_adapter}
+
+    _orig_sleep = asyncio.sleep
+
+    async def _fast_sleep(_):
+        await _orig_sleep(0)
+
+    with patch("gateway.run.asyncio.sleep", side_effect=_fast_sleep):
+        await asyncio.wait_for(
+            runner._kanban_notifier_watcher(interval=1),
+            timeout=10.0,
+        )
+
+    fake_adapter.send.assert_called_once()
+    fake_adapter.handle_message.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_notifier_trigger_agent_true_invokes_active_wake_and_records_receipt(kanban_home):
+    """Active-wake subscriptions call adapter.handle_message and persist a receipt event."""
+    import hermes_cli.kanban_db as kb
+    from gateway.run import GatewayRunner
+    from gateway.config import Platform
+    from gateway.platforms.base import MessageEvent
+
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="wake task", assignee="worker1")
+        kb.add_notify_sub(
+            conn,
+            task_id=tid,
+            platform="telegram",
+            chat_id="chat1",
+            trigger_agent=True,
+        )
+        kb.complete_task(conn, tid, result="done")
+    finally:
+        conn.close()
+
+    runner = object.__new__(GatewayRunner)
+    runner._running = True
+    runner._kanban_sub_fail_counts = {}
+    runner._gateway_loop = asyncio.get_running_loop()
+
+    wake_events: list[MessageEvent] = []
+
+    fake_adapter = MagicMock()
+
+    async def _send_and_stop(chat_id, msg, metadata=None):
+        runner._running = False
+
+    async def _capture_handle_message(event):
+        wake_events.append(event)
+
+    fake_adapter.send = AsyncMock(side_effect=_send_and_stop)
+    fake_adapter.handle_message = AsyncMock(side_effect=_capture_handle_message)
+    runner.adapters = {Platform.TELEGRAM: fake_adapter}
+
+    _orig_sleep = asyncio.sleep
+
+    async def _fast_sleep(_):
+        await _orig_sleep(0)
+
+    with patch("gateway.run.asyncio.sleep", side_effect=_fast_sleep):
+        await asyncio.wait_for(
+            runner._kanban_notifier_watcher(interval=1),
+            timeout=10.0,
+        )
+
+    fake_adapter.send.assert_called_once()
+    fake_adapter.handle_message.assert_awaited_once()
+    assert len(wake_events) == 1
+    wake = wake_events[0]
+    assert wake.internal is True
+    assert wake.source.platform == Platform.TELEGRAM
+    assert wake.source.chat_id == "chat1"
+    assert wake.source.user_id is None
+    assert wake.source.user_name == "Hermes Active Wake"
+
+    conn = kb.connect()
+    try:
+        events = kb.list_events(conn, tid)
+        from hermes_cli import kanban_db_ack_ledger as ack
+        wake_rows = ack.list_ack_active_wakes(conn, tid)
+        operator_rows = ack.list_ack_operator_receipts(conn, tid)
+    finally:
+        conn.close()
+    receipt_events = [e for e in events if e.kind == "notify_active_wake_receipt"]
+    assert len(receipt_events) == 1
+    payload = receipt_events[0].payload
+    assert payload is not None
+    assert payload["scheduled_agent"] is True
+    assert payload["triggered_agent"] is True  # legacy scheduling alias only
+    assert payload["accepted_by_session"] is False
+    assert payload["started_by_session"] is False
+    assert payload["active_wake_status"] == "scheduled"
+    assert payload["target_session_key"] == "agent:main:telegram:group:chat1"
+    assert "hermes-active-wake" not in payload["target_session_key"]
+    assert "operator_receipt" not in payload
+    assert payload["platform"] == "telegram"
+    assert payload["chat_id"] == "chat1"
+    assert "receipt_correlation" in payload
+    assert len(wake_rows) == 1
+    assert wake_rows[0]["status"] == "scheduled"
+    assert wake_rows[0]["accepted_by_session"] == 0
+    assert wake_rows[0]["started_by_session"] == 0
+    assert wake_rows[0]["target_session_key"] == "agent:main:telegram:group:chat1"
+    assert operator_rows == []
+
+
+@pytest.mark.asyncio
+async def test_notifier_active_wake_not_wired_records_failure(kanban_home):
+    """If gateway runner lacks a usable adapter/loop, active wake records NOT_WIRED."""
+    import hermes_cli.kanban_db as kb
+    from gateway.run import GatewayRunner
+    from gateway.config import Platform
+
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="wake not wired", assignee="worker1")
+        kb.add_notify_sub(
+            conn,
+            task_id=tid,
+            platform="telegram",
+            chat_id="chat1",
+            trigger_agent=True,
+        )
+        kb.complete_task(conn, tid, result="done")
+    finally:
+        conn.close()
+
+    runner = object.__new__(GatewayRunner)
+    runner._running = True
+    runner._kanban_sub_fail_counts = {}
+    # Passive delivery is wired, but no _gateway_loop exists for active wake.
+    fake_adapter = MagicMock()
+
+    async def _send_and_stop(chat_id, msg, metadata=None):
+        runner._running = False
+
+    fake_adapter.send = AsyncMock(side_effect=_send_and_stop)
+    runner.adapters = {Platform.TELEGRAM: fake_adapter}
+
+    _orig_sleep = asyncio.sleep
+
+    async def _fast_sleep(_):
+        await _orig_sleep(0)
+
+    with patch("gateway.run.asyncio.sleep", side_effect=_fast_sleep):
+        await asyncio.wait_for(
+            runner._kanban_notifier_watcher(interval=1),
+            timeout=10.0,
+        )
+
+    conn = kb.connect()
+    try:
+        events = kb.list_events(conn, tid)
+    finally:
+        conn.close()
+    receipt_events = [e for e in events if e.kind == "notify_active_wake_receipt"]
+    assert len(receipt_events) == 1
+    payload = receipt_events[0].payload
+    assert payload is not None
+    assert payload["scheduled_agent"] is False
+    assert payload["triggered_agent"] is False
+    assert payload["trigger_error"] == "NOT_WIRED"
+
+
+@pytest.mark.asyncio
+async def test_notifier_send_result_failure_records_sanitized_receipt_no_wake(kanban_home):
+    """If passive send returns success=false, persist SEND_FAILED without waking or leaking raw error."""
+    import hermes_cli.kanban_db as kb
+    from gateway.run import GatewayRunner
+    from gateway.config import Platform
+
+    leaked = "super-secret-token-123456"
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="send result failure", assignee="worker1")
+        kb.add_notify_sub(
+            conn,
+            task_id=tid,
+            platform="telegram",
+            chat_id="chat1",
+            trigger_agent=True,
+        )
+        kb.complete_task(conn, tid, result="done")
+    finally:
+        conn.close()
+
+    runner = object.__new__(GatewayRunner)
+    runner._running = True
+    runner._kanban_sub_fail_counts = {}
+    runner._gateway_loop = asyncio.get_running_loop()
+
+    fake_adapter = MagicMock()
+
+    async def _send_and_stop(chat_id, msg, metadata=None):
+        runner._running = False
+        return {"success": False, "error": f"https://example.test/?access_token={leaked}"}
+
+    fake_adapter.send = AsyncMock(side_effect=_send_and_stop)
+    fake_adapter.handle_message = AsyncMock()
+    runner.adapters = {Platform.TELEGRAM: fake_adapter}
+
+    _orig_sleep = asyncio.sleep
+
+    async def _fast_sleep(_):
+        await _orig_sleep(0)
+
+    with patch("gateway.run.asyncio.sleep", side_effect=_fast_sleep):
+        await asyncio.wait_for(
+            runner._kanban_notifier_watcher(interval=1),
+            timeout=10.0,
+        )
+
+    fake_adapter.send.assert_called_once()
+    fake_adapter.handle_message.assert_not_called()
+
+    conn = kb.connect()
+    try:
+        events = kb.list_events(conn, tid)
+    finally:
+        conn.close()
+    receipt_events = [e for e in events if e.kind == "notify_active_wake_receipt"]
+    assert len(receipt_events) == 1
+    payload = receipt_events[0].payload
+    assert payload is not None
+    assert payload["success"] is False
+    assert payload["scheduled_agent"] is False
+    assert payload["triggered_agent"] is False
+    assert payload["trigger_error"] == "SEND_FAILED"
+    assert "receipt_correlation" in payload
+    assert leaked not in json.dumps(payload)
+    assert "access_token" not in json.dumps(payload)
+
+
+@pytest.mark.asyncio
+async def test_notifier_send_failure_does_not_active_wake_or_record_receipt(kanban_home):
+    """If passive adapter.send fails, active wake is not scheduled and no success receipt is persisted."""
+    import hermes_cli.kanban_db as kb
+    from gateway.run import GatewayRunner
+    from gateway.config import Platform
+
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="send failure", assignee="worker1")
+        kb.add_notify_sub(
+            conn,
+            task_id=tid,
+            platform="telegram",
+            chat_id="chat1",
+            trigger_agent=True,
+        )
+        kb.complete_task(conn, tid, result="done")
+    finally:
+        conn.close()
+
+    runner = object.__new__(GatewayRunner)
+    runner._running = True
+    runner._kanban_sub_fail_counts = {}
+    runner._gateway_loop = asyncio.get_running_loop()
+
+    fake_adapter = MagicMock()
+
+    async def _raise_send(chat_id, msg, metadata=None):
+        runner._running = False
+        raise RuntimeError("send failed: token=super-secret-token-123456")
+
+    fake_adapter.send = AsyncMock(side_effect=_raise_send)
+    fake_adapter.handle_message = AsyncMock()
+    runner.adapters = {Platform.TELEGRAM: fake_adapter}
+
+    _orig_sleep = asyncio.sleep
+
+    async def _fast_sleep(_):
+        await _orig_sleep(0)
+
+    with patch("gateway.run.asyncio.sleep", side_effect=_fast_sleep):
+        await asyncio.wait_for(
+            runner._kanban_notifier_watcher(interval=1),
+            timeout=10.0,
+        )
+
+    fake_adapter.send.assert_called_once()
+    fake_adapter.handle_message.assert_not_called()
+
+    conn = kb.connect()
+    try:
+        events = kb.list_events(conn, tid)
+    finally:
+        conn.close()
+    assert [e for e in events if e.kind == "notify_active_wake_receipt"] == []
+
+
+@pytest.mark.asyncio
+async def test_notifier_trigger_agent_false_does_not_mirror_passive_send(kanban_home):
+    """Passive notifier sends must not be mirrored into target sessions (no duplicate)."""
+    import hermes_cli.kanban_db as kb
+    from gateway.run import GatewayRunner
+    from gateway.config import Platform
+
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="no mirror task", assignee="worker1")
+        kb.add_notify_sub(
+            conn,
+            task_id=tid,
+            platform="telegram",
+            chat_id="chat1",
+            trigger_agent=False,
+        )
+        kb.complete_task(conn, tid, result="done")
+    finally:
+        conn.close()
+
+    runner = object.__new__(GatewayRunner)
+    runner._running = True
+    runner._kanban_sub_fail_counts = {}
+
+    fake_adapter = MagicMock()
+
+    async def _send_and_stop(chat_id, msg, metadata=None):
+        runner._running = False
+
+    fake_adapter.send = AsyncMock(side_effect=_send_and_stop)
+    runner.adapters = {Platform.TELEGRAM: fake_adapter}
+
+    _orig_sleep = asyncio.sleep
+
+    async def _fast_sleep(_):
+        await _orig_sleep(0)
+
+    with patch("gateway.run.asyncio.sleep", side_effect=_fast_sleep), \
+         patch("gateway.kanban_watchers.mirror_to_session", create=True) as mock_mirror:
+        await asyncio.wait_for(
+            runner._kanban_notifier_watcher(interval=1),
+            timeout=10.0,
+        )
+
+    fake_adapter.send.assert_called_once()
+    mock_mirror.assert_not_called()
