@@ -5938,6 +5938,34 @@ def _kill_stale_dashboard_processes(
 _warn_stale_dashboard_processes = _kill_stale_dashboard_processes
 
 
+def _record_dashboard_action_success_from_env() -> None:
+    """Persist dashboard-spawned update success before restarting dashboards.
+
+    ``hermes update`` kills or restarts the dashboard near the end of a
+    successful run. When the update was launched from the dashboard, that can
+    destroy the in-memory action state before the frontend's status poll sees
+    exit code 0. The dashboard server passes a result-file path in the child
+    environment; stamp it here after update work succeeds but before restart.
+    """
+    dashboard_result_file = os.environ.get("HERMES_DASHBOARD_ACTION_RESULT_FILE")
+    if not dashboard_result_file:
+        return
+    try:
+        result_path = Path(dashboard_result_file)
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = result_path.with_suffix(result_path.suffix + ".tmp")
+        tmp_path.write_text(
+            json.dumps({"exit_code": 0, "pid": os.getpid()}),
+            encoding="utf-8",
+        )
+        tmp_path.replace(result_path)
+    except OSError:
+        pass
+
+
+# --- Browser helpers ---------------------------------------------------------
+
+
 def _update_via_zip(args):
     """Update Hermes Agent by downloading a ZIP archive.
 
@@ -9366,6 +9394,8 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 install_cua_driver(upgrade=True)
         except Exception as e:
             logger.debug("cua-driver refresh failed: %s", e)
+
+        _record_dashboard_action_success_from_env()
 
         # Write exit code *before* the gateway restart attempt.
         # When running as ``hermes update --gateway`` (spawned by the gateway's
