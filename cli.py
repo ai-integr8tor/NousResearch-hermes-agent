@@ -1048,10 +1048,10 @@ def _run_cleanup(*, notify_session_finalize: bool = True):
 
 
 def _should_emit_cleanup_session_finalize(session_id: str | None) -> bool:
+    if not session_id:
+        return False
     if not _single_query_finalize_attempted_session_ids:
         return True
-    if session_id is None:
-        return False
     return session_id not in _single_query_finalize_attempted_session_ids
 
 
@@ -4933,11 +4933,18 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         # suppress them during streaming too — unless show_reasoning is
         # enabled, in which case we route the inner content to the
         # reasoning display box instead of discarding it.
-        _OPEN_TAGS = ("<REASONING_SCRATCHPAD>", "<think>", "<reasoning>", "<THINKING>", "<thinking>", "<thought>")
-        _CLOSE_TAGS = ("</REASONING_SCRATCHPAD>", "</think>", "</reasoning>", "</THINKING>", "</thinking>", "</thought>")
+        _OPEN_TAGS = (
+            "<reasoning_scratchpad>", "<think>", "<reasoning>",
+            "<thinking>", "<thought>", " 思考", " 反思", " 推理", " 推敲",
+        )
+        _CLOSE_TAGS = (
+            "</reasoning_scratchpad>", "</think>", "</reasoning>",
+            "</thinking>", "</thought>", " 思考", " 反思", " 推理", " 推敲",
+        )
 
         # Append to a pre-filter buffer first
         self._stream_prefilt = getattr(self, "_stream_prefilt", "") + text
+        prefilt_lower = self._stream_prefilt.lower()
 
         # Check if we're entering a reasoning block.
         # Only match tags that appear at a "block boundary": start of the
@@ -4956,7 +4963,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             for tag in _OPEN_TAGS:
                 search_start = 0
                 while True:
-                    idx = self._stream_prefilt.find(tag, search_start)
+                    idx = prefilt_lower.find(tag, search_start)
                     if idx == -1:
                         break
                     # Check if this is a block boundary position
@@ -5000,7 +5007,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                 safe = self._stream_prefilt
                 for tag in _OPEN_TAGS:
                     for i in range(1, len(tag)):
-                        if self._stream_prefilt.endswith(tag[:i]):
+                        if prefilt_lower.endswith(tag[:i]):
                             safe = self._stream_prefilt[:-i]
                             break
                 if safe:
@@ -5014,7 +5021,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         # split across multiple tokens (e.g. "</REASONING_SCRATCH" + "PAD>...").
         if getattr(self, "_in_reasoning_block", False):
             for tag in _CLOSE_TAGS:
-                idx = self._stream_prefilt.find(tag)
+                idx = prefilt_lower.find(tag)
                 if idx != -1:
                     self._in_reasoning_block = False
                     # When show_reasoning is on, route inner content to
@@ -6141,8 +6148,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         if self.agent and self.conversation_history:
             # Trigger memory extraction on the old session before session_id rotates.
             self.agent.commit_memory_session(self.conversation_history)
-            self._notify_session_boundary("on_session_finalize")
-        elif self.agent:
+            if self.agent.session_id:
+                self._notify_session_boundary("on_session_finalize")
+        elif self.agent and self.agent.session_id:
             # First session or empty history — still finalize the old session
             self._notify_session_boundary("on_session_finalize")
 

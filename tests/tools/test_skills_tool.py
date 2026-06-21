@@ -414,6 +414,7 @@ class TestSkillView:
         assert "${HERMES_SKILL_DIR}" not in result["content"]
 
     def test_skill_view_applies_inline_shell_when_enabled(self, tmp_path):
+        import subprocess
         with (
             patch("tools.skills_tool.SKILLS_DIR", tmp_path),
             patch(
@@ -423,6 +424,15 @@ class TestSkillView:
                     "inline_shell": True,
                     "inline_shell_timeout": 5,
                 },
+            ),
+            patch(
+                "agent.skill_preprocessing.subprocess.run",
+                return_value=subprocess.CompletedProcess(
+                    args=["bash", "-c", "printf 2026-04-24"],
+                    returncode=0,
+                    stdout="2026-04-24",
+                    stderr="",
+                ),
             ),
         ):
             _make_skill(
@@ -1177,7 +1187,7 @@ class TestSkillViewCollisionDetection:
         assert "matches" in result
         assert len(result["matches"]) == 2
         # Both paths surfaced
-        assert any("foundations/runtime" in p for p in result["matches"])
+        assert any("foundations/runtime" in p.replace("\\", "/") for p in result["matches"])
         assert any("external" in p for p in result["matches"])
         assert "hint" in result
 

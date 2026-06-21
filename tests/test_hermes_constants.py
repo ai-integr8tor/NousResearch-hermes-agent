@@ -1,6 +1,7 @@
 """Tests for hermes_constants module."""
 
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -26,6 +27,7 @@ class TestGetDefaultHermesRoot:
         """When HERMES_HOME is not set, returns ~/.hermes."""
         monkeypatch.delenv("HERMES_HOME", raising=False)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setattr(sys, "platform", "linux")
 
         assert get_default_hermes_root() == tmp_path / ".hermes"
 
@@ -373,6 +375,7 @@ class TestSecureParentDir:
         # Should not raise
         secure_parent_dir(target)
 
+    @pytest.mark.require_symlinks
     def test_symlink_resolved(self, tmp_path, monkeypatch):
         """Symlinks should be resolved before checking depth."""
         real_dir = tmp_path / "a" / "b"

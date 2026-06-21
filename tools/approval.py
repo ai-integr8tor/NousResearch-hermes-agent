@@ -159,11 +159,14 @@ def _is_gateway_approval_context() -> bool:
 # these static patterns stay free of any import-time path snapshot (which would
 # go stale when HERMES_HOME is set after this module is imported, e.g. under the
 # hermetic test conftest or any deferred-profile-resolution path).
-_SSH_SENSITIVE_PATH = r'(?:~|\$home|\$\{home\})/\.ssh(?:/|$)'
+_SSH_SENSITIVE_PATH = r'(?:~|\$home|\$\{home\})[/\\]\.ssh(?:[/\\]|$)'
 _HERMES_ENV_PATH = (
-    r'(?:~\/\.hermes/|'
-    r'(?:\$home|\$\{home\})/\.hermes/|'
-    r'(?:\$hermes_home|\$\{hermes_home\})/)'
+    r'(?:~[/\\]\.hermes[/\\]|'
+    r'(?:\$home|\$\{home\})[/\\]\.hermes[/\\]|'
+    r'(?:\$hermes_home|\$\{hermes_home\})[/\\]|'
+    r'%localappdata%[/\\]hermes[/\\]|'
+    r'%userprofile%[/\\]\.hermes[/\\]|'
+    r'%hermes_home%[/\\])'
     r'\.env\b'
 )
 # ~/.hermes/config.yaml IS the security policy: approvals.mode, yolo, and the
@@ -175,9 +178,12 @@ _HERMES_ENV_PATH = (
 # theater. Mirrors _HERMES_ENV_PATH; matches the HERMES_HOME override form as
 # well as ~/.hermes/.
 _HERMES_CONFIG_PATH = (
-    r'(?:~\/\.hermes/|'
-    r'(?:\$home|\$\{home\})/\.hermes/|'
-    r'(?:\$hermes_home|\$\{hermes_home\})/)'
+    r'(?:~[/\\]\.hermes[/\\]|'
+    r'(?:\$home|\$\{home\})[/\\]\.hermes[/\\]|'
+    r'(?:\$hermes_home|\$\{hermes_home\})[/\\]|'
+    r'%localappdata%[/\\]hermes[/\\]|'
+    r'%userprofile%[/\\]\.hermes[/\\]|'
+    r'%hermes_home%[/\\])'
     r'config\.yaml\b'
 )
 _PROJECT_ENV_PATH = r'(?:(?:/|\.{1,2}/)?(?:[^\s/"\'`]+/)*\.env(?:\.[^/\s"\'`]+)*)'
@@ -570,8 +576,13 @@ def _normalize_command_for_detection(command: str) -> str:
     command = command.replace('\x00', '')
     # Normalize Unicode (fullwidth Latin, halfwidth Katakana, etc.)
     command = unicodedata.normalize('NFKC', command)
-    # Strip shell backslash-escapes: r\m → rm. Prevents \-injection bypass.
-    command = re.sub(r'\\([^\n])', r'\1', command)
+    # On Windows, normalize backslashes to forward slashes first to protect paths
+    # and skip POSIX-specific backslash-escape stripping.
+    if sys.platform == 'win32':
+        command = command.replace('\\', '/')
+    else:
+        # Strip shell backslash-escapes: r\m → rm. Prevents \-injection bypass.
+        command = re.sub(r'\\([^\n])', r'\1', command)
     # Strip empty-string literals that split tokens: r''m → rm, r"\"m → rm.
     command = re.sub(r"''|\"\"", '', command)
     # Fold the current user's resolved absolute home path into ~/ at detection
@@ -621,35 +632,66 @@ def _rewrite_resolved_user_home(command: str) -> str:
 
 
 def _rewrite_resolved_hermes_home(command: str) -> str:
-    """Rewrite the resolved absolute Hermes home prefix to ``~/.hermes/``.
+    """Rewrite the resolved absolute Hermes home prefix to ``~/.hermes/`` or Windows equivalent.
 
     Resolves the active ``HERMES_HOME`` at call time (and its symlink-resolved
     form) and replaces an occurrence of ``<home>/`` in *command* with
-    ``~/.hermes/`` so the static ``_HERMES_CONFIG_PATH`` / ``_HERMES_ENV_PATH``
+    the platform-appropriate placeholder (e.g. ``~/.hermes/`` on POSIX or
+    ``%HERMES_HOME%/`` / ``%LOCALAPPDATA%/hermes/`` on Windows) so the static
     patterns match. No-op when the path can't be resolved or doesn't appear.
     """
     try:
         from hermes_constants import get_hermes_home
         home = get_hermes_home().expanduser()
         candidates = [
-            str(home).rstrip("/"),
-            str(home.resolve(strict=False)).rstrip("/"),
+            str(home),
+            str(home.resolve(strict=False)),
         ]
     except Exception:
         return command
+
+    if sys.platform == "win32":
+        if os.environ.get("HERMES_HOME"):
+            replacement_slash = "%hermes_home%/"
+            replacement_backslash = "%hermes_home%\\"
+        elif os.environ.get("LOCALAPPDATA"):
+            replacement_slash = "%localappdata%/hermes/"
+            replacement_backslash = "%localappdata%\\hermes\\"
+        else:
+            replacement_slash = "%userprofile%/.hermes/"
+            replacement_backslash = "%userprofile%\\.hermes\\"
+    else:
+        replacement_slash = "~/.hermes/"
+        replacement_backslash = "~/.hermes/"
+
     seen: set[str] = set()
     for path in candidates:
-        if not path or path in seen:
+        if not path:
             continue
-        seen.add(path)
-        # Guard against a degenerate HERMES_HOME (e.g. "/" or "") rewriting
-        # unrelated paths: require an absolute path with at least one non-root
-        # component. The active profile home is always a real directory like
-        # /home/hermes/.hermes or a per-test tempdir, never a bare root.
-        normalized = path.rstrip("/")
-        if not normalized.startswith("/") or normalized.count("/") < 2:
-            continue
-        command = command.replace(normalized + "/", "~/.hermes/")
+        standardized = path.replace('\\', '/')
+        normalized = standardized.rstrip('/')
+        
+        is_windows = (len(normalized) >= 2 and normalized[1] == ':') or normalized.startswith('//')
+        if is_windows:
+            if len(normalized) <= 3 or normalized.count('/') < 2:
+                continue
+        else:
+            if not normalized.startswith('/') or normalized.count('/') < 2:
+                continue
+
+        slash_path = normalized.replace('\\', '/')
+        backslash_path = normalized.replace('/', '\\')
+        
+        if slash_path not in seen:
+            seen.add(slash_path)
+            command = command.replace(slash_path + "/", replacement_slash)
+            command = command.replace(slash_path + "\\", replacement_backslash)
+            
+        if backslash_path not in seen:
+            seen.add(backslash_path)
+            command = command.replace(backslash_path + "\\", replacement_backslash)
+            command = command.replace(backslash_path + "/", replacement_slash)
+            
     return command
 
 

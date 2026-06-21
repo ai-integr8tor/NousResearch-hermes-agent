@@ -764,6 +764,10 @@ class TestAddRotatingHandler:
                 logger.removeHandler(h)
                 h.close()
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="Group-writable permissions (0o660) are not supported on Windows"
+    )
     def test_managed_mode_initial_open_sets_group_writable(self, tmp_path):
         log_path = tmp_path / "managed-open.log"
         logger = logging.getLogger("_test_rotating_managed_open")
@@ -788,6 +792,10 @@ class TestAddRotatingHandler:
                 logger.removeHandler(h)
                 h.close()
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="Group-writable permissions (0o660) are not supported on Windows"
+    )
     def test_managed_mode_rollover_sets_group_writable(self, tmp_path):
         log_path = tmp_path / "managed-rollover.log"
         logger = logging.getLogger("_test_rotating_managed_rollover")
@@ -846,6 +854,10 @@ class TestReadLoggingConfig:
         assert level is None
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows prevents renaming/unlinking open files"
+)
 class TestExternalRotationRecovery:
     """_ManagedRotatingFileHandler recovers from external rotation.
 

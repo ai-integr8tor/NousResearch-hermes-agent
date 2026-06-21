@@ -27,6 +27,15 @@ import datetime
 import threading
 import uuid
 from typing import Any, Dict, Optional
+from contextvars import ContextVar
+
+IMAGE_SERVE_BASE_URL_CONTEXT: ContextVar[Optional[str]] = ContextVar("IMAGE_SERVE_BASE_URL_CONTEXT", default=None)
+
+def set_image_serve_base_url(url: Optional[str]):
+    return IMAGE_SERVE_BASE_URL_CONTEXT.set(url)
+
+def reset_image_serve_base_url(token):
+    IMAGE_SERVE_BASE_URL_CONTEXT.reset(token)
 
 # fal_client is imported lazily — see _load_fal_client(). Pulling it
 # eagerly added ~64 ms to every CLI cold start because
@@ -722,6 +731,63 @@ def _upscale_image(image_url: str, original_prompt: str) -> Optional[Dict[str, A
         return None
 
 
+def _maybe_rewrite_image_url(image_url: Optional[str]) -> Optional[str]:
+    """Rewrite absolute filesystem paths to served URLs if configured.
+
+    If image_url is a local path (starts with / or looks like a Windows path)
+    and image_gen.serve_base_url is set, returns {base_url}/images/{filename}.
+    This allows platforms like the API server to deliver images to remote
+    clients that can't access the agent's local filesystem.
+    """
+    if not image_url or not isinstance(image_url, str):
+        return image_url
+
+    # Skip if it's already a URL
+    if image_url.startswith(("http://", "https://", "data:")):
+        return image_url
+
+    # Must be an absolute path (or pseudo-absolute with drive letter) to rewrite
+    if not _looks_like_absolute_file_path(os.path.expanduser(image_url)):
+        return image_url
+
+    try:
+        # Check both config key and environment variable (precedence: env > config)
+        # We don't use load_config() directly here to avoid triggering plugin discovery
+        # unless necessary, but config is usually already loaded.
+        base_url = IMAGE_SERVE_BASE_URL_CONTEXT.get()
+        if not base_url:
+            base_url = os.getenv("IMAGE_SERVE_BASE_URL", "").strip()
+        if not base_url:
+            try:
+                from hermes_cli.config import load_config
+                cfg = load_config()
+                section = cfg.get("image_gen") if isinstance(cfg, dict) else None
+                if isinstance(section, dict):
+                    base_url = section.get("serve_base_url", "").strip()
+            except Exception:
+                pass
+
+        if not base_url:
+            return image_url
+
+        # It's a local path and we have a base URL.
+        # Extract the filename from the path.
+        filename = os.path.basename(image_url)
+
+        # Ensure base_url doesn't end with /
+        base_url = base_url.rstrip("/")
+        if not base_url.startswith("http"):
+            # If no scheme, assume http (common for local dev)
+            base_url = f"http://{base_url}"
+
+        new_url = f"{base_url}/images/{filename}"
+        logger.debug("Rewrote image path %s -> %s", image_url, new_url)
+        return new_url
+    except Exception as exc:
+        logger.debug("Image URL rewrite failed: %s", exc)
+        return image_url
+
+
 # ---------------------------------------------------------------------------
 # Tool entry point
 # ---------------------------------------------------------------------------
@@ -1010,7 +1076,7 @@ def image_generate_tool(
 
         response_data = {
             "success": True,
-            "image": formatted_images[0]["url"] if formatted_images else None,
+            "image": _maybe_rewrite_image_url(formatted_images[0]["url"]) if formatted_images else None,
             "modality": modality,
         }
 
@@ -1401,6 +1467,11 @@ def _dispatch_to_plugin_provider(
             "error": "Provider returned a non-dict result",
             "error_type": "provider_contract",
         })
+
+    # Rewrite local paths to served URLs if configured
+    if "image" in result:
+        result["image"] = _maybe_rewrite_image_url(result["image"])
+
     return json.dumps(result)
 
 

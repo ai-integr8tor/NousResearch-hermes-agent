@@ -526,6 +526,10 @@ def strip_think_blocks(agent, content: str) -> str:
     content = re.sub(r'<reasoning>.*?</reasoning>', '', content, flags=re.DOTALL | re.IGNORECASE)
     content = re.sub(r'<REASONING_SCRATCHPAD>.*?</REASONING_SCRATCHPAD>', '', content, flags=re.DOTALL | re.IGNORECASE)
     content = re.sub(r'<thought>.*?</thought>', '', content, flags=re.DOTALL | re.IGNORECASE)
+    content = re.sub(r' ?思考.*? ?思考', '', content, flags=re.DOTALL | re.IGNORECASE)
+    content = re.sub(r' ?反思.*? ?反思', '', content, flags=re.DOTALL | re.IGNORECASE)
+    content = re.sub(r' ?推理.*? ?推理', '', content, flags=re.DOTALL | re.IGNORECASE)
+    content = re.sub(r' ?推敲.*? ?推敲', '', content, flags=re.DOTALL | re.IGNORECASE)
     # 1b. Tool-call XML blocks (openclaw/openclaw#67318). Handle the
     #     generic tag names first — they have no attribute gating since
     #     a literal <tool_call> in prose is already vanishingly rare.
@@ -560,9 +564,21 @@ def strip_think_blocks(agent, content: str) -> str:
         content,
         flags=re.DOTALL | re.IGNORECASE,
     )
+    content = re.sub(
+        r'(?:^|\n)[ \t]* ?(?:思考|反思|推理|推敲).*$',
+        '',
+        content,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
     # 3. Stray orphan open/close tags that slipped through.
     content = re.sub(
         r'</?(?:think|thinking|reasoning|thought|REASONING_SCRATCHPAD)>\s*',
+        '',
+        content,
+        flags=re.IGNORECASE,
+    )
+    content = re.sub(
+        r' ?(?:思考|反思|推理|推敲)\s*',
         '',
         content,
         flags=re.IGNORECASE,

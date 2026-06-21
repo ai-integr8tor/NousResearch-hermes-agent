@@ -1058,6 +1058,39 @@ class TestRunJobSessionPersistence:
         kwargs = mock_agent_cls.call_args.kwargs
         assert kwargs["enabled_toolsets"] == ["web", "terminal", "file"]
 
+    def test_run_job_passes_target_model_to_resolve_runtime_provider(self, tmp_path):
+        job = {
+            "id": "model-job",
+            "name": "test",
+            "prompt": "hello",
+            "model": "gpt-custom-cron-model",
+            "provider": "openrouter",
+        }
+        fake_db = MagicMock()
+        mock_resolve = MagicMock(return_value={
+            "api_key": "test-key",
+            "base_url": "https://example.invalid/v1",
+            "provider": "openrouter",
+            "api_mode": "chat_completions",
+        })
+
+        with patch("cron.scheduler._hermes_home", tmp_path), \
+             patch("cron.scheduler._resolve_origin", return_value=None), \
+             patch("dotenv.load_dotenv"), \
+             patch("hermes_state.SessionDB", return_value=fake_db), \
+             patch("hermes_cli.runtime_provider.resolve_runtime_provider", mock_resolve), \
+             patch("run_agent.AIAgent") as mock_agent_cls:
+            mock_agent = MagicMock()
+            mock_agent.run_conversation.return_value = {"final_response": "ok"}
+            mock_agent_cls.return_value = mock_agent
+
+            run_job(job)
+
+        mock_resolve.assert_called_with(
+            requested="openrouter",
+            target_model="gpt-custom-cron-model",
+        )
+
     def test_run_job_disabled_toolsets_layer_user_config_on_baseline(self, tmp_path):
         """agent.disabled_toolsets must be honoured in cron — issue #25752.
 

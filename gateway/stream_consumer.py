@@ -99,12 +99,12 @@ class GatewayStreamConsumer:
     # Must stay in sync with cli.py _OPEN_TAGS/_CLOSE_TAGS and
     # run_agent.py _strip_think_blocks() tag variants.
     _OPEN_THINK_TAGS = (
-        "<REASONING_SCRATCHPAD>", "<think>", "<reasoning>",
-        "<THINKING>", "<thinking>", "<thought>",
+        "<reasoning_scratchpad>", "<think>", "<reasoning>",
+        "<thinking>", "<thought>", " 思考", " 反思", " 推理", " 推敲",
     )
     _CLOSE_THINK_TAGS = (
-        "</REASONING_SCRATCHPAD>", "</think>", "</reasoning>",
-        "</THINKING>", "</thinking>", "</thought>",
+        "</reasoning_scratchpad>", "</think>", "</reasoning>",
+        "</thinking>", "</thought>", " 思考", " 反思", " 推理", " 推敲",
     )
 
     # Class-wide monotonic counter for native-streaming draft ids.  Telegram
@@ -351,6 +351,7 @@ class GatewayStreamConsumer:
         """
         buf = self._think_buffer + text
         self._think_buffer = ""
+        buf_lower = buf.lower()
 
         while buf:
             if self._in_think_block:
@@ -358,7 +359,7 @@ class GatewayStreamConsumer:
                 best_idx = -1
                 best_len = 0
                 for tag in self._CLOSE_THINK_TAGS:
-                    idx = buf.find(tag)
+                    idx = buf_lower.find(tag)
                     if idx != -1 and (best_idx == -1 or idx < best_idx):
                         best_idx = idx
                         best_len = len(tag)
@@ -367,6 +368,7 @@ class GatewayStreamConsumer:
                     # Found closing tag — discard block, process remainder
                     self._in_think_block = False
                     buf = buf[best_idx + best_len:]
+                    buf_lower = buf.lower()
                 else:
                     # No closing tag yet — hold tail that could be a
                     # partial closing tag prefix, discard the rest.
@@ -383,7 +385,7 @@ class GatewayStreamConsumer:
                 for tag in self._OPEN_THINK_TAGS:
                     search_start = 0
                     while True:
-                        idx = buf.find(tag, search_start)
+                        idx = buf_lower.find(tag, search_start)
                         if idx == -1:
                             break
                         # Block-boundary check (mirrors cli.py logic)
@@ -415,12 +417,13 @@ class GatewayStreamConsumer:
                     self._accumulated += buf[:best_idx]
                     self._in_think_block = True
                     buf = buf[best_idx + best_len:]
+                    buf_lower = buf.lower()
                 else:
                     # No opening tag — check for a partial tag at the tail
                     held_back = 0
                     for tag in self._OPEN_THINK_TAGS:
                         for i in range(1, len(tag)):
-                            if buf.endswith(tag[:i]) and i > held_back:
+                            if buf_lower.endswith(tag[:i]) and i > held_back:
                                 held_back = i
                     if held_back:
                         self._accumulated += buf[:-held_back]

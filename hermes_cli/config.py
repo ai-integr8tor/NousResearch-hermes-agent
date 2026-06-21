@@ -985,6 +985,7 @@ DEFAULT_CONFIG = {
         # (60+ tool iterations with tiny output) before users assume the
         # bot is dead and /restart.
         "gateway_notify_interval": 180,
+        "prompt_cache_ttl": "5m",  # Default 5-minute TTL (1.25x write cost)
         # Freshness window for the gateway auto-continue note (seconds).
         # After a gateway crash/restart/SIGTERM mid-run, the next user
         # message gets a "[System note: your previous turn was
@@ -2589,6 +2590,15 @@ DEFAULT_CONFIG = {
         "write_json_snapshots": False,
     },
 
+    # Image generation settings
+    "image_gen": {
+        "provider": "fal",
+        # Base URL for serving generated images via HTTP (e.g. http://localhost:8008).
+        # When set, absolute filesystem paths returned by image_generate are rewritten
+        # to {serve_base_url}/images/{filename}.
+        "serve_base_url": "",
+    },
+
     # Contextual first-touch onboarding hints (see agent/onboarding.py).
     # Each hint is shown once per install and then latched here so it
     # never fires again.  Users can wipe the section to re-see all hints.
@@ -3341,6 +3351,12 @@ OPTIONAL_ENV_VARS = {
         "password": True,
         "category": "tool",
     },
+    "IMAGE_SERVE_BASE_URL": {
+        "description": "Base URL for serving generated images via HTTP (rewrites filesystem paths)",
+        "prompt": "Image serve base URL",
+        "category": "tool",
+    },
+
     "VOICE_TOOLS_OPENAI_KEY": {
         "description": "OpenAI API key for voice transcription (Whisper) and OpenAI TTS",
         "prompt": "OpenAI API Key (for Whisper STT + TTS)",
@@ -3850,6 +3866,12 @@ OPTIONAL_ENV_VARS = {
         "prompt": "Ephemeral system prompt",
         "url": None,
         "password": False,
+        "category": "setting",
+    },
+    "ANTHROPIC_CACHE_TTL": {
+        "description": "TTL for Anthropic prompt caching (5m or 1h)",
+        "prompt": "Anthropic Cache TTL",
+        "url": "https://docs.anthropic.com/claude/docs/prompt-caching",
         "category": "setting",
     },
 }
