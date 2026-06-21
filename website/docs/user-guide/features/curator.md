@@ -77,7 +77,6 @@ auxiliary:
   curator:
     provider: openrouter
     model: google/gemini-3-flash-preview
-    timeout: 600               # generous — reviews can take several minutes
     reasoning_effort: ""        # empty = inherit agent.reasoning_effort, then provider default
 ```
 
@@ -99,7 +98,7 @@ auxiliary:
 `auxiliary.curator.reasoning_effort` controls only the curator review fork. Empty string means the curator inherits `agent.reasoning_effort` when set; if neither is set, the provider/transport default applies. The literal `none` disables reasoning for the curator fork even if `agent.reasoning_effort` is configured. The reasoning key does not enable the LLM consolidation pass by itself — `curator.consolidate: true` or `hermes curator run --consolidate` is still required.
 
 :::note Legacy config
-Earlier releases used a one-off `curator.auxiliary.{provider,model}` block. Provider/model and `curator.auxiliary.reasoning_effort` still work as deprecated fallbacks when the canonical `auxiliary.curator` keys are absent, but emit deprecation log lines. Please migrate to `auxiliary.curator` above so the curator shares the same plumbing (`hermes model`, dashboard Models tab, `base_url`, `api_key`, `timeout`, `extra_body`, `reasoning_effort`) as every other aux task.
+Earlier releases used a one-off `curator.auxiliary.{provider,model}` block. Provider/model and `curator.auxiliary.reasoning_effort` still work as deprecated fallbacks when the canonical `auxiliary.curator` keys are absent, but emit deprecation log lines. Please migrate to `auxiliary.curator` above so the curator shares the same honored routing fields (`hermes model`, dashboard Models tab, `base_url`, `api_key`, `reasoning_effort`) as other aux tasks. Known limitation: `auxiliary.curator.timeout` and `auxiliary.curator.extra_body` are tracked separately and are not currently honored by the curator review fork.
 :::
 
 ## CLI
