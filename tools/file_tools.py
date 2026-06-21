@@ -20,8 +20,63 @@ from agent.redact import redact_sensitive_text
 
 logger = logging.getLogger(__name__)
 
-
 _EXPECTED_WRITE_ERRNOS = {errno.EACCES, errno.EPERM, errno.EROFS}
+
+
+# ---------------------------------------------------------------------------
+# Home resolution for in-process file tools
+# ---------------------------------------------------------------------------
+# In-process tools (write_file, read_file, patch, search_files) resolve ~
+# via os.path.expanduser(), which reads the process's HOME.  When Hermes
+# runs under a gateway, that HOME may differ from the interactive CLI HOME.
+# home_mode only affected terminal-tool subprocesses; this helper brings the
+# same policy to in-process file operations.
+# ---------------------------------------------------------------------------
+
+_file_tools_effective_home: str | None = None
+_file_tools_effective_home_resolved = False
+
+
+def _get_effective_home() -> str | None:
+    """Return the effective HOME for tilde expansion in file tools.
+
+    Uses the same policy as ``hermes_constants.get_subprocess_home()``:
+    when the computed subprocess HOME differs from the current process HOME,
+    return it so that ``~`` resolves to the correct directory.  Returns
+    ``None`` when the current HOME is already correct (i.e. no override
+    needed — callers fall back to normal ``os.path.expanduser``).
+    """
+    global _file_tools_effective_home, _file_tools_effective_home_resolved
+    if _file_tools_effective_home_resolved:
+        return _file_tools_effective_home
+    _file_tools_effective_home_resolved = True
+    try:
+        from hermes_constants import get_subprocess_home
+        _file_tools_effective_home = get_subprocess_home()
+    except Exception:
+        _file_tools_effective_home = None
+    return _file_tools_effective_home
+
+
+def _expand_user(path: str) -> str:
+    """Expand ~ using the effective home for file tools.
+
+    When ``get_subprocess_home()`` returns a non-None value, ``~`` is
+    resolved against that directory instead of the process HOME.  This
+    ensures cron jobs and gateway processes resolve ``~`` to the same
+    directory as interactive CLI sessions under the same home_mode policy.
+    """
+    if not path or "~" not in path:
+        return os.path.expanduser(path)
+    home = _get_effective_home()
+    if home and not path.startswith("~/"):
+        # Only override for paths that start with ~/; e.g. ~other/path
+        # should still use the other user's home.
+        return os.path.expanduser(path)
+    if home:
+        import pathlib
+        return str(pathlib.PurePosixPath(home) / path[2:]) if path.startswith("~/") else os.path.expanduser(path)
+    return os.path.expanduser(path)
 
 # ---------------------------------------------------------------------------
 # Read-size guard: cap the character count returned to the model.
@@ -222,7 +277,7 @@ def _resolve_base_dir(task_id: str = "default") -> Path:
     """
     root = _authoritative_workspace_root(task_id)
     if root:
-        base = Path(root).expanduser()
+        base = Path(_expand_user(root))
     else:
         base = Path(os.getcwd())
     if not base.is_absolute():
@@ -239,7 +294,7 @@ def _resolve_path_for_task(filepath: str, task_id: str = "default") -> Path:
     See :func:`_resolve_base_dir` for how the base is chosen. Absolute input
     paths are returned resolved-but-unanchored.
     """
-    p = Path(filepath).expanduser()
+    p = Path(_expand_user(filepath))
     if p.is_absolute():
         return p.resolve()
     return (_resolve_base_dir(task_id) / p).resolve()
@@ -261,12 +316,12 @@ def _path_resolution_warning(filepath: str, resolved: Path, task_id: str = "defa
     (no ``cd`` run yet) is warned on the very first write.
     """
     try:
-        if Path(filepath).expanduser().is_absolute():
+        if Path(_expand_user(filepath)).is_absolute():
             return None
         workspace_root = _authoritative_workspace_root(task_id)
         if not workspace_root:
             return None  # No authoritative workspace root to compare against.
-        root = Path(workspace_root).expanduser().resolve()
+        root = Path(_expand_user(workspace_root)).resolve()
         # Is `resolved` inside `root`?
         try:
             resolved.relative_to(root)
@@ -285,7 +340,7 @@ def _path_resolution_warning(filepath: str, resolved: Path, task_id: str = "defa
 
 def _is_blocked_device_path(path: str) -> bool:
     """Return True for concrete device/fd paths that can hang reads."""
-    normalized = os.path.expanduser(path)
+    normalized = _expand_user(path)
     if normalized in _BLOCKED_DEVICE_PATHS:
         return True
     # /proc/self/fd/0-2 and /proc/<pid>/fd/0-2 are Linux aliases for stdio
@@ -309,7 +364,7 @@ def _is_blocked_device(filepath: str) -> bool:
     they resolve to terminal-specific paths. Then check the resolved path so a
     workspace symlink to /dev/zero cannot bypass the guard.
     """
-    normalized = os.path.expanduser(filepath)
+    normalized = _expand_user(filepath)
     if _is_blocked_device_path(normalized):
         return True
     try:
@@ -356,7 +411,7 @@ def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None
         resolved = str(_resolve_path_for_task(filepath, task_id))
     except (OSError, ValueError):
         resolved = filepath
-    normalized = os.path.normpath(os.path.expanduser(filepath))
+    normalized = os.path.normpath(_expand_user(filepath))
     _err = (
         f"Refusing to write to sensitive system path: {filepath}\n"
         "Use the terminal tool with sudo if you need to modify system files."
