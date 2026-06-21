@@ -76,3 +76,14 @@ def test_conversation_loop_resolves_pool_helper_through_run_agent_module():
 
     assert "_ra()._pool_may_recover_from_rate_limit(" in source
     assert "pool_may_recover = _pool_may_recover_from_rate_limit(" not in source
+
+
+def test_gemini_cli_provider_case_insensitive():
+    # Provider names from config may arrive in mixed case; the guard must
+    # treat Google-Gemini-CLI and GOOGLE-GEMINI-CLI the same as google-gemini-cli.
+    for variant in ("Google-Gemini-CLI", "GOOGLE-GEMINI-CLI", "Google-gemini-cli"):
+        assert _pool_may_recover_from_rate_limit(
+            _pool(entries=3),
+            provider=variant,
+            base_url="https://generativelanguage.googleapis.com",
+        ) is False, f"Expected False for provider={variant!r}"
