@@ -1528,8 +1528,12 @@ export const zh: Translations = {
     subagents: count => `${count} 个子代理`,
     todos: (done, total) => `任务 ${done}/${total}`,
     running: '运行中',
+    failed: '失败',
+    done: '完成',
     stop: '停止',
     dismiss: '关闭',
+    waitingForOutput: '正在等待输出…',
+    noOutput: '未捕获输出。',
     exit: code => `退出码 ${code}`
   },
 

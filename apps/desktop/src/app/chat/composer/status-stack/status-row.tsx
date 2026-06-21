@@ -1,10 +1,8 @@
-import { Fragment, memo, type ReactNode, useState } from 'react'
+import { Fragment, memo, type ReactNode } from 'react'
 
 import { StatusRow } from '@/components/chat/status-row'
-import { TerminalOutput } from '@/components/chat/terminal-output'
 import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
-import { DisclosureCaret } from '@/components/ui/disclosure-caret'
 import { GlyphSpinner } from '@/components/ui/glyph-spinner'
 import { Tip } from '@/components/ui/tooltip'
 import { type Translations, useI18n } from '@/i18n'
@@ -30,7 +28,7 @@ const TODO_GLYPHS: Record<Exclude<TodoStatus, 'in_progress' | 'pending'>, { icon
 
 // Left slot: braille spinner while running, otherwise a small status dot
 // (green = done, red = failed) so the slot is always filled and rows align.
-function leadingGlyph(item: ComposerStatusItem, s: Translations['statusStack']): ReactNode {
+function leadingGlyph(item: ComposerStatusItem, s: Translations['statusStack'], sessionWorking: boolean): ReactNode {
   if (item.todoStatus === 'pending') {
     return (
       <span
@@ -46,12 +44,32 @@ function leadingGlyph(item: ComposerStatusItem, s: Translations['statusStack']):
     return <Codicon className={glyph.tone} name={glyph.icon} size="0.8rem" />
   }
 
-  if (item.state === 'running') {
+  // An `in_progress` todo (or a running background/subagent item) only gets a
+  // live spinner while the session's turn is actually running. If the turn has
+  // settled — the agent finished, stopped, or is waiting on the user — a todo
+  // left mid-flight must NOT keep spinning forever (the "task pane hangs at the
+  // end" bug): fall through to a static dot so the row reads as paused, not
+  // actively working. Background/subagent rows carry their own real lifecycle
+  // (`state`), so they're unaffected when the gate is open.
+  const isTodoInProgress = item.todoStatus === 'in_progress'
+
+  if (item.state === 'running' && (sessionWorking || !isTodoInProgress)) {
     return (
       <GlyphSpinner
         ariaLabel={s.running}
         className="text-[0.9rem] leading-none text-muted-foreground/80"
         spinner="braille"
+      />
+    )
+  }
+
+  // Settled in_progress todo: a hollow ring reads as "started, awaiting the
+  // next turn" — distinct from the dashed pending ring and the filled done dot.
+  if (isTodoInProgress) {
+    return (
+      <span
+        aria-hidden
+        className="box-border size-[0.7rem] rounded-full border-2 border-muted-foreground/55"
       />
     )
   }
@@ -73,6 +91,11 @@ interface StatusItemRowProps {
   onOpen?: () => void
   /** Cancel a running background task. */
   onStop?: (id: string) => void
+  /** Open the roomy live process-output modal for a running background task. */
+  onOpenOutput?: (id: string) => void
+  /** Whether the owning session's turn is actively running — gates the live
+   *  spinner on `in_progress` todos so they settle when the turn ends. */
+  sessionWorking?: boolean
 }
 
 /**
@@ -80,10 +103,16 @@ interface StatusItemRowProps {
  * Memoised + keyed by id so parent re-renders never remount it (the spinner
  * keeps ticking instead of resetting).
  */
-export const StatusItemRow = memo(function StatusItemRow({ item, onDismiss, onOpen, onStop }: StatusItemRowProps) {
+export const StatusItemRow = memo(function StatusItemRow({
+  item,
+  onDismiss,
+  onOpen,
+  onStop,
+  onOpenOutput,
+  sessionWorking = false
+}: StatusItemRowProps) {
   const { t } = useI18n()
   const s = t.statusStack
-  const [outputOpen, setOutputOpen] = useState(false)
   const failed = item.state === 'failed'
   const running = item.state === 'running'
 
@@ -95,13 +124,18 @@ export const StatusItemRow = memo(function StatusItemRow({ item, onDismiss, onOp
       : null
 
   const canOpen = item.type === 'subagent' && !!onOpen
-  const hasOutput = item.type === 'background' && !!item.output
-  const onActivate = canOpen ? onOpen : hasOutput ? () => setOutputOpen(open => !open) : undefined
+  // Background tasks (running OR finished) open the roomy live process-output
+  // modal. Their gateway subprocess can't live in the interactive xterm pane, so
+  // a dedicated tailing viewer is the honest home for the output — one path for
+  // every background row, no dead inline dropdown.
+  const isBackground = item.type === 'background'
+
+  const onActivate = canOpen ? onOpen : isBackground ? () => onOpenOutput?.(item.id) : undefined
 
   return (
     <Fragment>
       <StatusRow
-        leading={leadingGlyph(item, s)}
+        leading={leadingGlyph(item, s, sessionWorking)}
         onActivate={onActivate}
         trailing={
           action ? (
@@ -147,9 +181,8 @@ export const StatusItemRow = memo(function StatusItemRow({ item, onDismiss, onOp
             {s.exit(item.exitCode)}
           </span>
         )}
-        {hasOutput && <DisclosureCaret className="shrink-0 text-muted-foreground/45" open={outputOpen} size="0.8em" />}
+        {isBackground && <ArrowUpRight aria-hidden className="shrink-0 size-3.5 text-muted-foreground/45" />}
       </StatusRow>
-      {hasOutput && outputOpen && <TerminalOutput className="mx-auto mb-1 max-w-[90%]" text={item.output!} />}
     </Fragment>
   )
 })
