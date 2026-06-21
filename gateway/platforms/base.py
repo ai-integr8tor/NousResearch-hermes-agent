@@ -1824,6 +1824,13 @@ class BasePlatformAdapter(ABC):
     # preview (see gateway/run.py progress_callback).
     supports_code_blocks: bool = False
 
+    # Optional language tag appended to fenced code blocks in tool-progress
+    # messages (e.g. "bash").  Empty string = bare fence (default, safe for
+    # Slack mrkdwn which would render a tag as literal text).  Platforms whose
+    # markdown renderer honours language tags (Feishu Card 2.0, Discord) can
+    # set this to enable syntax highlighting on terminal command previews.
+    code_block_language_tag: str = ""
+
     # The command prefix users can always TYPE on this platform to reach
     # Hermes commands.  Default "/" (most platforms deliver "/approve" etc.
     # as plain message text).  Platforms where typing a leading "/" is

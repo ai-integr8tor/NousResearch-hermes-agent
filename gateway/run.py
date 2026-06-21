@@ -14494,7 +14494,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 _block_header = (
                     "" if last_was_terminal_block[0] else f"{emoji} {tool_name}\n"
                 )
-                _code_block_full = f"{_block_header}```\n{_cmd_full}\n```"
+                _lang_tag = getattr(_progress_adapter, "code_block_language_tag", "")
+                _fence_open = f"```{_lang_tag}" if _lang_tag else "```"
+                _code_block_full = f"{_block_header}{_fence_open}\n{_cmd_full}\n```"
                 # Single-line, capped preview for non-verbose modes.
                 _pl = get_tool_preview_max_len()
                 _cap = _pl if _pl > 0 else 40
@@ -14505,7 +14507,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     _cmd_short = _cmd_short[:_cap - 3] + "..."
                 elif _multiline:
                     _cmd_short = _cmd_short + " ..."
-                _code_block_short = f"{_block_header}```\n{_cmd_short}\n```"
+                _code_block_short = f"{_block_header}{_fence_open}\n{_cmd_short}\n```"
 
             # Verbose mode: show detailed arguments, respects tool_preview_length
             if progress_mode == "verbose":
