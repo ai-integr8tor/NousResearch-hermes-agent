@@ -59,6 +59,7 @@ import { droppedFileInlineRefs, type SessionDragPayload, sessionInlineRef } from
 import type { ChatBarState } from './composer/types'
 import { type DroppedFile, partitionDroppedFiles } from './hooks/use-composer-actions'
 import { useFileDropZone } from './hooks/use-file-drop-zone'
+import { AgentRunInspector } from './right-rail/agent-run-inspector'
 import { ScrollToBottomButton } from './scroll-to-bottom-button'
 import { SessionActionsMenu } from './sidebar/session-actions-menu'
 import { threadLoadingState } from './thread-loading'
@@ -178,6 +179,19 @@ interface ChatRuntimeBoundaryProps {
 }
 
 const NO_MESSAGES: ChatMessage[] = []
+
+function AgentRunInspectorBoundary(
+  props: Omit<React.ComponentProps<typeof AgentRunInspector>, 'messageCount'>
+) {
+  const messages = useStore($messages)
+
+  return (
+    <AgentRunInspector
+      {...props}
+      messageCount={messages.filter(message => !message.hidden).length}
+    />
+  )
+}
 
 /**
  * Owns the $messages subscription and the assistant-ui external-store runtime.
@@ -445,47 +459,60 @@ export function ChatView({
           onThreadMessagesChange={onThreadMessagesChange}
           suppressMessages={routeSessionMismatch}
         >
-          <Thread
-            clampToComposer={showChatBar}
-            cwd={currentCwd}
-            gateway={gateway}
-            intro={showIntro ? { personality: introPersonality, seed: introSeed } : undefined}
-            loading={threadLoading}
-            onBranchInNewChat={onBranchInNewChat}
-            onCancel={onCancel}
-            onDismissError={onDismissError}
-            onRestoreToMessage={onRestoreToMessage}
-            sessionId={activeSessionId}
-            sessionKey={threadKey}
-          />
-          {showChatBar && (
-            <Suspense fallback={<ChatBarFallback />}>
-              <ChatBar
-                busy={busy}
+          <div className="flex h-full min-w-0">
+            <div className="relative min-w-0 flex-1">
+              <Thread
+                clampToComposer={showChatBar}
                 cwd={currentCwd}
-                disabled={!gatewayOpen}
-                focusKey={activeSessionId}
                 gateway={gateway}
-                maxRecordingSeconds={maxVoiceRecordingSeconds}
-                onAddContextRef={onAddContextRef}
-                onAddUrl={onAddUrl}
-                onAttachDroppedItems={onAttachDroppedItems}
-                onAttachImageBlob={onAttachImageBlob}
+                intro={showIntro ? { personality: introPersonality, seed: introSeed } : undefined}
+                loading={threadLoading}
+                onBranchInNewChat={onBranchInNewChat}
                 onCancel={onCancel}
-                onPasteClipboardImage={onPasteClipboardImage}
-                onPickFiles={onPickFiles}
-                onPickFolders={onPickFolders}
-                onPickImages={onPickImages}
-                onRemoveAttachment={onRemoveAttachment}
-                onSteer={onSteer}
-                onSubmit={onSubmit}
-                onTranscribeAudio={onTranscribeAudio}
-                queueSessionKey={selectedSessionId}
+                onDismissError={onDismissError}
+                onRestoreToMessage={onRestoreToMessage}
                 sessionId={activeSessionId}
-                state={chatBarState}
+                sessionKey={threadKey}
               />
-            </Suspense>
-          )}
+              {showChatBar && (
+                <Suspense fallback={<ChatBarFallback />}>
+                  <ChatBar
+                    busy={busy}
+                    cwd={currentCwd}
+                    disabled={!gatewayOpen}
+                    focusKey={activeSessionId}
+                    gateway={gateway}
+                    maxRecordingSeconds={maxVoiceRecordingSeconds}
+                    onAddContextRef={onAddContextRef}
+                    onAddUrl={onAddUrl}
+                    onAttachDroppedItems={onAttachDroppedItems}
+                    onAttachImageBlob={onAttachImageBlob}
+                    onCancel={onCancel}
+                    onPasteClipboardImage={onPasteClipboardImage}
+                    onPickFiles={onPickFiles}
+                    onPickFolders={onPickFolders}
+                    onPickImages={onPickImages}
+                    onRemoveAttachment={onRemoveAttachment}
+                    onSteer={onSteer}
+                    onSubmit={onSubmit}
+                    onTranscribeAudio={onTranscribeAudio}
+                    queueSessionKey={selectedSessionId}
+                    sessionId={activeSessionId}
+                    state={chatBarState}
+                  />
+                </Suspense>
+              )}
+            </div>
+            <AgentRunInspectorBoundary
+              awaitingResponse={awaitingResponse}
+              busy={busy}
+              gatewayOpen={gatewayOpen}
+              gatewayState={gatewayState}
+              model={currentModel}
+              provider={currentProvider}
+              sessionId={activeSessionId}
+            />
+          </div>
         </ChatRuntimeBoundary>
         {resumeExhausted && routedSessionId && (
           <div className="absolute inset-0 z-10 grid place-items-center bg-(--ui-chat-surface-background) px-8 py-10">
