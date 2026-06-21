@@ -1058,6 +1058,40 @@ class TestSessionStoreEntriesAttribute:
         assert not hasattr(store, "_sessions")
 
 
+class TestSessionStoreLoadHardening:
+    def test_skips_malformed_entries_without_aborting_load(self, tmp_path, capsys):
+        sessions_path = tmp_path / "sessions.json"
+        sessions_path.write_text(json.dumps({
+            "legacy-flag": True,
+            "bad-origin": {
+                "session_key": "agent:main:telegram:dm:bad",
+                "session_id": "sess_bad",
+                "created_at": "2026-01-01T00:00:00",
+                "updated_at": "2026-01-01T00:00:00",
+                "origin": True,
+            },
+            "good": {
+                "session_key": "agent:main:telegram:dm:good",
+                "session_id": "sess_good",
+                "created_at": "2026-01-01T00:00:00",
+                "updated_at": "2026-01-01T00:00:00",
+                "origin": {
+                    "platform": "telegram",
+                    "chat_id": "12345",
+                },
+            },
+        }), encoding="utf-8")
+
+        store = SessionStore(sessions_dir=tmp_path, config=GatewayConfig())
+        store._ensure_loaded()
+
+        captured = capsys.readouterr()
+        assert "Failed to load sessions" not in captured.out
+        assert "Failed to load sessions" not in captured.err
+        assert set(store._entries) == {"good"}
+        assert store._entries["good"].session_id == "sess_good"
+
+
 class TestHasAnySessions:
     """Tests for has_any_sessions() fix (issue #351)."""
 

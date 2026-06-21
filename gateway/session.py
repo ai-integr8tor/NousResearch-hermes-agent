@@ -146,6 +146,8 @@ class SessionSource:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "SessionSource":
+        if not isinstance(data, dict):
+            raise TypeError("SessionSource data must be a dict")
         return cls(
             platform=Platform(data["platform"]),
             chat_id=str(data["chat_id"]),
@@ -554,6 +556,8 @@ class SessionEntry:
     
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "SessionEntry":
+        if not isinstance(data, dict):
+            raise TypeError("SessionEntry data must be a dict")
         origin = None
         if "origin" in data and data["origin"]:
             origin = SessionSource.from_dict(data["origin"])
@@ -776,11 +780,20 @@ class SessionStore:
             try:
                 with open(sessions_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
+                    if not isinstance(data, dict):
+                        raise ValueError("sessions.json root must be a JSON object")
                     for key, entry_data in data.items():
                         try:
                             self._entries[key] = SessionEntry.from_dict(entry_data)
-                        except (ValueError, KeyError):
+                        except (TypeError, ValueError, KeyError):
+                            logger.debug(
+                                "Skipping malformed session entry %r from %s",
+                                key,
+                                sessions_file,
+                                exc_info=True,
+                            )
                             # Skip entries with unknown/removed platform values
+                            # or malformed payloads from legacy/partial writes.
                             continue
             except Exception as e:
                 print(f"[gateway] Warning: Failed to load sessions: {e}")
