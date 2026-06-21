@@ -915,6 +915,28 @@ def test_review_model_defaults_to_main_when_slot_is_auto(curator_env):
     assert curator._resolve_review_model(cfg) == ("openrouter", "openai/gpt-5.5")
 
 
+def test_review_reasoning_defaults_to_agent_reasoning(curator_env):
+    """No curator-specific override → inherit valid agent.reasoning_effort."""
+    curator = curator_env["curator"]
+    cfg = {
+        "agent": {"reasoning_effort": "high"},
+        "model": {"provider": "openrouter", "default": "openai/gpt-5.5"},
+        "auxiliary": {"curator": {"provider": "auto", "model": ""}},
+    }
+
+    assert curator._resolve_review_reasoning_config(cfg) == {
+        "enabled": True,
+        "effort": "high",
+    }
+
+
+def test_review_reasoning_empty_config_uses_provider_default(curator_env):
+    """No curator or agent reasoning setting → leave provider default in effect."""
+    curator = curator_env["curator"]
+
+    assert curator._resolve_review_reasoning_config({}) is None
+
+
 def test_review_model_honors_auxiliary_curator_slot(curator_env):
     """auxiliary.curator.{provider,model} fully set → that pair wins."""
     curator = curator_env["curator"]

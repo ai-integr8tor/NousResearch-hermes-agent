@@ -30,7 +30,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Set
 
-from hermes_constants import get_hermes_home
+from hermes_constants import get_hermes_home, parse_reasoning_effort
 from tools import skill_usage
 from utils import atomic_json_write
 
@@ -51,6 +51,7 @@ class _ReviewRuntimeBinding(NamedTuple):
     model: str
     explicit_api_key: Optional[str]
     explicit_base_url: Optional[str]
+    reasoning_config: Optional[Dict[str, Any]]
 
 
 DEFAULT_INTERVAL_HOURS = 24 * 7  # 7 days
@@ -1689,6 +1690,33 @@ def run_curator_review(
     }
 
 
+def _parse_review_reasoning_source(
+    source: str,
+    value: Any,
+) -> tuple[Optional[Dict[str, Any]], bool]:
+    text = str(value or "").strip()
+    if not text:
+        return None, False
+    parsed = parse_reasoning_effort(text)
+    if parsed is None:
+        logger.warning(
+            "curator: invalid %s.reasoning_effort=%r; falling back",
+            source,
+            text,
+        )
+        return None, False
+    return parsed, True
+
+
+def _resolve_review_reasoning_config(cfg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    agent_cfg = cfg.get("agent", {}) if isinstance(cfg.get("agent"), dict) else {}
+    parsed, present = _parse_review_reasoning_source(
+        "agent",
+        agent_cfg.get("reasoning_effort"),
+    )
+    return parsed if present else None
+
+
 def _resolve_review_runtime(cfg: Dict[str, Any]) -> _ReviewRuntimeBinding:
     """Resolve provider/model and per-slot credentials for the curator review fork.
 
@@ -1700,6 +1728,7 @@ def _resolve_review_runtime(cfg: Dict[str, Any]) -> _ReviewRuntimeBinding:
     _main = cfg.get("model", {}) if isinstance(cfg.get("model"), dict) else {}
     _main_provider = _main.get("provider") or "auto"
     _main_model = _main.get("default") or _main.get("model") or ""
+    _reasoning_config = _resolve_review_reasoning_config(cfg)
 
     # 1. Canonical aux task slot
     _aux = cfg.get("auxiliary", {}) if isinstance(cfg.get("auxiliary"), dict) else {}
@@ -1712,6 +1741,7 @@ def _resolve_review_runtime(cfg: Dict[str, Any]) -> _ReviewRuntimeBinding:
             _task_model,
             _strip_aux_credential(_cur_task.get("api_key")),
             _strip_aux_credential(_cur_task.get("base_url")),
+            _reasoning_config,
         )
 
     # 2. Legacy curator.auxiliary.{provider,model} (deprecated, pre-unification)
@@ -1729,10 +1759,11 @@ def _resolve_review_runtime(cfg: Dict[str, Any]) -> _ReviewRuntimeBinding:
             str(_legacy_model),
             _strip_aux_credential(_legacy.get("api_key")),
             _strip_aux_credential(_legacy.get("base_url")),
+            _reasoning_config,
         )
 
     # 3. Fall through to the main chat model
-    return _ReviewRuntimeBinding(_main_provider, _main_model, None, None)
+    return _ReviewRuntimeBinding(_main_provider, _main_model, None, None, _reasoning_config)
 
 
 def _resolve_review_model(cfg: Dict[str, Any]) -> tuple[str, str]:
