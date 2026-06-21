@@ -3,6 +3,7 @@
 from unittest.mock import MagicMock, patch
 
 from hermes_cli.models import (
+    CANONICAL_PROVIDERS,
     azure_foundry_model_api_mode,
     copilot_model_api_mode,
     fetch_github_model_catalog,
@@ -20,6 +21,8 @@ from hermes_cli.models import (
     provider_model_ids,
     validate_requested_model,
 )
+from hermes_cli.auth import PROVIDER_REGISTRY
+from hermes_cli.providers import resolve_provider_full
 
 
 # -- helpers -----------------------------------------------------------------
@@ -159,6 +162,7 @@ class TestNormalizeProvider:
         assert normalize_provider("moonshot") == "kimi-coding"
         assert normalize_provider("step") == "stepfun"
         assert normalize_provider("github-copilot") == "copilot"
+        assert normalize_provider("mistral-ai") == "mistral"
 
     def test_case_insensitive(self):
         assert normalize_provider("OpenRouter") == "openrouter"
@@ -169,6 +173,7 @@ class TestProviderLabel:
         assert provider_label("anthropic") == "Anthropic"
         assert provider_label("kimi") == "Kimi / Kimi Coding Plan"
         assert provider_label("stepfun") == "StepFun Step Plan"
+        assert provider_label("mistral") == "Mistral AI"
         assert provider_label("copilot") == "GitHub Copilot"
         assert provider_label("copilot-acp") == "GitHub Copilot ACP"
         assert provider_label("auto") == "Auto"
@@ -180,6 +185,19 @@ class TestProviderLabel:
 # -- provider_model_ids ------------------------------------------------------
 
 class TestProviderModelIds:
+    def test_mistral_is_first_class_provider(self):
+        assert "mistral" in PROVIDER_REGISTRY
+        assert any(p.slug == "mistral" for p in CANONICAL_PROVIDERS)
+
+        pdef = resolve_provider_full("mistral")
+        assert pdef is not None
+        assert pdef.base_url == "https://api.mistral.ai/v1"
+        assert "MISTRAL_API_KEY" in pdef.api_key_env_vars
+
+        ids = provider_model_ids("mistral")
+        assert "mistral-small-latest" in ids
+        assert "mistral-large-latest" in ids
+
     def test_openrouter_returns_curated_list(self):
         with patch(
             "hermes_cli.models.fetch_openrouter_models",
@@ -625,6 +643,29 @@ class TestValidateApiFallback:
         assert result["accepted"] is True
         assert result["persist"] is True
         assert result["recognized"] is True
+
+    def test_mistral_known_model_accepted_via_catalog_when_api_down(self):
+        result = _validate("mistral-small-latest", provider="mistral", api_models=None)
+        assert result["accepted"] is True
+        assert result["persist"] is True
+        assert result["recognized"] is True
+
+    def test_custom_mistral_endpoint_trusted_without_models_probe(self):
+        with patch("hermes_cli.models.probe_api_models") as mock_probe:
+            result = validate_requested_model(
+                "mistral-small-latest",
+                "custom",
+                api_key="mistral-key",
+                base_url="https://api.mistral.ai/v1",
+            )
+
+        mock_probe.assert_not_called()
+        assert result == {
+            "accepted": True,
+            "persist": True,
+            "recognized": True,
+            "message": None,
+        }
 
     def test_unknown_provider_soft_accepted_when_api_down(self):
         # No catalog for unknown providers — soft-accept with a Note.

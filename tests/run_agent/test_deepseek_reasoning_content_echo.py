@@ -265,6 +265,39 @@ class TestCopyReasoningContentForApi:
         agent._copy_reasoning_content_for_api(source, api_msg)
         assert "reasoning_content" not in api_msg
 
+    def test_mistral_strips_persisted_reasoning_content(self) -> None:
+        """Mistral rejects reasoning_content fields replayed from prior providers."""
+        agent = _make_agent(
+            provider="mistral",
+            model="mistral-small-latest",
+            base_url="https://api.mistral.ai/v1",
+        )
+        source = {
+            "role": "assistant",
+            "content": "ok",
+            "reasoning": "stored internal reasoning",
+            "reasoning_content": "stored provider-native scratchpad",
+        }
+        api_msg = source.copy()
+        agent._copy_reasoning_content_for_api(source, api_msg)
+        assert "reasoning_content" not in api_msg
+
+    def test_mistral_custom_base_url_strips_persisted_reasoning_content(self) -> None:
+        """Custom endpoints targeting Mistral also need strict replay cleanup."""
+        agent = _make_agent(
+            provider="custom",
+            model="mistral-small-latest",
+            base_url="https://api.mistral.ai/v1",
+        )
+        source = {
+            "role": "assistant",
+            "content": "ok",
+            "reasoning_content": "stored provider-native scratchpad",
+        }
+        api_msg = source.copy()
+        agent._copy_reasoning_content_for_api(source, api_msg)
+        assert "reasoning_content" not in api_msg
+
     def test_deepseek_custom_base_url(self) -> None:
         """Custom provider pointing at api.deepseek.com is detected via host."""
         agent = _make_agent(

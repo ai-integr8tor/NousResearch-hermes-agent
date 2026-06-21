@@ -34,6 +34,7 @@ You need at least one way to connect to an LLM. Use `hermes model` to switch pro
 | **Alibaba Cloud (Coding Plan)** | `DASHSCOPE_API_KEY` (provider: `alibaba-coding-plan`, alias: `alibaba_coding`) — separate billing SKU, different endpoint |
 | **Kilo Code** | `KILOCODE_API_KEY` in `~/.hermes/.env` (provider: `kilocode`) |
 | **Xiaomi MiMo** | `XIAOMI_API_KEY` in `~/.hermes/.env` (provider: `xiaomi`, aliases: `mimo`, `xiaomi-mimo`) |
+| **Mistral AI** | `MISTRAL_API_KEY` in `~/.hermes/.env` (provider: `mistral`, aliases: `mistral-ai`, `mistralai`) |
 | **Tencent TokenHub** | `TOKENHUB_API_KEY` in `~/.hermes/.env` (provider: `tencent-tokenhub`, aliases: `tencent`, `tokenhub`, `tencentmaas`) |
 | **OpenCode Zen** | `OPENCODE_ZEN_API_KEY` in `~/.hermes/.env` (provider: `opencode-zen`) |
 | **OpenCode Go** | `OPENCODE_GO_API_KEY` in `~/.hermes/.env` (provider: `opencode-go`) |
@@ -246,6 +247,10 @@ hermes chat --provider alibaba --model qwen3.5-plus
 hermes chat --provider xiaomi --model mimo-v2-pro
 # Requires: XIAOMI_API_KEY in ~/.hermes/.env
 
+# Mistral AI
+hermes chat --provider mistral --model mistral-small-latest
+# Requires: MISTRAL_API_KEY in ~/.hermes/.env
+
 # Tencent TokenHub (Hy3 Preview)
 hermes chat --provider tencent-tokenhub --model hy3-preview
 # Requires: TOKENHUB_API_KEY in ~/.hermes/.env
@@ -267,7 +272,7 @@ model:
   default: "zai-org/GLM-5.1-FP8"
 ```
 
-Base URLs can be overridden with `NOVITA_BASE_URL`, `GLM_BASE_URL`, `KIMI_BASE_URL`, `MINIMAX_BASE_URL`, `MINIMAX_CN_BASE_URL`, `DASHSCOPE_BASE_URL`, `XIAOMI_BASE_URL`, `GMI_BASE_URL`, or `TOKENHUB_BASE_URL` environment variables.
+Base URLs can be overridden with `NOVITA_BASE_URL`, `GLM_BASE_URL`, `KIMI_BASE_URL`, `MINIMAX_BASE_URL`, `MINIMAX_CN_BASE_URL`, `DASHSCOPE_BASE_URL`, `XIAOMI_BASE_URL`, `MISTRAL_BASE_URL`, `GMI_BASE_URL`, or `TOKENHUB_BASE_URL` environment variables.
 
 :::note Z.AI Endpoint Auto-Detection
 When using the Z.AI / GLM provider, Hermes automatically probes multiple endpoints (global, China, coding variants) to find one that accepts your API key. You don't need to set `GLM_BASE_URL` manually — the working endpoint is detected and cached automatically.

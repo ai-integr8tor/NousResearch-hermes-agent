@@ -2182,9 +2182,26 @@ def looks_like_codex_intermediate_ack(
 
 
 
+def _provider_rejects_reasoning_content(agent) -> bool:
+    """Return True for providers/endpoints that reject reasoning_content echoes."""
+    provider = (getattr(agent, "provider", None) or "").lower()
+    if provider == "mistral":
+        return True
+    base_url = getattr(agent, "base_url", None) or ""
+    return base_url_host_matches(base_url, "api.mistral.ai")
+
+
 def copy_reasoning_content_for_api(agent, source_msg: dict, api_msg: dict) -> None:
     """Copy provider-facing reasoning fields onto an API replay message."""
     if source_msg.get("role") != "assistant":
+        return
+
+    # Some strict OpenAI-compatible providers (notably Mistral) reject
+    # provider-specific reasoning echoes that were persisted from prior
+    # providers (DeepSeek/Kimi/Codex/etc.). Because api_msg starts as a copy of
+    # the stored message, remove the field before any generic promotion logic.
+    if _provider_rejects_reasoning_content(agent):
+        api_msg.pop("reasoning_content", None)
         return
 
     # 1. Explicit reasoning_content already set — preserve it verbatim

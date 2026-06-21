@@ -181,6 +181,11 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
         transport="openai_chat",
         base_url_env_var="XIAOMI_BASE_URL",
     ),
+    "mistral": HermesOverlay(
+        transport="openai_chat",
+        base_url_override="https://api.mistral.ai/v1",
+        base_url_env_var="MISTRAL_BASE_URL",
+    ),
     "tencent-tokenhub": HermesOverlay(
         transport="openai_chat",
         base_url_env_var="TOKENHUB_BASE_URL",
@@ -327,6 +332,10 @@ ALIASES: Dict[str, str] = {
     # xiaomi
     "mimo": "xiaomi",
     "xiaomi-mimo": "xiaomi",
+
+    # mistral
+    "mistral-ai": "mistral",
+    "mistralai": "mistral",
 
     # tencent
     "tencent": "tencent-tokenhub",

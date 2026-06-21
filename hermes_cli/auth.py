@@ -413,6 +413,14 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
         api_key_env_vars=("XIAOMI_API_KEY",),
         base_url_env_var="XIAOMI_BASE_URL",
     ),
+    "mistral": ProviderConfig(
+        id="mistral",
+        name="Mistral AI",
+        auth_type="api_key",
+        inference_base_url="https://api.mistral.ai/v1",
+        api_key_env_vars=("MISTRAL_API_KEY",),
+        base_url_env_var="MISTRAL_BASE_URL",
+    ),
     "tencent-tokenhub": ProviderConfig(
         id="tencent-tokenhub",
         name="Tencent TokenHub",
