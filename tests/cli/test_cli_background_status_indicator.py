@@ -7,7 +7,9 @@ finally block, so len() reflects truly-running tasks.
 """
 
 import threading
-from datetime import datetime
+import time
+from datetime import datetime, timedelta
+from types import SimpleNamespace
 
 from cli import HermesCLI
 
@@ -22,10 +24,34 @@ def _make_cli():
     cli_obj = HermesCLI.__new__(HermesCLI)
     cli_obj.model = "anthropic/claude-opus-4.6"
     cli_obj.agent = None
+    cli_obj.provider = "anthropic"
+    cli_obj.requested_provider = "anthropic"
     cli_obj._background_tasks = {}
+    cli_obj._codex_usage_snapshot = None
+    cli_obj._codex_usage_last_checked = 0.0
+    cli_obj._codex_usage_refreshing = False
+    cli_obj._codex_usage_lock = threading.Lock()
     # The snapshot reads session_start to compute duration; supply a stub.
     cli_obj.session_start = datetime.now()
     return cli_obj
+
+
+def _codex_usage_snapshot(used_percent: float, reset_seconds: float | None = None):
+    reset_at = None
+    if reset_seconds is not None:
+        reset_at = datetime.now() + timedelta(seconds=reset_seconds)
+    return SimpleNamespace(
+        windows=(SimpleNamespace(label="Session", used_percent=used_percent, reset_at=reset_at),)
+    )
+
+
+def _seed_codex_usage(cli_obj, used_percent: float, reset_seconds: float | None = None) -> None:
+    cli_obj.provider = "openai-codex"
+    cli_obj.requested_provider = "openai-codex"
+    cli_obj._codex_usage_snapshot = _codex_usage_snapshot(used_percent, reset_seconds=reset_seconds)
+    # Fresh enough that _get_status_bar_snapshot() will not start a network
+    # refresh thread during tests; it simply reads the cached usage data.
+    cli_obj._codex_usage_last_checked = time.monotonic()
 
 
 def test_snapshot_reports_zero_when_no_background_tasks():
@@ -189,3 +215,59 @@ def test_indicators_independent_agents_and_processes(monkeypatch):
     rendered = "".join(text for _style, text in frags)
     assert "▶ 1" in rendered
     assert "⚙ 2" in rendered
+
+
+# ── OpenAI Codex current-session usage indicator ─────────────────────────
+
+
+def test_codex_session_limit_formatter_uses_remaining_percent():
+    assert HermesCLI._format_codex_session_limit(_codex_usage_snapshot(23.4)) == "Codex 77%"
+
+
+def test_codex_session_limit_formatter_includes_session_reset_countdown():
+    assert (
+        HermesCLI._format_codex_session_limit(
+            _codex_usage_snapshot(23.4, reset_seconds=(2 * 3600) + (10 * 60) + 30)
+        )
+        == "Codex 77% reset 2h 10m"
+    )
+
+
+def test_snapshot_includes_cached_codex_session_limit_for_codex_provider():
+    cli_obj = _make_cli()
+    _seed_codex_usage(cli_obj, 12.0)
+
+    snap = cli_obj._get_status_bar_snapshot()
+
+    assert snap["codex_session_limit"] == "Codex 88%"
+
+
+def test_snapshot_hides_cached_codex_session_limit_for_other_providers():
+    cli_obj = _make_cli()
+    cli_obj._codex_usage_snapshot = _codex_usage_snapshot(12.0)
+
+    snap = cli_obj._get_status_bar_snapshot()
+
+    assert snap["codex_session_limit"] is None
+
+
+def test_plain_text_status_shows_codex_session_limit():
+    cli_obj = _make_cli()
+    _seed_codex_usage(cli_obj, 66.0, reset_seconds=(3 * 3600) + (20 * 60) + 30)
+
+    text = cli_obj._build_status_bar_text(width=100)
+
+    assert "Codex 34% reset 3h 20m" in text
+
+
+def test_fragments_include_codex_session_limit():
+    cli_obj = _make_cli()
+    _seed_codex_usage(cli_obj, 94.0)
+    cli_obj._status_bar_visible = True
+    cli_obj._get_tui_terminal_width = lambda: 120  # type: ignore[method-assign]
+
+    frags = cli_obj._get_status_bar_fragments()
+    rendered = "".join(text for _style, text in frags)
+
+    assert "Codex 6%" in rendered
+    assert any(style == "class:status-bar-bad" and text == "Codex 6%" for style, text in frags)

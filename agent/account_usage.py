@@ -438,9 +438,16 @@ def _resolve_codex_usage_url(base_url: str) -> str:
 
 def _fetch_codex_account_usage() -> Optional[AccountUsageSnapshot]:
     creds = resolve_codex_runtime_credentials(refresh_if_expiring=True)
-    token_data = _read_codex_tokens()
-    tokens = token_data.get("tokens") or {}
-    account_id = str(tokens.get("account_id", "") or "").strip() or None
+    account_id = None
+    try:
+        token_data = _read_codex_tokens()
+        tokens = token_data.get("tokens") or {}
+        account_id = str(tokens.get("account_id", "") or "").strip() or None
+    except Exception:
+        # Newer credential-pool backed Codex auth may not have the legacy
+        # codex token file. The account header is optional for the usage
+        # endpoint, so continue with the resolved bearer token.
+        account_id = None
     headers = {
         "Authorization": f"Bearer {creds['api_key']}",
         "Accept": "application/json",

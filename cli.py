@@ -3663,6 +3663,15 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         self._startup_skills_line_shown = False
         self._active_session_lease = None
 
+        # OpenAI Codex account-limit snapshot for the status bar. The usage
+        # endpoint is network-backed, so the TUI render path only reads this
+        # cache and opportunistically starts a single background refresh when
+        # stale. ``/usage`` remains the synchronous, detailed view.
+        self._codex_usage_snapshot = None
+        self._codex_usage_last_checked = 0.0
+        self._codex_usage_refreshing = False
+        self._codex_usage_lock = threading.Lock()
+
         # Voice mode state (also reinitialized inside run() for interactive TUI).
         self._voice_lock = threading.Lock()
         self._voice_mode = False
@@ -4021,6 +4030,113 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         filled = round((safe_percent / 100) * width)
         return f"[{('█' * filled) + ('░' * max(0, width - filled))}]"
 
+    def _current_provider_name(self) -> str:
+        """Return the currently active provider, including runtime fallbacks."""
+        agent = getattr(self, "agent", None)
+        for value in (
+            getattr(agent, "provider", None),
+            getattr(self, "provider", None),
+            getattr(self, "requested_provider", None),
+        ):
+            cleaned = str(value or "").strip().lower()
+            if cleaned:
+                return cleaned
+        return ""
+
+    def _maybe_refresh_codex_usage_snapshot(self, *, min_interval: float = 300.0) -> None:
+        """Start a non-blocking Codex usage refresh when the cache is stale."""
+        if self._current_provider_name() != "openai-codex":
+            return
+
+        now = time.monotonic()
+        lock = getattr(self, "_codex_usage_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._codex_usage_lock = lock
+
+        with lock:
+            if getattr(self, "_codex_usage_refreshing", False):
+                return
+            last_checked = getattr(self, "_codex_usage_last_checked", 0.0) or 0.0
+            if last_checked and (now - last_checked) < min_interval:
+                return
+            self._codex_usage_refreshing = True
+            self._codex_usage_last_checked = now
+
+        def _refresh() -> None:
+            snapshot = None
+            try:
+                from agent.account_usage import fetch_account_usage
+
+                snapshot = fetch_account_usage(
+                    "openai-codex",
+                    base_url=getattr(self, "base_url", None),
+                    api_key=getattr(self, "api_key", None),
+                )
+            except Exception:
+                snapshot = None
+            finally:
+                with lock:
+                    if snapshot is not None:
+                        self._codex_usage_snapshot = snapshot
+                    self._codex_usage_refreshing = False
+                self._invalidate(min_interval=0.0)
+
+        thread = threading.Thread(
+            target=_refresh,
+            name="codex-usage-status-refresh",
+            daemon=True,
+        )
+        thread.start()
+
+    @staticmethod
+    def _format_codex_session_limit(snapshot: Any) -> Optional[str]:
+        """Return a compact OpenAI Codex current-session remaining/reset label."""
+        if snapshot is None:
+            return None
+        for window in getattr(snapshot, "windows", ()) or ():
+            if str(getattr(window, "label", "") or "").strip().lower() != "session":
+                continue
+            used_percent = getattr(window, "used_percent", None)
+            if used_percent is None:
+                return None
+            try:
+                remaining = max(0, min(100, round(100 - float(used_percent))))
+            except (TypeError, ValueError):
+                return None
+
+            label = f"Codex {remaining}%"
+            reset_at = getattr(window, "reset_at", None)
+            if isinstance(reset_at, datetime):
+                try:
+                    now = datetime.now(reset_at.tzinfo) if reset_at.tzinfo else datetime.now()
+                    seconds_until_reset = max(0.0, (reset_at - now).total_seconds())
+                    label = f"{label} reset {format_duration_compact(seconds_until_reset)}"
+                except Exception:
+                    pass
+            return label
+        return None
+
+    @staticmethod
+    def _codex_session_limit_style(label: Optional[str]) -> str:
+        """Style Codex session-limit pressure by remaining percentage."""
+        if not label:
+            return "class:status-bar-dim"
+        match = re.search(r"\bCodex\s+(\d+)%", label)
+        if not match:
+            return "class:status-bar-dim"
+        try:
+            remaining = int(match.group(1))
+        except Exception:
+            return "class:status-bar-dim"
+        if remaining <= 5:
+            return "class:status-bar-critical"
+        if remaining <= 15:
+            return "class:status-bar-bad"
+        if remaining <= 35:
+            return "class:status-bar-warn"
+        return "class:status-bar-good"
+
     @staticmethod
     def _format_prompt_elapsed(prompt_start_time: Optional[float], prompt_duration: float, live: bool = False) -> str:
         """Format per-prompt elapsed time for the status bar.
@@ -4113,7 +4229,17 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             "compressions": 0,
             "active_background_tasks": 0,
             "active_background_processes": 0,
+            "codex_session_limit": None,
         }
+
+        try:
+            if self._current_provider_name() == "openai-codex":
+                self._maybe_refresh_codex_usage_snapshot()
+                snapshot["codex_session_limit"] = self._format_codex_session_limit(
+                    getattr(self, "_codex_usage_snapshot", None)
+                )
+        except Exception:
+            pass
 
         # Count live /background tasks. The dict entry is removed in the
         # task thread's finally block, so len() reflects truly-running tasks.
@@ -4375,6 +4501,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                 return self._trim_status_bar_text(text, width)
             if width < 76:
                 parts = [f"⚕ {snapshot['model_short']}", percent_label]
+                codex_limit = snapshot.get("codex_session_limit")
+                if codex_limit:
+                    parts.append(codex_limit)
                 compressions = snapshot.get("compressions", 0)
                 if compressions:
                     parts.append(f"🗜️ {compressions}")
@@ -4398,6 +4527,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
 
             compressions = snapshot.get("compressions", 0)
             parts = [f"⚕ {snapshot['model_short']}", context_label, percent_label]
+            codex_limit = snapshot.get("codex_session_limit")
+            if codex_limit:
+                parts.append(codex_limit)
             if compressions:
                 parts.append(f"🗜️ {compressions}")
             bg_count = snapshot.get("active_background_tasks", 0)
@@ -4451,12 +4583,16 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                     compressions = snapshot.get("compressions", 0)
                     bg_count = snapshot.get("active_background_tasks", 0)
                     bg_proc_count = snapshot.get("active_background_processes", 0)
+                    codex_limit = snapshot.get("codex_session_limit")
                     frags = [
                         ("class:status-bar", " ⚕ "),
                         ("class:status-bar-strong", snapshot["model_short"]),
                         ("class:status-bar-dim", " · "),
                         (self._status_bar_context_style(percent), percent_label),
                     ]
+                    if codex_limit:
+                        frags.append(("class:status-bar-dim", " · "))
+                        frags.append((self._codex_session_limit_style(codex_limit), codex_limit))
                     if compressions:
                         frags.append(("class:status-bar-dim", " · "))
                         frags.append((self._compression_count_style(compressions), f"🗜️ {compressions}"))
@@ -4486,6 +4622,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                     compressions = snapshot.get("compressions", 0)
                     bg_count = snapshot.get("active_background_tasks", 0)
                     bg_proc_count = snapshot.get("active_background_processes", 0)
+                    codex_limit = snapshot.get("codex_session_limit")
                     frags = [
                         ("class:status-bar", " ⚕ "),
                         ("class:status-bar-strong", snapshot["model_short"]),
@@ -4496,6 +4633,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                         ("class:status-bar-dim", " "),
                         (bar_style, percent_label),
                     ]
+                    if codex_limit:
+                        frags.append(("class:status-bar-dim", " │ "))
+                        frags.append((self._codex_session_limit_style(codex_limit), codex_limit))
                     if compressions:
                         frags.append(("class:status-bar-dim", " │ "))
                         frags.append((self._compression_count_style(compressions), f"🗜️ {compressions}"))
