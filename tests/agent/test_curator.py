@@ -7,6 +7,8 @@ tests run fully offline and the curator module doesn't need real credentials.
 from __future__ import annotations
 
 import importlib
+import sys
+import types
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -1072,8 +1074,68 @@ def test_review_runtime_passes_auxiliary_curator_credentials(curator_env):
     binding = curator._resolve_review_runtime(cfg)
     assert binding.provider == "custom"
     assert binding.model == "local-mini"
-    assert binding.explicit_api_key == "sk-curator-only"
+    assert binding.explicit_api_key == cfg["auxiliary"]["curator"]["api_key"]
     assert binding.explicit_base_url == "http://localhost:11434/v1"
+
+
+def test_run_llm_review_passes_reasoning_config_to_aiagent(curator_env, monkeypatch):
+    """Resolved curator reasoning must reach the forked AIAgent constructor."""
+    curator = importlib.reload(curator_env["curator"])
+    captured = {}
+
+    class FakeAIAgent:
+        def __init__(self, **kwargs):
+            captured["kwargs"] = kwargs
+            self._session_messages = []
+
+        def run_conversation(self, user_message):
+            captured["prompt"] = user_message
+            return {"final_response": "done"}
+
+        def close(self):
+            captured["closed"] = True
+
+    monkeypatch.setitem(
+        sys.modules,
+        "run_agent",
+        types.SimpleNamespace(AIAgent=FakeAIAgent),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.config",
+        types.SimpleNamespace(
+            load_config=lambda: {
+                "model": {"provider": "openrouter", "default": "openai/gpt-5.5"},
+                "auxiliary": {
+                    "curator": {
+                        "provider": "openrouter",
+                        "model": "openai/gpt-5.4-mini",
+                        "reasoning_effort": "xhigh",
+                    },
+                },
+            },
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.runtime_provider",
+        types.SimpleNamespace(
+            resolve_runtime_provider=lambda **_kwargs: {
+                "api_key": "resolved-key",
+                "base_url": "https://openrouter.ai/api/v1",
+                "api_mode": "openai",
+                "provider": "openrouter",
+            },
+        ),
+    )
+
+    result = curator._run_llm_review("review prompt")
+
+    assert result["final"] == "done"
+    assert captured["kwargs"]["reasoning_config"] == {
+        "enabled": True,
+        "effort": "xhigh",
+    }
 
 
 def test_review_runtime_strips_blank_aux_credentials(curator_env):
