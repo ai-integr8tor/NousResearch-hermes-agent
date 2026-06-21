@@ -2992,9 +2992,16 @@ def run_conversation(
                     # messages to the new session, not skipping them.
                     conversation_history = None
 
-                    if len(messages) < original_len:
-                        agent._buffer_status(f"🗜️ Compressed {original_len} → {len(messages)} messages, retrying...")
-                        time.sleep(2)  # Brief pause between compression retries
+                    original_char_size = sum(len(str(m.get("content", ""))) for m in messages if isinstance(m, dict))
+                    _msg_reduced = len(messages) < original_len
+                    _content_reduced = original_char_size > 0 and sum(len(str(m.get("content", ""))) for m in messages if isinstance(m, dict)) < original_char_size * 0.95
+                    if _msg_reduced or _content_reduced:
+                        if _msg_reduced:
+                            agent._buffer_status(f"🗜️ Compressed {original_len} → {len(messages)} messages, retrying...")
+                        else:
+                            pct = int(100 * (1 - sum(len(str(m.get("content", ""))) for m in messages if isinstance(m, dict)) / original_char_size))
+                            agent._buffer_status(f"🗜️ Compressed content by ~{pct}% ({original_len} messages), retrying...")
+                        time.sleep(2)
                         _retry.restart_with_compressed_messages = True
                         break
                     else:
