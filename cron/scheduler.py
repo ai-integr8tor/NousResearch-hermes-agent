@@ -1652,7 +1652,11 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
                 else str(delivery_target["thread_id"])
             )
 
-        model = job.get("model") or os.getenv("HERMES_MODEL") or ""
+        # Do NOT fall back to HERMES_MODEL env var for cron jobs.  That
+        # env var is a session-local override set by interactive /model
+        # commands and must not leak into scheduled jobs.  Model comes
+        # from the job's own pin or config.yaml (resolved below).
+        model = job.get("model") or ""
 
         # Load config.yaml for model, reasoning, prefill, toolsets, provider routing
         _cfg = {}
@@ -1731,17 +1735,30 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         )
         from hermes_cli.auth import AuthError
         try:
-            # Do not inject HERMES_INFERENCE_PROVIDER here. resolve_runtime_provider()
-            # already prefers persisted config over stale shell/env overrides when
-            # no explicit provider is requested. Passing the env var here short-
-            # circuits that precedence and can resurrect old providers (for
-            # example DeepSeek) for cron jobs that do not pin provider/model.
-            runtime_kwargs = {
-                "requested": job.get("provider"),
-            }
-            if job.get("base_url"):
-                runtime_kwargs["explicit_base_url"] = job.get("base_url")
-            runtime = resolve_runtime_provider(**runtime_kwargs)
+            # Suppress HERMES_INFERENCE_PROVIDER env var so cron jobs
+            # never inherit a temporary provider switch made in an
+            # interactive session.  Cron resolution order:
+            #   1. job-level pin  (job.get("provider"))
+            #   2. config.yaml    (model.provider)
+            #   3. "auto"         (built-in detection)
+            # The env var is a session-local override and must not leak
+            # into scheduled jobs — only the persisted config or the
+            # job's own pin may influence cron provider selection.
+            _prev_inference_provider = os.environ.pop(
+                "HERMES_INFERENCE_PROVIDER", None
+            )
+            try:
+                runtime_kwargs = {
+                    "requested": job.get("provider"),
+                }
+                if job.get("base_url"):
+                    runtime_kwargs["explicit_base_url"] = job.get("base_url")
+                runtime = resolve_runtime_provider(**runtime_kwargs)
+            finally:
+                if _prev_inference_provider is not None:
+                    os.environ["HERMES_INFERENCE_PROVIDER"] = (
+                        _prev_inference_provider
+                    )
         except AuthError as auth_exc:
             # Primary provider auth failed — try fallback chain before giving up.
             logger.warning("Job '%s': primary auth failed (%s), trying fallback", job_id, auth_exc)
