@@ -5867,6 +5867,96 @@ _COMMENTED_SECTIONS = """
 """
 
 
+_CREDENTIAL_CONFIG_KEYS = {
+    "api_key",
+    "apikey",
+    "api",
+    "token",
+    "access_token",
+    "refresh_token",
+    "oauth_token",
+    "secret",
+    "password",
+}
+
+_REDACTED_CREDENTIAL_PLACEHOLDERS = {
+    "***",
+    "[redacted]",
+    "<redacted>",
+    "redacted",
+    "(redacted)",
+    "[secret]",
+    "<secret>",
+}
+
+
+def _is_env_ref_template(value: str) -> bool:
+    return bool(re.fullmatch(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}", value.strip()))
+
+
+def _looks_like_redacted_credential_placeholder(value: Any) -> bool:
+    """Return True for placeholders produced by redaction, not real secrets.
+
+    Agents only see redacted tool/session output. If they copy those previews
+    back into config, Hermes later treats the preview as the actual credential
+    and model calls fail with auth errors. Keep this intentionally narrow: env
+    refs are allowed, empty values remain the normal opt-out path, and the
+    ellipsis rule is limited to short previews such as ``sk-m...n8ui``.
+    """
+    if not isinstance(value, str):
+        return False
+    candidate = value.strip().strip("\"'")
+    if not candidate or _is_env_ref_template(candidate):
+        return False
+    lowered = candidate.lower()
+    if lowered in _REDACTED_CREDENTIAL_PLACEHOLDERS:
+        return True
+    if "redacted" in lowered and len(candidate) <= 32:
+        return True
+    if "..." in candidate and len(candidate) <= 32:
+        return True
+    return False
+
+
+def _iter_redacted_credential_placeholders(value: Any, path: Tuple[str, ...] = ()):
+    if isinstance(value, dict):
+        for raw_key, child in value.items():
+            key = str(raw_key)
+            child_path = path + (key,)
+            normalized_key = key.lower().replace("-", "_")
+            if normalized_key in _CREDENTIAL_CONFIG_KEYS and _looks_like_redacted_credential_placeholder(child):
+                yield ".".join(child_path)
+            else:
+                yield from _iter_redacted_credential_placeholders(child, child_path)
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            yield from _iter_redacted_credential_placeholders(child, path + (str(index),))
+
+
+def _reject_redacted_credential_placeholders(config: Any) -> None:
+    bad_paths = list(_iter_redacted_credential_placeholders(config))
+    if not bad_paths:
+        return
+    joined = ", ".join(bad_paths[:5])
+    if len(bad_paths) > 5:
+        joined += f", ... and {len(bad_paths) - 5} more"
+    raise ValueError(
+        "Refusing to persist redacted credential placeholder(s) at "
+        f"{joined}. Re-enter the real secret or store it via an env reference."
+    )
+
+
+def _reject_redacted_env_secret(key: str, value: Any) -> None:
+    key_upper = key.upper()
+    if not (key_upper.endswith(("_API_KEY", "_TOKEN", "_SECRET", "_PASSWORD")) or key_upper in _EXTRA_ENV_KEYS):
+        return
+    if _looks_like_redacted_credential_placeholder(value):
+        raise ValueError(
+            f"Refusing to persist redacted credential placeholder for {key_upper}. "
+            "Re-enter the real secret instead."
+        )
+
+
 def save_config(config: Dict[str, Any]):
     """Save configuration to ~/.hermes/config.yaml."""
     with _CONFIG_LOCK:
@@ -5894,14 +5984,18 @@ def save_config(config: Dict[str, Any]):
         ensure_hermes_home()
         config_path = get_config_path()
         current_normalized = _normalize_root_model_keys(_normalize_max_turns_config(config))
-        normalized = current_normalized
+        if not isinstance(current_normalized, dict):
+            current_normalized = {}
+        normalized: Dict[str, Any] = current_normalized
         raw_existing = _normalize_root_model_keys(_normalize_max_turns_config(read_raw_config()))
         if raw_existing:
-            normalized = _preserve_env_ref_templates(
+            preserved = _preserve_env_ref_templates(
                 normalized,
                 raw_existing,
                 _LAST_EXPANDED_CONFIG_BY_PATH.get(str(config_path)),
             )
+            normalized = preserved if isinstance(preserved, dict) else {}
+        _reject_redacted_credential_placeholders(normalized)
 
         # Build optional commented-out sections for features that are off by
         # default or only relevant when explicitly configured.
@@ -6172,6 +6266,7 @@ def save_env_value(key: str, value: str):
         raise ValueError(f"Invalid environment variable name: {key!r}")
     _reject_denylisted_env_var(key)
     value = value.replace("\n", "").replace("\r", "")
+    _reject_redacted_env_secret(key, value)
     # API keys / tokens must be ASCII — strip non-ASCII with a warning.
     value = _check_non_ascii_credential(key, value)
     ensure_hermes_home()
@@ -6702,6 +6797,7 @@ def set_config_value(key: str, value: str):
         value = float(value)
 
     _set_nested(user_config, key, value)
+    _reject_redacted_credential_placeholders(user_config)
     
     # Write only user config back (not the full merged defaults)
     ensure_hermes_home()
