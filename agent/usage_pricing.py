@@ -515,13 +515,37 @@ _OFFICIAL_DOCS_PRICING: Dict[tuple[str, str], PricingEntry] = {
         source_url="https://aws.amazon.com/bedrock/pricing/",
         pricing_version="bedrock-pricing-2026-04",
     ),
-    # MiniMax
+    # MiniMax — https://platform.minimax.io/docs/guides/pricing-paygo
+    (
+        "minimax",
+        "minimax-m3",
+    ): PricingEntry(
+        input_cost_per_million=Decimal("0.30"),
+        output_cost_per_million=Decimal("1.20"),
+        cache_read_cost_per_million=Decimal("0.06"),
+        cache_write_cost_per_million=Decimal("0.375"),
+        source="official_docs_snapshot",
+        pricing_version="minimax-pricing-2026-04",
+    ),
+    (
+        "minimax-cn",
+        "minimax-m3",
+    ): PricingEntry(
+        input_cost_per_million=Decimal("0.30"),
+        output_cost_per_million=Decimal("1.20"),
+        cache_read_cost_per_million=Decimal("0.06"),
+        cache_write_cost_per_million=Decimal("0.375"),
+        source="official_docs_snapshot",
+        pricing_version="minimax-pricing-2026-04",
+    ),
     (
         "minimax",
         "minimax-m2.7",
     ): PricingEntry(
         input_cost_per_million=Decimal("0.30"),
         output_cost_per_million=Decimal("1.20"),
+        cache_read_cost_per_million=Decimal("0.06"),
+        cache_write_cost_per_million=Decimal("0.375"),
         source="official_docs_snapshot",
         pricing_version="minimax-pricing-2026-04",
     ),
@@ -531,6 +555,74 @@ _OFFICIAL_DOCS_PRICING: Dict[tuple[str, str], PricingEntry] = {
     ): PricingEntry(
         input_cost_per_million=Decimal("0.30"),
         output_cost_per_million=Decimal("1.20"),
+        cache_read_cost_per_million=Decimal("0.06"),
+        cache_write_cost_per_million=Decimal("0.375"),
+        source="official_docs_snapshot",
+        pricing_version="minimax-pricing-2026-04",
+    ),
+    (
+        "minimax",
+        "minimax-m2.7-highspeed",
+    ): PricingEntry(
+        input_cost_per_million=Decimal("0.60"),
+        output_cost_per_million=Decimal("2.40"),
+        cache_read_cost_per_million=Decimal("0.06"),
+        cache_write_cost_per_million=Decimal("0.375"),
+        source="official_docs_snapshot",
+        pricing_version="minimax-pricing-2026-04",
+    ),
+    (
+        "minimax-cn",
+        "minimax-m2.7-highspeed",
+    ): PricingEntry(
+        input_cost_per_million=Decimal("0.60"),
+        output_cost_per_million=Decimal("2.40"),
+        cache_read_cost_per_million=Decimal("0.06"),
+        cache_write_cost_per_million=Decimal("0.375"),
+        source="official_docs_snapshot",
+        pricing_version="minimax-pricing-2026-04",
+    ),
+    (
+        "minimax",
+        "minimax-m2.5",
+    ): PricingEntry(
+        input_cost_per_million=Decimal("0.30"),
+        output_cost_per_million=Decimal("1.20"),
+        cache_read_cost_per_million=Decimal("0.03"),
+        cache_write_cost_per_million=Decimal("0.375"),
+        source="official_docs_snapshot",
+        pricing_version="minimax-pricing-2026-04",
+    ),
+    (
+        "minimax-cn",
+        "minimax-m2.5",
+    ): PricingEntry(
+        input_cost_per_million=Decimal("0.30"),
+        output_cost_per_million=Decimal("1.20"),
+        cache_read_cost_per_million=Decimal("0.03"),
+        cache_write_cost_per_million=Decimal("0.375"),
+        source="official_docs_snapshot",
+        pricing_version="minimax-pricing-2026-04",
+    ),
+    (
+        "minimax",
+        "minimax-m2.5-highspeed",
+    ): PricingEntry(
+        input_cost_per_million=Decimal("0.60"),
+        output_cost_per_million=Decimal("2.40"),
+        cache_read_cost_per_million=Decimal("0.03"),
+        cache_write_cost_per_million=Decimal("0.375"),
+        source="official_docs_snapshot",
+        pricing_version="minimax-pricing-2026-04",
+    ),
+    (
+        "minimax-cn",
+        "minimax-m2.5-highspeed",
+    ): PricingEntry(
+        input_cost_per_million=Decimal("0.60"),
+        output_cost_per_million=Decimal("2.40"),
+        cache_read_cost_per_million=Decimal("0.03"),
+        cache_write_cost_per_million=Decimal("0.375"),
         source="official_docs_snapshot",
         pricing_version="minimax-pricing-2026-04",
     ),
@@ -577,8 +669,9 @@ def resolve_billing_route(
         return BillingRoute(provider="anthropic", model=model.split("/")[-1], base_url=base_url or "", billing_mode="official_docs_snapshot")
     if provider_name == "openai":
         return BillingRoute(provider="openai", model=model.split("/")[-1], base_url=base_url or "", billing_mode="official_docs_snapshot")
-    if provider_name in {"minimax", "minimax-cn"}:
-        return BillingRoute(provider=provider_name, model=model.split("/")[-1], base_url=base_url or "", billing_mode="official_docs_snapshot")
+    if provider_name in {"minimax", "minimax-cn"} or base_url_host_matches(base_url or "", "minimaxi.com"):
+        resolved_provider = provider_name if provider_name in {"minimax", "minimax-cn"} else "minimax-cn"
+        return BillingRoute(provider=resolved_provider, model=model.split("/")[-1], base_url=base_url or "", billing_mode="official_docs_snapshot")
     if provider_name in {"custom", "local"} or (base and "localhost" in base):
         return BillingRoute(provider=provider_name or "custom", model=model, base_url=base_url or "", billing_mode="unknown")
     return BillingRoute(provider=provider_name or "unknown", model=model.split("/")[-1] if model else "", base_url=base_url or "", billing_mode="unknown")

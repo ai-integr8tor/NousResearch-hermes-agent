@@ -5,6 +5,7 @@ from agent.usage_pricing import (
     estimate_usage_cost,
     get_pricing_entry,
     normalize_usage,
+    resolve_billing_route,
 )
 
 
@@ -250,3 +251,71 @@ def test_deepseek_v4_pro_estimate_usage_cost():
     assert result.amount_usd is not None
     # 1M input × $1.74/M + 500K output × $3.48/M = $1.74 + $1.74 = $3.48
     assert float(result.amount_usd) == 3.48
+
+
+def test_minimax_cn_route_resolves_to_official_docs_snapshot():
+    """Ensure minimax-cn provider is routed to official_docs_snapshot billing."""
+    route = resolve_billing_route("MiniMax-M3", provider="minimax-cn")
+    assert route.billing_mode == "official_docs_snapshot"
+    assert route.provider == "minimax-cn"
+    assert route.model == "MiniMax-M3"
+
+
+def test_minimax_cn_detected_by_base_url_host():
+    """Ensure minimaxi.com base_url is detected even when provider is empty."""
+    route = resolve_billing_route(
+        "minimax-m2.7",
+        provider="",
+        base_url="https://api.minimaxi.com/anthropic",
+    )
+    assert route.billing_mode == "official_docs_snapshot"
+    assert route.provider == "minimax-cn"
+
+
+def test_minimax_m3_pricing_entry_uses_official_paygo_rates():
+    """Ensure MiniMax-M3 pricing matches official pay-as-you-go rates."""
+    entry = get_pricing_entry("minimax-m3", provider="minimax-cn")
+    assert entry is not None
+    assert float(entry.input_cost_per_million) == 0.30
+    assert float(entry.output_cost_per_million) == 1.20
+    assert float(entry.cache_read_cost_per_million) == 0.06
+    assert float(entry.cache_write_cost_per_million) == 0.375
+
+
+def test_minimax_m2_7_highspeed_pricing_entry_uses_official_paygo_rates():
+    """Ensure MiniMax-M2.7-highspeed pricing matches official rates."""
+    entry = get_pricing_entry("minimax-m2.7-highspeed", provider="minimax-cn")
+    assert entry is not None
+    assert float(entry.input_cost_per_million) == 0.60
+    assert float(entry.output_cost_per_million) == 2.40
+
+
+def test_minimax_m2_5_pricing_entry_uses_official_paygo_rates():
+    """Ensure MiniMax-M2.5 pricing matches official rates with lower cache read."""
+    entry = get_pricing_entry("minimax-m2.5", provider="minimax")
+    assert entry is not None
+    assert float(entry.input_cost_per_million) == 0.30
+    assert float(entry.output_cost_per_million) == 1.20
+    assert float(entry.cache_read_cost_per_million) == 0.03
+    assert float(entry.cache_write_cost_per_million) == 0.375
+
+
+def test_minimax_m2_5_highspeed_pricing_entry_uses_official_paygo_rates():
+    """Ensure MiniMax-M2.5-highspeed pricing matches official rates."""
+    entry = get_pricing_entry("minimax-m2.5-highspeed", provider="minimax-cn")
+    assert entry is not None
+    assert float(entry.input_cost_per_million) == 0.60
+    assert float(entry.output_cost_per_million) == 2.40
+
+
+def test_minimax_cn_cost_result_is_estimated_with_official_rates():
+    """Ensure a minimax-cn session produces an estimated cost, not unknown."""
+    result = estimate_usage_cost(
+        "minimax-m2.7",
+        CanonicalUsage(input_tokens=1000000, output_tokens=500000),
+        provider="minimax-cn",
+    )
+    assert result.status == "estimated"
+    assert result.amount_usd is not None
+    # 1M input × $0.30/M + 500K output × $1.20/M = $0.30 + $0.60 = $0.90
+    assert float(result.amount_usd) == 0.90
