@@ -7,6 +7,38 @@ import pytest
 from hermes_cli import auth as auth_mod
 
 
+# ---------------------------------------------------------------------------
+# Helpers shared by manual-paste login tests
+# ---------------------------------------------------------------------------
+
+def _manual_paste_login(monkeypatch, tmp_path, paste_value):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(auth_mod, "_is_remote_session", lambda: True)
+    monkeypatch.setattr(
+        auth_mod, "webbrowser", SimpleNamespace(open=lambda *_a, **_k: False)
+    )
+    exchanged: dict = {}
+
+    def fake_exchange(**kwargs):
+        exchanged.update(kwargs)
+        return {
+            "access_token": "fresh-access",
+            "refresh_token": "fresh-refresh",
+            "token_type": "Bearer",
+            "expires_in": 3600,
+            "scope": auth_mod.DEFAULT_SPOTIFY_SCOPE,
+        }
+
+    monkeypatch.setattr(auth_mod, "_spotify_exchange_code_for_tokens", fake_exchange)
+    monkeypatch.setattr("builtins.input", lambda prompt="": paste_value)
+    args = SimpleNamespace(
+        client_id="test-client", redirect_uri=None, scope=None,
+        no_browser=True, manual_paste=True, timeout=None,
+    )
+    auth_mod.login_spotify_command(args)
+    return exchanged
+
+
 def test_store_provider_state_can_skip_active_provider() -> None:
     auth_store = {"active_provider": "nous", "providers": {}}
 
@@ -181,3 +213,17 @@ def test_spotify_interactive_setup_empty_aborts(
     env_path = tmp_path / ".env"
     if env_path.exists():
         assert "HERMES_SPOTIFY_CLIENT_ID" not in env_path.read_text()
+
+
+def test_manual_paste_bare_code_reaches_token_exchange(tmp_path, monkeypatch, capsys):
+    exchanged = _manual_paste_login(monkeypatch, tmp_path, "AQDtR3-bare-code-value")
+    assert exchanged.get("code") == "AQDtR3-bare-code-value"
+    assert "Spotify login successful!" in capsys.readouterr().out
+
+
+def test_manual_paste_wrong_state_still_rejected(tmp_path, monkeypatch):
+    with pytest.raises(SystemExit, match="state mismatch"):
+        _manual_paste_login(
+            monkeypatch, tmp_path,
+            "http://127.0.0.1:43827/spotify/callback?code=abc&state=not-the-nonce",
+        )
