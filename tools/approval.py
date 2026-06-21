@@ -10,6 +10,7 @@ This module is the single source of truth for the dangerous command system:
 
 import contextvars
 import fnmatch
+import hashlib
 import logging
 import os
 import re
@@ -1048,6 +1049,71 @@ def _normalize_approval_mode(mode) -> str:
     return "manual"
 
 
+def _normalize_terminal_confirmation_policy(policy) -> str:
+    """Normalize terminal.confirmation_policy / TERMINAL_CONFIRMATION_POLICY."""
+    if isinstance(policy, str):
+        normalized = policy.strip().lower()
+        if normalized in {"never", "risky", "always"}:
+            return normalized
+    return "risky"
+
+
+def _get_terminal_confirmation_policy() -> str:
+    """Read the terminal risk-annotation confirmation policy from env.
+
+    The config bridge sets TERMINAL_CONFIRMATION_POLICY at startup so the
+    hot path does not need to parse config.yaml for every terminal command.
+    """
+    return _normalize_terminal_confirmation_policy(
+        os.getenv("TERMINAL_CONFIRMATION_POLICY", "risky")
+    )
+
+
+def _normalize_security_risk(security_risk) -> Optional[str]:
+    """Normalize optional LLM-provided terminal security_risk annotations."""
+    if security_risk is None:
+        return None
+    if isinstance(security_risk, str):
+        normalized = security_risk.strip().upper()
+        if normalized in {"LOW", "MEDIUM", "HIGH", "UNKNOWN"}:
+            return normalized
+    return "UNKNOWN"
+
+
+def _terminal_policy_key(prefix: str, command: str) -> str:
+    digest = hashlib.sha256((command or "").encode("utf-8", "replace")).hexdigest()
+    return f"terminal:{prefix}:{digest[:16]}"
+
+
+def _security_risk_warning(command: str, security_risk,
+                           confirmation_policy: str) -> tuple[str, str] | None:
+    """Return an advisory approval warning for LLM risk annotations."""
+    normalized_risk = _normalize_security_risk(security_risk)
+
+    if confirmation_policy == "always":
+        return (
+            _terminal_policy_key("always", command),
+            "terminal confirmation policy requires approval for this command",
+        )
+
+    if confirmation_policy != "risky":
+        return None
+
+    # Missing annotation stays backwards-compatible: existing pattern/Tirith
+    # checks remain the fallback. Explicit UNKNOWN/invalid annotations are
+    # treated as uncertain and escalated.
+    if normalized_risk in {"HIGH", "UNKNOWN"}:
+        return (
+            _terminal_policy_key(f"risk:{normalized_risk.lower()}", command),
+            (
+                "LLM self-annotation marked this terminal command "
+                f"{normalized_risk} risk (advisory signal, not a security scan)"
+            ),
+        )
+
+    return None
+
+
 def _get_approval_config() -> dict:
     """Read the approvals config block. Returns a dict with 'mode', 'timeout', etc."""
     try:
@@ -1373,7 +1439,8 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
 
 
 def check_all_command_guards(command: str, env_type: str,
-                             approval_callback=None) -> dict:
+                             approval_callback=None,
+                             security_risk=None) -> dict:
     """Run all pre-exec security checks and return a single approval decision.
 
     Gathers findings from tirith and dangerous-command detection, then
@@ -1405,10 +1472,18 @@ def check_all_command_guards(command: str, env_type: str,
                        sudo_guess_desc, command[:200])
         return _sudo_stdin_block_result(sudo_guess_desc)
 
-    # --yolo or approvals.mode=off: bypass all approval prompts.
+    # --yolo / approvals.mode=off / confirmation_policy=never:
+    # bypass all approval prompts. Hardline and sudo-stdin guards above still
+    # apply because those are unconditional safety floors.
     # Gateway /yolo is session-scoped; CLI --yolo remains process-scoped.
     approval_mode = _get_approval_mode()
-    if _YOLO_MODE_FROZEN or is_current_session_yolo_enabled() or approval_mode == "off":
+    confirmation_policy = _get_terminal_confirmation_policy()
+    if (
+        _YOLO_MODE_FROZEN
+        or is_current_session_yolo_enabled()
+        or approval_mode == "off"
+        or confirmation_policy == "never"
+    ):
         return {"approved": True, "message": None}
 
     if _command_matches_permanent_allowlist(command):
@@ -1456,7 +1531,7 @@ def check_all_command_guards(command: str, env_type: str,
     # --- Phase 2: Decide ---
 
     # Collect warnings that need approval
-    warnings = []  # list of (pattern_key, description, is_tirith)
+    warnings = []  # list of (pattern_key, description, allow_permanent)
 
     session_key = get_current_session_key()
 
@@ -1470,11 +1545,19 @@ def check_all_command_guards(command: str, env_type: str,
         tirith_key = f"tirith:{rule_id}"
         tirith_desc = _format_tirith_description(tirith_result)
         if not is_approved(session_key, tirith_key):
-            warnings.append((tirith_key, tirith_desc, True))
+            warnings.append((tirith_key, tirith_desc, False))
 
     if is_dangerous:
         if not is_approved(session_key, pattern_key):
-            warnings.append((pattern_key, description, False))
+            warnings.append((pattern_key, description, True))
+
+    risk_warning = _security_risk_warning(
+        command, security_risk, confirmation_policy
+    )
+    if risk_warning is not None:
+        risk_key, risk_desc = risk_warning
+        if not is_approved(session_key, risk_key):
+            warnings.append((risk_key, risk_desc, False))
 
     # Nothing to warn about
     if not warnings:
@@ -1512,7 +1595,7 @@ def check_all_command_guards(command: str, env_type: str,
     combined_desc = "; ".join(desc for _, desc, _ in warnings)
     primary_key = warnings[0][0]
     all_keys = [key for key, _, _ in warnings]
-    has_tirith = any(is_t for _, _, is_t in warnings)
+    allow_permanent = all(allow for _, _, allow in warnings)
 
     # Gateway/async approval — block the agent thread until the user
     # responds with /approve or /deny, mirroring the CLI's synchronous
@@ -1533,9 +1616,10 @@ def check_all_command_guards(command: str, env_type: str,
                 "pattern_key": primary_key,
                 "pattern_keys": all_keys,
                 "description": combined_desc,
-                # Mirror the CLI's allow_permanent gate: a tirith warning downgrades
-                # "always" to session scope below, so the UI must not offer it.
-                "allow_permanent": not has_tirith,
+                # Mirror the CLI's allow_permanent gate: input-specific warnings
+                # (Tirith and LLM risk annotations) downgrade "always" to session
+                # scope below, so the UI must not offer a permanent allow.
+                "allow_permanent": allow_permanent,
             }
             decision = _await_gateway_decision(
                 session_key, notify_cb, approval_data, surface="gateway"
@@ -1582,8 +1666,8 @@ def check_all_command_guards(command: str, env_type: str,
                 }
 
             # User approved — persist based on scope (same logic as CLI)
-            for key, _, is_tirith in warnings:
-                if choice == "session" or (choice == "always" and is_tirith):
+            for key, _, can_permanently_allow in warnings:
+                if choice == "session" or (choice == "always" and not can_permanently_allow):
                     approve_session(session_key, key)
                 elif choice == "always":
                     approve_session(session_key, key)
@@ -1627,7 +1711,7 @@ def check_all_command_guards(command: str, env_type: str,
         surface="cli",
     )
     choice = prompt_dangerous_approval(command, combined_desc,
-                                       allow_permanent=not has_tirith,
+                                       allow_permanent=allow_permanent,
                                        approval_callback=approval_callback)
     _fire_approval_hook(
         "post_approval_response",
@@ -1658,9 +1742,9 @@ def check_all_command_guards(command: str, env_type: str,
         }
 
     # Persist approval for each warning individually
-    for key, _, is_tirith in warnings:
-        if choice == "session" or (choice == "always" and is_tirith):
-            # tirith: session only (no permanent broad allowlisting)
+    for key, _, can_permanently_allow in warnings:
+        if choice == "session" or (choice == "always" and not can_permanently_allow):
+            # Input-specific findings: session only (no permanent broad allowlisting)
             approve_session(session_key, key)
         elif choice == "always":
             # dangerous patterns: permanent allowed
