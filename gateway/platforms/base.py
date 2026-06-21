@@ -1204,6 +1204,8 @@ MEDIA_DELIVERY_EXTS: Tuple[str, ...] = (
     ".pdf", ".docx", ".doc", ".odt", ".rtf", ".txt", ".md", ".epub",
     # Spreadsheets / data
     ".xlsx", ".xls", ".ods", ".csv", ".tsv", ".json", ".xml", ".yaml", ".yml",
+    # Code / scripts (uploaded as file attachments)
+    ".py", ".js", ".ts", ".sh", ".rb", ".go", ".rs", ".java", ".c", ".cpp", ".h",
     # Presentations
     ".pptx", ".ppt", ".odp", ".key",
     # Archives
