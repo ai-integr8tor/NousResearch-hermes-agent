@@ -336,7 +336,9 @@ class TestFeishuAdapterMessaging(unittest.TestCase):
         from gateway.config import PlatformConfig
         from plugins.platforms.feishu.adapter import FeishuAdapter
 
-        adapter = FeishuAdapter(PlatformConfig())
+        _cfg = PlatformConfig()
+        _cfg.extra["feishu_interactive_cards"] = False
+        adapter = FeishuAdapter(_cfg)
         captured = {}
 
         class _MessageAPI:
@@ -378,7 +380,9 @@ class TestFeishuAdapterMessaging(unittest.TestCase):
         from gateway.config import PlatformConfig
         from plugins.platforms.feishu.adapter import FeishuAdapter
 
-        adapter = FeishuAdapter(PlatformConfig())
+        _cfg = PlatformConfig()
+        _cfg.extra["feishu_interactive_cards"] = False
+        adapter = FeishuAdapter(_cfg)
         captured = {"calls": []}
 
         class _MessageAPI:
@@ -2543,7 +2547,9 @@ class TestAdapterBehavior(unittest.TestCase):
         from gateway.config import PlatformConfig
         from plugins.platforms.feishu.adapter import FeishuAdapter
 
-        adapter = FeishuAdapter(PlatformConfig())
+        _cfg = PlatformConfig()
+        _cfg.extra["feishu_interactive_cards"] = False
+        adapter = FeishuAdapter(_cfg)
         captured = {}
 
         class _MessageAPI:
@@ -2584,7 +2590,9 @@ class TestAdapterBehavior(unittest.TestCase):
         from gateway.config import PlatformConfig
         from plugins.platforms.feishu.adapter import FeishuAdapter
 
-        adapter = FeishuAdapter(PlatformConfig())
+        _cfg = PlatformConfig()
+        _cfg.extra["feishu_interactive_cards"] = False
+        adapter = FeishuAdapter(_cfg)
         captured = {}
 
         class _MessageAPI:
@@ -2712,7 +2720,9 @@ class TestAdapterBehavior(unittest.TestCase):
         from gateway.config import PlatformConfig
         from plugins.platforms.feishu.adapter import FeishuAdapter
 
-        adapter = FeishuAdapter(PlatformConfig())
+        _cfg = PlatformConfig()
+        _cfg.extra["feishu_interactive_cards"] = False
+        adapter = FeishuAdapter(_cfg)
         captured = {"calls": []}
 
         class _MessageAPI:
@@ -2757,7 +2767,9 @@ class TestAdapterBehavior(unittest.TestCase):
         from gateway.config import PlatformConfig
         from plugins.platforms.feishu.adapter import FeishuAdapter
 
-        adapter = FeishuAdapter(PlatformConfig())
+        _cfg = PlatformConfig()
+        _cfg.extra["feishu_interactive_cards"] = False
+        adapter = FeishuAdapter(_cfg)
         captured = {"calls": []}
 
         class _MessageAPI:
@@ -2802,7 +2814,9 @@ class TestAdapterBehavior(unittest.TestCase):
         from gateway.config import PlatformConfig
         from plugins.platforms.feishu.adapter import FeishuAdapter
 
-        adapter = FeishuAdapter(PlatformConfig())
+        _cfg = PlatformConfig()
+        _cfg.extra["feishu_interactive_cards"] = False
+        adapter = FeishuAdapter(_cfg)
         captured = {}
 
         class _MessageAPI:
@@ -2840,6 +2854,98 @@ class TestAdapterBehavior(unittest.TestCase):
             rows,
             [[{"tag": "md", "text": "---\n1. 第一项\n<u>下划线</u>\n~~删除线~~"}]],
         )
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_interactive_cards_flag_defaults_on(self):
+        from gateway.config import PlatformConfig
+        from plugins.platforms.feishu.adapter import FeishuAdapter
+        adapter = FeishuAdapter(PlatformConfig())
+        self.assertTrue(adapter._use_interactive_cards)
+
+    def test_build_markdown_card_payload_single_markdown_element(self):
+        from plugins.platforms.feishu.adapter import _build_markdown_card_payload
+        payload = json.loads(_build_markdown_card_payload("# Title\n```py\nx=1\n```"))
+        self.assertEqual(payload["schema"], "2.0")
+        self.assertEqual(
+            payload["body"]["elements"],
+            [{"tag": "markdown", "content": "# Title\n```py\nx=1\n```"}],
+        )
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_outbound_uses_interactive_card_for_markdown(self):
+        from gateway.config import PlatformConfig
+        from plugins.platforms.feishu.adapter import FeishuAdapter
+        adapter = FeishuAdapter(PlatformConfig())
+        msg_type, payload = adapter._build_outbound_payload("**bold**\n| a | b |\n|---|---|\n| 1 | 2 |")
+        self.assertEqual(msg_type, "interactive")
+        self.assertIn('"tag": "markdown"', payload)
+        self.assertIn('| 1 | 2 |', payload)
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_outbound_plain_text_also_interactive(self):
+        from gateway.config import PlatformConfig
+        from plugins.platforms.feishu.adapter import FeishuAdapter
+        adapter = FeishuAdapter(PlatformConfig())
+        msg_type, _ = adapter._build_outbound_payload("你好")
+        self.assertEqual(msg_type, "interactive")
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_outbound_oversized_card_falls_back_to_text(self):
+        from gateway.config import PlatformConfig
+        from plugins.platforms.feishu.adapter import FeishuAdapter
+        adapter = FeishuAdapter(PlatformConfig())
+        msg_type, _ = adapter._build_outbound_payload("x" * 400000)
+        self.assertEqual(msg_type, "text")
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_outbound_legacy_path_when_flag_off(self):
+        from gateway.config import PlatformConfig
+        from plugins.platforms.feishu.adapter import FeishuAdapter
+        cfg = PlatformConfig()
+        cfg.extra["feishu_interactive_cards"] = False
+        adapter = FeishuAdapter(cfg)
+        msg_type, _ = adapter._build_outbound_payload("| a | b |\n|---|---|\n| 1 | 2 |")
+        self.assertEqual(msg_type, "text")
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_send_falls_back_to_text_when_interactive_card_rejected(self):
+        from gateway.config import PlatformConfig
+        from plugins.platforms.feishu.adapter import FeishuAdapter
+        adapter = FeishuAdapter(PlatformConfig())
+        calls = []
+
+        class _MessageAPI:
+            def create(self, request):
+                calls.append(request.request_body.msg_type)
+                if request.request_body.msg_type == "interactive":
+                    raise RuntimeError("card content invalid")
+                return SimpleNamespace(success=lambda: True, data=SimpleNamespace(message_id="om_fb"))
+
+        adapter._client = SimpleNamespace(im=SimpleNamespace(v1=SimpleNamespace(message=_MessageAPI())))
+
+        async def _direct(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        with patch("plugins.platforms.feishu.adapter.asyncio.to_thread", side_effect=_direct):
+            result = asyncio.run(adapter.send(chat_id="oc_chat", content="# 标题"))
+
+        self.assertTrue(result.success)
+        self.assertEqual(calls[0], "interactive")
+        self.assertEqual(calls[-1], "text")
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_streaming_send_and_edit_keep_consistent_msg_type(self):
+        from gateway.config import PlatformConfig
+        from plugins.platforms.feishu.adapter import FeishuAdapter
+        adapter = FeishuAdapter(PlatformConfig())
+        # Every outbound content type resolves to "interactive" so send() and
+        # edit_message() never disagree on msg_type during streaming (no drift).
+        for content in ["你好", "# 标题", "| a |\n|---|\n| 1 |", "```py\nx=1\n```"]:
+            msg_type, _ = adapter._build_outbound_payload(content)
+            self.assertEqual(msg_type, "interactive", f"msg_type drift for {content!r}")
+        # We edit-in-place (no fresh-final), so the hook stays default False.
+        fn = getattr(adapter, "prefers_fresh_final_streaming", None)
+        self.assertFalse(fn("# 标题") if fn else True)
 
 
 @unittest.skipUnless(_HAS_LARK_OAPI, "lark-oapi not installed")
@@ -4944,3 +5050,76 @@ class TestChatLockEviction(unittest.TestCase):
                 held.release()
 
         asyncio.run(_run())
+
+
+class TestMermaidRendering(unittest.TestCase):
+    """Mermaid rendering uses a LOCAL renderer (mmdc) and falls back to a
+    code block when it is unavailable — it must never reach out to an
+    external rendering service."""
+
+    def test_extract_finds_mermaid_block_in_prose(self):
+        """The closing fence is matched across a multi-line remainder, so a
+        mermaid block embedded in prose is extracted (regression: the close
+        regex lacked MULTILINE and never matched -> blocks always empty)."""
+        import plugins.platforms.feishu.adapter as feishu_mod
+        content = "intro\n```mermaid\ngraph TD\n    A-->B\n```\noutro"
+        blocks = feishu_mod._extract_mermaid_blocks(content)
+        self.assertEqual(len(blocks), 1)
+        code, start, end = blocks[0]
+        self.assertIn("A-->B", code)
+        self.assertEqual(content[start:end].count("```mermaid"), 1)
+
+    def test_falls_back_to_external_when_local_unavailable(self):
+        """When the local renderer (mmdc) is missing, rendering falls back to
+        the external mermaid.ink service so Docker / minimal hosts still get
+        a diagram instead of a bare code block."""
+        import plugins.platforms.feishu.adapter as feishu_mod
+        with patch("shutil.which", return_value=None), \
+             patch("urllib.request.urlopen") as mock_urlopen:
+            mock_urlopen.return_value.__enter__.return_value.read.return_value = b"x" * 200
+            result = feishu_mod._render_mermaid_to_png("graph TD\nA-->B\n", allow_external=True)
+        self.assertIsNotNone(result)
+        mock_urlopen.assert_called()
+
+    def test_no_external_call_when_fallback_disabled(self):
+        """When the external fallback is disabled, a missing local renderer
+        yields None with zero network calls (privacy-strict mode)."""
+        import plugins.platforms.feishu.adapter as feishu_mod
+        with patch("shutil.which", return_value=None), \
+             patch("urllib.request.urlopen") as mock_urlopen:
+            result = feishu_mod._render_mermaid_to_png("graph TD\nA-->B\n", allow_external=False)
+        self.assertIsNone(result)
+        mock_urlopen.assert_not_called()
+
+    def test_mermaid_block_preserved_when_render_unavailable(self):
+        """When rendering yields nothing, the ```mermaid block is left
+        intact so it falls back to a syntax-highlighted code block."""
+        import plugins.platforms.feishu.adapter as feishu_mod
+        content = "intro\n```mermaid\ngraph TD\nA-->B\n```\noutro"
+        adapter = object.__new__(feishu_mod.FeishuAdapter)
+        adapter._client = Mock()
+        adapter._mermaid_external_fallback = True
+        with patch.object(feishu_mod, "_render_mermaid_to_png", return_value=None):
+            result = asyncio.run(adapter._upload_mermaid_images(content))
+        self.assertEqual(result, content)
+
+
+class TestCardTableSplitting(unittest.TestCase):
+    """Each card is a single 富文本/markdown element, which Feishu limits
+    to 4 GFM (Markdown) tables (official doc §三.1 / §二).  Oversized
+    content must split so no card carries more than 4 tables."""
+
+    def test_splits_when_more_than_four_markdown_tables(self):
+        import plugins.platforms.feishu.adapter as feishu_mod
+        # 5 small GFM tables — exceeds the 4-tables-per-element limit.
+        content = "\n\n".join(
+            f"| h{i}a | h{i}b |\n|---|---|\n| d{i}1 | d{i}2 |" for i in range(5)
+        )
+        blocks = feishu_mod._split_markdown_blocks(content)
+        cards = feishu_mod._pack_blocks_into_cards(blocks)
+        self.assertGreaterEqual(len(cards), 2)
+        for card in cards:
+            self.assertLessEqual(
+                feishu_mod._count_gfm_tables(card), 4,
+                "a card must not carry more than 4 GFM tables",
+            )

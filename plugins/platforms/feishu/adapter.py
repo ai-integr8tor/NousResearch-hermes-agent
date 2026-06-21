@@ -160,6 +160,27 @@ _MARKDOWN_TABLE_RE = re.compile(r"^\|.*\|\n\|[-|: ]+\|", re.MULTILINE)
 _MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
 _MARKDOWN_FENCE_OPEN_RE = re.compile(r"^```([^\n`]*)\s*$")
 _MARKDOWN_FENCE_CLOSE_RE = re.compile(r"^```\s*$")
+
+# Mermaid code block detection
+_MERMAID_BLOCK_RE = re.compile(r"^```mermaid\s*$", re.MULTILINE)
+# Closing fence scanned across a multi-line remainder (must be MULTILINE so
+# ``^```` matches at each line start, not just the very beginning of the text).
+_MERMAID_CLOSE_RE = re.compile(r"^```\s*$", re.MULTILINE)
+
+
+def _count_gfm_tables(content: str) -> int:
+    """Count GFM tables (header + separator row pattern) in *content*."""
+    return len(_MARKDOWN_TABLE_RE.findall(content))
+
+
+# Max interactive card JSON size (bytes); Feishu hard limit is 30 KB.
+_MAX_CARD_JSON_BYTES = 30 * 1024
+
+# Feishu limits a single 富文本/markdown element to 4 GFM (Markdown) tables
+# (official card docs §三.1).  Each card we send is exactly one such element,
+# so this is also the per-card table limit.  (The docs' "5 tables per card"
+# applies to the native ``tag:"table"`` component, which this path does not use.)
+_MAX_TABLES_PER_ELEMENT = 4
 _MENTION_RE = re.compile(r"@_user_\d+")
 _MULTISPACE_RE = re.compile(r"[ \t]{2,}")
 _POST_CONTENT_INVALID_RE = re.compile(r"content format of the post type is incorrect", re.IGNORECASE)
@@ -558,6 +579,398 @@ def _build_markdown_post_payload(content: str) -> str:
         },
         ensure_ascii=False,
     )
+
+
+def _build_markdown_card_payload(content: str) -> str:
+    """Build a Feishu Interactive Card (JSON 2.0) with a single markdown element.
+
+    The Card 2.0 ``tag: "markdown"`` element renders full CommonMark (headings,
+    lists, code blocks, blockquotes, GFM tables with alignment) — unlike the
+    post-type ``tag: "md"`` element which is a stripped renderer. Tables are
+    passed through as GFM syntax and rendered natively (no parsing needed).
+    """
+    return json.dumps(
+        {"schema": "2.0", "body": {"elements": [{"tag": "markdown", "content": content}]}},
+        ensure_ascii=False,
+    )
+
+
+def _build_markdown_card_payload_with_header(content: str, title: str, template: str = "blue") -> str:
+    """Build a Card 2.0 with a header title, used for split card parts."""
+    return json.dumps(
+        {
+            "schema": "2.0",
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "title": {"tag": "plain_text", "content": title},
+                "template": template,
+            },
+            "body": {"elements": [{"tag": "markdown", "content": content}]},
+        },
+        ensure_ascii=False,
+    )
+
+
+def _inject_card_header(payload_json: str, index: int, total: int) -> str:
+    """Inject a sequential header into an existing card payload."""
+    try:
+        card = json.loads(payload_json)
+        header = card.get("header") or {"title": {"tag": "plain_text", "content": ""}, "template": "blue"}
+        if not isinstance(header, dict):
+            header = {"title": {"tag": "plain_text", "content": ""}, "template": "blue"}
+        title_obj = header.get("title", {})
+        existing = title_obj.get("content", "") if isinstance(title_obj, dict) else ""
+        # Preserve existing header text, append pagination
+        new_title = existing if existing else "Hermes"
+        new_title = f"{new_title}（{index + 1}/{total}）"
+        card["header"] = {
+            "title": {"tag": "plain_text", "content": new_title},
+            "template": header.get("template", "blue"),
+        }
+        return json.dumps(card, ensure_ascii=False)
+    except Exception:
+        return payload_json
+
+
+# ---------------------------------------------------------------------------
+# Card splitting: break oversized markdown into multiple Feishu cards
+# ---------------------------------------------------------------------------
+
+@dataclass
+class _MarkdownBlock:
+    """A unit of markdown content that should not be split further."""
+    type: str  # "table", "code", "mermaid", "paragraph"
+    text: str
+    table_count: int = 0
+
+
+def _split_markdown_blocks(content: str) -> list[_MarkdownBlock]:
+    """Parse *content* into typed blocks.
+
+    Tables and fenced code blocks (including mermaid) are atomic units;
+    everything else is grouped into paragraph blocks.
+    """
+    blocks: list[_MarkdownBlock] = []
+    lines = content.split("\n")
+    current_para: list[str] = []
+    in_code_block = False
+    code_lang = ""
+    code_lines: list[str] = []
+
+    def _flush_para() -> None:
+        nonlocal current_para
+        text = "\n".join(current_para).strip()
+        if text:
+            blocks.append(_MarkdownBlock(type="paragraph", text=text, table_count=_count_gfm_tables(text)))
+        current_para = []
+
+    i = 0
+    while i < len(lines):
+        stripped = lines[i].strip()
+
+        # --- Code block boundary ---
+        is_fence_open = bool(_MARKDOWN_FENCE_OPEN_RE.match(stripped))
+        is_fence_close = bool(_MARKDOWN_FENCE_CLOSE_RE.match(stripped)) if in_code_block else False
+
+        if in_code_block:
+            if is_fence_close:
+                code_lines.append(lines[i])
+                block_text = "\n".join(code_lines)
+                block_type = "mermaid" if code_lang.strip().lower() == "mermaid" else "code"
+                blocks.append(_MarkdownBlock(type=block_type, text=block_text))
+                in_code_block = False
+                code_lines = []
+                code_lang = ""
+            else:
+                code_lines.append(lines[i])
+            i += 1
+            continue
+
+        if is_fence_open:
+            _flush_para()
+            in_code_block = True
+            code_lang = stripped[3:].strip()  # language after ```
+            code_lines = [lines[i]]
+            i += 1
+            continue
+
+        # --- Table block: lines starting with | ---
+        if stripped.startswith("|"):
+            _flush_para()
+            table_lines: list[str] = []
+            while i < len(lines) and lines[i].strip().startswith("|"):
+                table_lines.append(lines[i])
+                i += 1
+            table_text = "\n".join(table_lines)
+            blocks.append(_MarkdownBlock(
+                type="table",
+                text=table_text,
+                table_count=_count_gfm_tables(table_text),
+            ))
+            continue
+
+        # --- Regular paragraph line ---
+        current_para.append(lines[i])
+        i += 1
+
+    _flush_para()
+
+    # Flush any unclosed code block
+    if in_code_block:
+        blocks.append(_MarkdownBlock(type="code", text="\n".join(code_lines)))
+
+    return blocks
+
+
+def _split_oversized_table(table_text: str, max_bytes: int) -> list[str]:
+    """Split a table by rows, each slice keeps the header row."""
+    lines = table_text.split("\n")
+    if len(lines) <= 2:
+        return [table_text]
+
+    header = lines[0]
+    separator = lines[1]
+    data_rows = lines[2:]
+    parts: list[str] = []
+    current: list[str] = [header, separator]
+
+    for row in data_rows:
+        candidate = "\n".join(current + [row])
+        if len(candidate.encode("utf-8")) > max_bytes and len(current) > 2:
+            parts.append("\n".join(current))
+            current = [header, separator, row]
+        else:
+            current.append(row)
+
+    parts.append("\n".join(current))
+    return parts
+
+
+def _split_oversized_paragraph(text: str, max_bytes: int) -> list[str]:
+    """Split a long paragraph at \\n\\n → \\n → sentence boundaries."""
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return [text]
+
+    # Try paragraph breaks first
+    paragraphs = text.split("\n\n")
+    if len(paragraphs) > 1:
+        result: list[str] = []
+        buf: list[str] = []
+        for p in paragraphs:
+            candidate = "\n\n".join(buf + [p]) if buf else p
+            if len(candidate.encode("utf-8")) > max_bytes and buf:
+                result.append("\n\n".join(buf))
+                buf = [p]
+            else:
+                buf.append(p)
+        if buf:
+            result.append("\n\n".join(buf))
+        return result
+
+    # Try line breaks
+    lines_list = text.split("\n")
+    if len(lines_list) > 1:
+        result: list[str] = []  # type: ignore[no-redef]
+        buf: list[str] = []  # type: ignore[no-redef]
+        for ln in lines_list:
+            candidate = "\n".join(buf + [ln]) if buf else ln
+            if len(candidate.encode("utf-8")) > max_bytes and buf:
+                result.append("\n".join(buf))
+                buf = [ln]
+            else:
+                buf.append(ln)
+        if buf:
+            result.append("\n".join(buf))
+        return result
+
+    # Last resort: split at sentence boundaries (Chinese/English)
+    result: list[str] = []  # type: ignore[no-redef]
+    buf = ""
+    for char in text:
+        candidate = buf + char
+        if len(candidate.encode("utf-8")) > max_bytes:
+            result.append(buf)
+            buf = char
+        else:
+            buf = candidate
+    if buf:
+        result.append(buf)
+    return result if result else [text]
+
+
+def _pack_blocks_into_cards(blocks: list[_MarkdownBlock]) -> list[str]:
+    """Greedily pack blocks into cards respecting 30KB and ≤5 tables.
+
+    Returns a list of markdown strings, one per card.
+    """
+    if not blocks:
+        return [""]
+
+    cards: list[str] = []
+    current_blocks: list[_MarkdownBlock] = []
+    current_size = 0
+    current_tables = 0
+
+    def _flush() -> None:
+        nonlocal current_blocks, current_size, current_tables
+        if current_blocks:
+            text = "\n\n".join(b.text for b in current_blocks)
+            cards.append(text)
+            current_blocks = []
+            current_size = 0
+            current_tables = 0
+
+    budget = _MAX_CARD_JSON_BYTES - 200  # reserve 200B for card JSON overhead
+
+    for block in blocks:
+        block_bytes = len(block.text.encode("utf-8"))
+
+        # If a single block exceeds budget, split it first
+        if block_bytes > budget:
+            _flush()
+            if block.type == "table":
+                parts = _split_oversized_table(block.text, budget)
+            else:
+                parts = _split_oversized_paragraph(block.text, budget)
+            cards.extend(parts)
+            continue
+
+        # Would adding this block exceed budget or table limit?
+        new_size = current_size + block_bytes + 2  # +2 for "\n\n"
+        new_tables = current_tables + block.table_count
+
+        if new_size > budget or new_tables > _MAX_TABLES_PER_ELEMENT:
+            _flush()
+
+        current_blocks.append(block)
+        current_size = new_size
+        current_tables = new_tables
+
+    _flush()
+    return cards if cards else [""]
+
+
+# ---------------------------------------------------------------------------
+# Mermaid rendering: code blocks → transparent PNG via the local mmdc CLI
+# ---------------------------------------------------------------------------
+
+def _extract_mermaid_blocks(content: str) -> list[tuple[str, int, int]]:
+    """Find all ```mermaid ...``` blocks in *content*.
+
+    Returns [(mermaid_code, start_char, end_char), ...] where start/end
+    are character offsets into *content* (inclusive of fences).
+    """
+    results: list[tuple[str, int, int]] = []
+    open_re = _MERMAID_BLOCK_RE
+    close_re = _MERMAID_CLOSE_RE
+    for m in open_re.finditer(content):
+        start = m.start()
+        rest = content[m.end():]
+        close_m = close_re.search(rest)
+        if close_m:
+            end = m.end() + close_m.end()
+            code = rest[:close_m.start()].strip()
+            results.append((code, start, end))
+    return results
+
+
+# mmdc config: transparent theme background + natural (non-stretched) sizing
+# so rendered diagrams sit cleanly on the card instead of in a white box.
+_MERMAID_MMDC_CONFIG = {
+    "theme": "default",
+    "themeVariables": {"background": "transparent"},
+    "flowchart": {"useMaxWidth": False},
+    "sequence": {"useMaxWidth": False},
+    "gantt": {"useMaxWidth": False},
+}
+
+
+def _render_mermaid_local(mermaid_code: str) -> Optional[bytes]:
+    """Render via the local ``mmdc`` (mermaid-cli) CLI.
+
+    mermaid-cli drives a headless browser via puppeteer-core, which does not
+    bundle Chromium, so a Chrome/Chromium must be present.  Returns
+    transparent PNG bytes, or ``None`` when mmdc/browser is unavailable or
+    rendering fails.
+    """
+    import json as _json
+    import shutil
+    import subprocess
+    import tempfile
+
+    mmdc = shutil.which("mmdc")
+    if not mmdc:
+        return None
+
+    render_env = os.environ.copy()
+    browser = render_env.get("PUPPETEER_EXECUTABLE_PATH") or next(
+        (shutil.which(name) for name in ("chromium", "google-chrome-stable", "google-chrome", "chrome") if shutil.which(name)),
+        None,
+    )
+    if browser:
+        render_env["PUPPETEER_EXECUTABLE_PATH"] = browser
+
+    with tempfile.TemporaryDirectory() as tmp:
+        mmd_path = os.path.join(tmp, "diagram.mmd")
+        cfg_path = os.path.join(tmp, "config.json")
+        png_path = os.path.join(tmp, "diagram.png")
+        try:
+            with open(mmd_path, "w", encoding="utf-8") as fh:
+                fh.write(mermaid_code)
+            with open(cfg_path, "w", encoding="utf-8") as fh:
+                _json.dump(_MERMAID_MMDC_CONFIG, fh)
+            subprocess.run(
+                [mmdc, "-i", mmd_path, "-o", png_path, "-b", "transparent",
+                 "-c", cfg_path, "-s", "2", "-q"],
+                capture_output=True, timeout=30, check=True, env=render_env,
+            )
+            with open(png_path, "rb") as fh:
+                data = fh.read()
+            return data or None
+        except (subprocess.SubprocessError, OSError) as exc:
+            logger.warning("[Feishu] local mmdc render failed: %s", exc)
+            return None
+
+
+def _render_mermaid_via_ink(mermaid_code: str) -> Optional[bytes]:
+    """Fallback renderer using the external ``mermaid.ink`` service.
+
+    Used when no local browser is available (e.g. Docker / minimal hosts) so
+    diagrams still render.  Returns PNG bytes or ``None``.
+    """
+    import base64 as _base64
+    import urllib.request
+
+    try:
+        encoded = _base64.urlsafe_b64encode(mermaid_code.encode("utf-8")).decode("ascii")
+        url = f"https://mermaid.ink/img/{encoded}?type=png&bg=transparent"
+        req = urllib.request.Request(url, headers={"User-Agent": "Hermes/1.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = resp.read()
+        return data if len(data) >= 100 else None
+    except Exception as exc:
+        logger.warning("[Feishu] mermaid.ink render failed: %s", exc)
+        return None
+
+
+def _render_mermaid_to_png(mermaid_code: str, allow_external: bool = True) -> Optional[bytes]:
+    """Render a mermaid diagram to a transparent PNG.
+
+    Strategy (robust across hosts): try the **local** mmdc renderer first
+    (private, needs a Chromium/Chrome browser); if it is unavailable — common
+    in Docker or minimal hosts — fall back to the **external** mermaid.ink
+    service when *allow_external* is set.  Returns ``None`` only when both
+    fail, in which case callers keep the ```mermaid block as a code block.
+    """
+    png = _render_mermaid_local(mermaid_code)
+    if png is not None:
+        return png
+    if allow_external:
+        logger.info("[Feishu] local mermaid render unavailable; falling back to mermaid.ink")
+        return _render_mermaid_via_ink(mermaid_code)
+    return None
+
 
 
 def _build_markdown_post_rows(content: str) -> List[List[Dict[str, str]]]:
@@ -1410,6 +1823,7 @@ class FeishuAdapter(BasePlatformAdapter):
     """Feishu/Lark bot adapter."""
 
     supports_code_blocks = True  # Feishu renders fenced code blocks
+    code_block_language_tag = "bash"  # Card 2.0 markdown element honours language tags
 
     MAX_MESSAGE_LENGTH = 8000
     # Max distinct chat IDs retained in _chat_locks before LRU eviction kicks in.
@@ -1428,6 +1842,17 @@ class FeishuAdapter(BasePlatformAdapter):
 
         self._settings = self._load_settings(config.extra or {})
         self._apply_settings(self._settings)
+        # Feature flag: render outbound markdown via Card 2.0 interactive cards.
+        # Default True; set ``feishu_interactive_cards: false`` in platform extras
+        # to fall back to the legacy text/post behavior.
+        self._use_interactive_cards = bool((config.extra or {}).get("feishu_interactive_cards", True))
+        # Mermaid diagrams render to PNG: local mmdc first (private), then fall
+        # back to the external mermaid.ink service when no local browser is
+        # available (Docker / minimal hosts).  Set
+        # ``feishu_mermaid_external_fallback: false`` to forbid the external call.
+        self._mermaid_external_fallback = bool(
+            (config.extra or {}).get("feishu_mermaid_external_fallback", True)
+        )
         self._client: Optional[Any] = None
         self._ws_client: Optional[Any] = None
         self._ws_future: Optional[asyncio.Future] = None
@@ -1788,40 +2213,44 @@ class FeishuAdapter(BasePlatformAdapter):
 
         try:
             for chunk in chunks:
-                msg_type, payload = self._build_outbound_payload(chunk)
-                try:
-                    response = await self._feishu_send_with_retry(
-                        chat_id=chat_id,
-                        msg_type=msg_type,
-                        payload=payload,
-                        reply_to=reply_to,
-                        metadata=metadata,
-                    )
-                except Exception as exc:
-                    if msg_type != "post" or not _POST_CONTENT_INVALID_RE.search(str(exc)):
-                        raise
-                    logger.warning("[Feishu] Invalid post payload rejected by API; falling back to plain text")
-                    response = await self._feishu_send_with_retry(
-                        chat_id=chat_id,
-                        msg_type="text",
-                        payload=json.dumps({"text": _strip_markdown_to_plain_text(chunk)}, ensure_ascii=False),
-                        reply_to=reply_to,
-                        metadata=metadata,
-                    )
-                if (
-                    msg_type == "post"
-                    and not self._response_succeeded(response)
-                    and _POST_CONTENT_INVALID_RE.search(str(getattr(response, "msg", "") or ""))
-                ):
-                    logger.warning("[Feishu] Post payload rejected by API response; falling back to plain text")
-                    response = await self._feishu_send_with_retry(
-                        chat_id=chat_id,
-                        msg_type="text",
-                        payload=json.dumps({"text": _strip_markdown_to_plain_text(chunk)}, ensure_ascii=False),
-                        reply_to=reply_to,
-                        metadata=metadata,
-                    )
-                last_response = response
+                payloads = await self._build_outbound_payloads(chunk)
+                for msg_type, payload in payloads:
+                    try:
+                        response = await self._feishu_send_with_retry(
+                            chat_id=chat_id,
+                            msg_type=msg_type,
+                            payload=payload,
+                            reply_to=reply_to,
+                            metadata=metadata,
+                        )
+                    except Exception as exc:
+                        if msg_type == "interactive":
+                            logger.warning("[Feishu] interactive card rejected; falling back to text: %s", exc)
+                        elif msg_type != "post" or not _POST_CONTENT_INVALID_RE.search(str(exc)):
+                            raise
+                        else:
+                            logger.warning("[Feishu] Invalid post payload rejected by API; falling back to plain text")
+                        response = await self._feishu_send_with_retry(
+                            chat_id=chat_id,
+                            msg_type="text",
+                            payload=json.dumps({"text": _strip_markdown_to_plain_text(chunk)}, ensure_ascii=False),
+                            reply_to=reply_to,
+                            metadata=metadata,
+                        )
+                    if (
+                        msg_type == "post"
+                        and not self._response_succeeded(response)
+                        and _POST_CONTENT_INVALID_RE.search(str(getattr(response, "msg", "") or ""))
+                    ):
+                        logger.warning("[Feishu] Post payload rejected by API response; falling back to plain text")
+                        response = await self._feishu_send_with_retry(
+                            chat_id=chat_id,
+                            msg_type="text",
+                            payload=json.dumps({"text": _strip_markdown_to_plain_text(chunk)}, ensure_ascii=False),
+                            reply_to=reply_to,
+                            metadata=metadata,
+                        )
+                    last_response = response
 
             return self._finalize_send_result(last_response, "send failed")
         except Exception as exc:
@@ -1847,8 +2276,10 @@ class FeishuAdapter(BasePlatformAdapter):
             request = self._build_update_message_request(message_id=message_id, request_body=body)
             response = await asyncio.to_thread(self._client.im.v1.message.update, request)
             result = self._finalize_send_result(response, "update failed")
-            if not result.success and msg_type == "post" and _POST_CONTENT_INVALID_RE.search(result.error or ""):
-                logger.warning("[Feishu] Invalid post update payload rejected by API; falling back to plain text")
+            if not result.success and msg_type in ("interactive", "post") and (
+                msg_type == "interactive" or _POST_CONTENT_INVALID_RE.search(result.error or "")
+            ):
+                logger.warning("[Feishu] %s update payload rejected by API; falling back to plain text", msg_type)
                 fallback_body = self._build_update_message_body(
                     msg_type="text",
                     content=json.dumps({"text": _strip_markdown_to_plain_text(content)}, ensure_ascii=False),
@@ -4374,16 +4805,115 @@ class FeishuAdapter(BasePlatformAdapter):
     # =========================================================================
 
     def _build_outbound_payload(self, content: str) -> tuple[str, str]:
-        # Feishu post-type 'md' elements do not render markdown tables; sending
-        # table content as post causes the message to appear blank on the client.
-        # Force plain text for anything that looks like a markdown table.
-        if _MARKDOWN_TABLE_RE.search(content):
-            text_payload = {"text": content}
-            return "text", json.dumps(text_payload, ensure_ascii=False)
-        if _MARKDOWN_HINT_RE.search(content):
-            return "post", _build_markdown_post_payload(content)
-        text_payload = {"text": content}
-        return "text", json.dumps(text_payload, ensure_ascii=False)
+        if not self._use_interactive_cards:
+            # Legacy behavior: tables → text (post 'md' can't render them),
+            # other markdown → post, plain text → text.
+            if _MARKDOWN_TABLE_RE.search(content):
+                return "text", json.dumps({"text": content}, ensure_ascii=False)
+            if _MARKDOWN_HINT_RE.search(content):
+                return "post", _build_markdown_post_payload(content)
+            return "text", json.dumps({"text": content}, ensure_ascii=False)
+        # Card 2.0 path (single card — used by edit_message / streaming).
+        # For multi-card splitting see _build_outbound_payloads().
+        try:
+            payload = _build_markdown_card_payload(content)
+        except Exception:
+            logger.warning("[Feishu] card build failed; falling back to text", exc_info=True)
+            return "text", json.dumps({"text": content}, ensure_ascii=False)
+        if len(payload.encode("utf-8")) > _MAX_CARD_JSON_BYTES:
+            logger.warning("[Feishu] card payload exceeds %d bytes; falling back to text", _MAX_CARD_JSON_BYTES)
+            return "text", json.dumps({"text": content}, ensure_ascii=False)
+        return "interactive", payload
+
+    async def _upload_mermaid_images(self, content: str) -> str:
+        """Replace ```mermaid blocks with rendered PNG images.
+
+        For each mermaid block: render → upload to Feishu → replace with
+        ![mermaid](image_key).  On failure, leaves the original block intact.
+        """
+        if not self._client or "mermaid" not in content:
+            return content
+
+        blocks = _extract_mermaid_blocks(content)
+        if not blocks:
+            return content
+
+        import io as _io
+
+        # Process from end to start so offsets stay valid
+        for mermaid_code, start, end in reversed(blocks):
+            # mmdc rendering is a (potentially slow) subprocess — run it off
+            # the event loop so a stuck/absent renderer never stalls the
+            # gateway.  On None the block is left intact (code-block fallback).
+            png_bytes = await asyncio.to_thread(
+                _render_mermaid_to_png, mermaid_code, self._mermaid_external_fallback,
+            )
+            if png_bytes is None:
+                continue
+
+            try:
+                image_file = _io.BytesIO(png_bytes)
+                image_file.name = "mermaid.png"
+                body = self._build_image_upload_body(
+                    image_type=_FEISHU_IMAGE_UPLOAD_TYPE,
+                    image=image_file,
+                )
+                request = self._build_image_upload_request(body)
+                upload_response = await asyncio.to_thread(
+                    self._client.im.v1.image.create, request,
+                )
+                image_key = self._extract_response_field(upload_response, "image_key")
+                if not image_key:
+                    continue
+
+                # Replace the mermaid code block with image reference
+                content = content[:start] + f"![mermaid]({image_key})" + content[end:]
+                logger.info("[Feishu] rendered mermaid block as image (%d bytes)", len(png_bytes))
+            except Exception as exc:
+                logger.warning("[Feishu] mermaid image upload failed: %s", exc)
+                continue
+
+        return content
+
+    async def _build_outbound_payloads(self, content: str) -> list[tuple[str, str]]:
+        """Build one or more (msg_type, payload) tuples for *content*.
+
+        If the content fits in a single card, returns a one-element list.
+        If it exceeds 30 KB or the 5-table limit, splits into multiple cards
+        with sequential headers.  Mermaid blocks are rendered to PNG images
+        before splitting.
+        """
+        if not self._use_interactive_cards:
+            msg_type, payload = self._build_outbound_payload(content)
+            return [(msg_type, payload)]
+
+        # Render mermaid code blocks to PNG images
+        content = await self._upload_mermaid_images(content)
+
+        # Check if splitting is needed
+        single_payload = _build_markdown_card_payload(content)
+        table_count = _count_gfm_tables(content)
+
+        if (len(single_payload.encode("utf-8")) <= _MAX_CARD_JSON_BYTES
+                and table_count <= _MAX_TABLES_PER_ELEMENT):
+            return [("interactive", single_payload)]
+
+        # Split into blocks and pack into cards
+        blocks = _split_markdown_blocks(content)
+        card_contents = _pack_blocks_into_cards(blocks)
+
+        if len(card_contents) == 1:
+            return [("interactive", _build_markdown_card_payload(card_contents[0]))]
+
+        # Multiple cards — add sequential headers
+        results: list[tuple[str, str]] = []
+        for i, card_text in enumerate(card_contents):
+            payload = _build_markdown_card_payload(card_text)
+            payload = _inject_card_header(payload, i, len(card_contents))
+            results.append(("interactive", payload))
+
+        logger.info("[Feishu] split content into %d cards", len(card_contents))
+        return results
 
     async def _send_uploaded_file_message(
         self,
