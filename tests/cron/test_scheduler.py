@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import threading
 from unittest.mock import AsyncMock, patch, MagicMock
 
 import pytest
@@ -1329,6 +1330,56 @@ class TestRunJobSessionPersistence:
         assert success is True
         assert error is None
         assert final_response == "all good"
+
+    def test_tick_releases_scheduler_lock_before_executing_long_jobs(self, tmp_path):
+        """A long-running due job must not keep the global tick lock held.
+
+        Regression: the gateway ticker held ``.tick.lock`` for the entire job
+        execution. While a long cron job was still running, later ticks skipped
+        entirely, so newly-due jobs stayed ``scheduled`` with ``last_run_at=None``.
+        The lock should protect due-job selection/advance only; job execution can
+        continue while the next tick selects and starts other due jobs.
+        """
+        import cron.scheduler as sched
+
+        long_job = {"id": "long-job", "name": "long", "prompt": "slow"}
+        smoke_job = {"id": "smoke-job", "name": "smoke", "prompt": "quick"}
+        long_entered = threading.Event()
+        release_long = threading.Event()
+        calls = []
+
+        def fake_get_due_jobs():
+            # First tick sees a long job. A subsequent tick, while that job is
+            # still in run_job(), must be able to acquire the tick lock and see
+            # the smoke job instead of skipping due to the old long-held lock.
+            return [long_job] if len(calls) == 0 else [smoke_job]
+
+        def fake_run_job(job):
+            calls.append(job["id"])
+            if job["id"] == "long-job":
+                long_entered.set()
+                assert release_long.wait(5), "test timed out waiting to release long job"
+            return True, f"output {job['id']}", f"response {job['id']}", None
+
+        with patch("cron.scheduler._hermes_home", tmp_path), \
+             patch("cron.scheduler.get_due_jobs", side_effect=fake_get_due_jobs), \
+             patch("cron.scheduler.advance_next_run"), \
+             patch("cron.scheduler.run_job", side_effect=fake_run_job), \
+             patch("cron.scheduler.save_job_output", return_value="/tmp/out.md"), \
+             patch("cron.scheduler.mark_job_run"), \
+             patch("cron.scheduler._deliver_result", return_value=None):
+            first_tick = threading.Thread(target=sched.tick, kwargs={"verbose": False})
+            first_tick.start()
+            assert long_entered.wait(5), "first tick never started the long job"
+
+            second_count = sched.tick(verbose=False)
+
+            release_long.set()
+            first_tick.join(timeout=5)
+            assert not first_tick.is_alive(), "first tick did not finish"
+
+        assert second_count == 1
+        assert calls == ["long-job", "smoke-job"]
 
     def test_tick_marks_empty_response_as_error(self, tmp_path):
         """When run_job returns success=True but final_response is empty,

@@ -2366,6 +2366,26 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
             lock_fd.close()
         return 0
 
+    lock_released = False
+
+    def _release_tick_lock():
+        """Release the cross-process tick lock exactly once."""
+        nonlocal lock_released
+        if lock_released or lock_fd is None:
+            return
+        if fcntl:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except (OSError, IOError):
+                pass
+        elif msvcrt:
+            try:
+                msvcrt.locking(lock_fd.fileno(), msvcrt.LK_UNLCK, 1)
+            except (OSError, IOError):
+                pass
+        lock_fd.close()
+        lock_released = True
+
     try:
         due_jobs = get_due_jobs()
 
@@ -2383,6 +2403,12 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
         # mark_job_run() overwrites next_run_at on completion.
         for job in due_jobs:
             advance_next_run(job["id"])
+
+        # The lock only guards due-job selection and pre-run advancement.  Do
+        # not hold it while jobs execute: a long-running job would otherwise
+        # block later gateway ticks, leaving newly-due jobs stuck scheduled with
+        # next_run_at in the past until the long job exits.
+        _release_tick_lock()
 
         # Resolve max parallel workers: env var > config.yaml > unbounded.
         # Set HERMES_CRON_MAX_PARALLEL=1 to restore old serial behaviour.
@@ -2532,17 +2558,7 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
 
         return sum(_results)
     finally:
-        if fcntl:
-            try:
-                fcntl.flock(lock_fd, fcntl.LOCK_UN)
-            except (OSError, IOError):
-                pass
-        elif msvcrt:
-            try:
-                msvcrt.locking(lock_fd.fileno(), msvcrt.LK_UNLCK, 1)
-            except (OSError, IOError):
-                pass
-        lock_fd.close()
+        _release_tick_lock()
 
 
 if __name__ == "__main__":
