@@ -962,6 +962,82 @@ def test_review_reasoning_none_disables_and_stops_fallback(curator_env):
     assert curator._resolve_review_reasoning_config(cfg) == {"enabled": False}
 
 
+def test_review_reasoning_invalid_override_falls_back_to_agent(curator_env, caplog):
+    """Invalid canonical curator reasoning logs and falls back to agent."""
+    import logging
+
+    curator = curator_env["curator"]
+    cfg = {
+        "agent": {"reasoning_effort": "high"},
+        "auxiliary": {"curator": {"reasoning_effort": "turbo"}},
+    }
+
+    with caplog.at_level(logging.WARNING, logger="agent.curator"):
+        assert curator._resolve_review_reasoning_config(cfg) == {
+            "enabled": True,
+            "effort": "high",
+        }
+    assert any("invalid auxiliary.curator.reasoning_effort" in rec.message for rec in caplog.records)
+
+
+def test_review_reasoning_legacy_curator_auxiliary_fallback(curator_env, caplog):
+    """Deprecated curator.auxiliary.reasoning_effort works when canonical is absent."""
+    import logging
+
+    curator = curator_env["curator"]
+    cfg = {
+        "agent": {"reasoning_effort": "medium"},
+        "curator": {"auxiliary": {"reasoning_effort": "xhigh"}},
+    }
+
+    with caplog.at_level(logging.INFO, logger="agent.curator"):
+        assert curator._resolve_review_reasoning_config(cfg) == {
+            "enabled": True,
+            "effort": "xhigh",
+        }
+    assert any(
+        "deprecated curator.auxiliary.reasoning_effort" in rec.message
+        for rec in caplog.records
+    )
+
+
+def test_review_reasoning_canonical_wins_over_legacy(curator_env):
+    """Canonical reasoning overrides deprecated curator.auxiliary reasoning."""
+    curator = curator_env["curator"]
+    cfg = {
+        "agent": {"reasoning_effort": "medium"},
+        "auxiliary": {"curator": {"reasoning_effort": "high"}},
+        "curator": {"auxiliary": {"reasoning_effort": "xhigh"}},
+    }
+
+    assert curator._resolve_review_reasoning_config(cfg) == {
+        "enabled": True,
+        "effort": "high",
+    }
+
+
+def test_review_reasoning_invalid_canonical_skips_legacy_and_falls_back_to_agent(
+    curator_env,
+    caplog,
+):
+    """Invalid canonical is still present, so legacy is skipped and agent wins."""
+    import logging
+
+    curator = curator_env["curator"]
+    cfg = {
+        "agent": {"reasoning_effort": "low"},
+        "auxiliary": {"curator": {"reasoning_effort": "turbo"}},
+        "curator": {"auxiliary": {"reasoning_effort": "xhigh"}},
+    }
+
+    with caplog.at_level(logging.WARNING, logger="agent.curator"):
+        assert curator._resolve_review_reasoning_config(cfg) == {
+            "enabled": True,
+            "effort": "low",
+        }
+    assert any("invalid auxiliary.curator.reasoning_effort" in rec.message for rec in caplog.records)
+
+
 def test_review_model_honors_auxiliary_curator_slot(curator_env):
     """auxiliary.curator.{provider,model} fully set → that pair wins."""
     curator = curator_env["curator"]

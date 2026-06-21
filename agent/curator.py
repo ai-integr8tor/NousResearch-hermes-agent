@@ -1709,6 +1709,14 @@ def _parse_review_reasoning_source(
 
 
 def _resolve_review_reasoning_config(cfg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Resolve reasoning config for the curator review fork.
+
+    Precedence:
+      1. auxiliary.curator.reasoning_effort when valid and non-empty
+      2. legacy curator.auxiliary.reasoning_effort only when canonical is absent/empty
+      3. agent.reasoning_effort when valid and non-empty
+      4. None, letting the transport/provider default apply
+    """
     aux = cfg.get("auxiliary", {}) if isinstance(cfg.get("auxiliary"), dict) else {}
     cur_task = aux.get("curator", {}) if isinstance(aux.get("curator"), dict) else {}
     parsed, present, invalid = _parse_review_reasoning_source(
@@ -1718,12 +1726,26 @@ def _resolve_review_reasoning_config(cfg: Dict[str, Any]) -> Optional[Dict[str, 
     if present and not invalid:
         return parsed
 
+    cur = cfg.get("curator", {}) if isinstance(cfg.get("curator"), dict) else {}
+    legacy = cur.get("auxiliary", {}) if isinstance(cur.get("auxiliary"), dict) else {}
+    if not present:
+        parsed, legacy_present, legacy_invalid = _parse_review_reasoning_source(
+            "curator.auxiliary",
+            legacy.get("reasoning_effort"),
+        )
+        if legacy_present and not legacy_invalid:
+            logger.info(
+                "curator: using deprecated curator.auxiliary.reasoning_effort "
+                "config — please migrate to auxiliary.curator.reasoning_effort"
+            )
+            return parsed
+
     agent_cfg = cfg.get("agent", {}) if isinstance(cfg.get("agent"), dict) else {}
-    parsed, present, invalid = _parse_review_reasoning_source(
+    parsed, agent_present, agent_invalid = _parse_review_reasoning_source(
         "agent",
         agent_cfg.get("reasoning_effort"),
     )
-    if present and not invalid:
+    if agent_present and not agent_invalid:
         return parsed
     return None
 
