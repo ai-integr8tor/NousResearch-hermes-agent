@@ -953,7 +953,7 @@ class TestMatrixRenderingPayloads:
         assert "<strong>Bold</strong>" in content["formatted_body"]
 
     @pytest.mark.asyncio
-    async def test_thread_payload_uses_m_thread_with_reply_fallback(self):
+    async def test_plain_thread_payload_omits_reply_fallback(self):
         result = await self.adapter.send(
             "!room:example.org",
             "threaded",
@@ -965,8 +965,6 @@ class TestMatrixRenderingPayloads:
         assert relates_to == {
             "rel_type": "m.thread",
             "event_id": "$root",
-            "is_falling_back": True,
-            "m.in_reply_to": {"event_id": "$root"},
         }
 
     @pytest.mark.asyncio
@@ -982,6 +980,27 @@ class TestMatrixRenderingPayloads:
         relates_to = self._sent_contents()[0]["m.relates_to"]
         assert relates_to["event_id"] == "$root"
         assert relates_to["m.in_reply_to"] == {"event_id": "$reply"}
+        assert relates_to["is_falling_back"] is False
+
+    @pytest.mark.asyncio
+    async def test_thread_payload_can_emit_explicit_fallback_anchor(self):
+        result = await self.adapter.send(
+            "!room:example.org",
+            "threaded fallback",
+            metadata={
+                "thread_id": "$root",
+                "matrix_thread_fallback_event_id": "$latest",
+            },
+        )
+
+        assert result.success is True
+        relates_to = self._sent_contents()[0]["m.relates_to"]
+        assert relates_to == {
+            "rel_type": "m.thread",
+            "event_id": "$root",
+            "m.in_reply_to": {"event_id": "$latest"},
+            "is_falling_back": True,
+        }
 
     @pytest.mark.asyncio
     async def test_edit_payload_uses_m_replace(self):
@@ -1016,7 +1035,8 @@ class TestMatrixRenderingPayloads:
         for content in contents:
             assert content["m.relates_to"]["rel_type"] == "m.thread"
             assert content["m.relates_to"]["event_id"] == "$root"
-            assert content["m.relates_to"]["m.in_reply_to"] == {"event_id": "$root"}
+            assert "m.in_reply_to" not in content["m.relates_to"]
+            assert "is_falling_back" not in content["m.relates_to"]
             assert content["body"].count("```") % 2 == 0
 
 
@@ -2185,7 +2205,8 @@ class TestMatrixUploadAndSend:
         assert sent["body"] == "Chart caption"
         assert sent["m.relates_to"]["rel_type"] == "m.thread"
         assert sent["m.relates_to"]["event_id"] == "$root"
-        assert sent["m.relates_to"]["m.in_reply_to"] == {"event_id": "$root"}
+        assert "m.in_reply_to" not in sent["m.relates_to"]
+        assert "is_falling_back" not in sent["m.relates_to"]
 
     @pytest.mark.asyncio
     async def test_send_multiple_images_preserves_logical_batch_order_and_thread(self, tmp_path):
@@ -2215,7 +2236,8 @@ class TestMatrixUploadAndSend:
             sent = call.args[2]
             assert sent["msgtype"] == "m.image"
             assert sent["m.relates_to"]["event_id"] == "$root"
-            assert sent["m.relates_to"]["m.in_reply_to"] == {"event_id": "$root"}
+            assert "m.in_reply_to" not in sent["m.relates_to"]
+            assert "is_falling_back" not in sent["m.relates_to"]
 
 
 class TestMatrixDiagnostics:
