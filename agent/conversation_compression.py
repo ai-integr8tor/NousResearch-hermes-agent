@@ -444,14 +444,15 @@ def compress_context(
                 logger.debug("compression lock release failed: %s", _rel_err)
 
     # Notify external memory provider before compression discards context
+    provider_context = ""
     if agent._memory_manager:
         try:
-            agent._memory_manager.on_pre_compress(messages)
+            provider_context = agent._memory_manager.on_pre_compress(messages) or ""
         except Exception:
             pass
 
     try:
-        compressed = agent.context_compressor.compress(messages, current_tokens=approx_tokens, focus_topic=focus_topic, force=force)
+        compressed = agent.context_compressor.compress(messages, current_tokens=approx_tokens, focus_topic=focus_topic, provider_context=provider_context, force=force)
     except TypeError:
         # Plugin context engine with strict signature that doesn't accept
         # focus_topic / force — fall back to calling without them.
@@ -511,6 +512,25 @@ def compress_context(
     todo_snapshot = agent._todo_store.format_for_injection()
     if todo_snapshot:
         compressed.append({"role": "user", "content": todo_snapshot})
+
+    # Persist compaction summary to disk for cross-session continuity
+    _persisted_summary = getattr(agent.context_compressor, "_previous_summary", None)
+    if _persisted_summary:
+        try:
+            import pathlib
+            _logs_dir = pathlib.Path(getattr(agent, "logs_dir", pathlib.Path.home() / ".hermes" / "sessions"))
+            _summary_file = _logs_dir / f"compaction_summary_{agent.session_id}.md"
+            _summary_file.write_text(
+                f"# Context Compaction Summary\n"
+                f"# Session: {agent.session_id}\n"
+                f"# Time: {datetime.now().isoformat()}\n"
+                f"# Compression #{agent.context_compressor.compression_count}\n\n"
+                f"{_persisted_summary}\n",
+                encoding="utf-8",
+            )
+            logger.info("Persisted compaction summary to %s", _summary_file)
+        except Exception as e:
+            logger.debug("Failed to persist compaction summary: %s", e)
 
     agent._invalidate_system_prompt()
     new_system_prompt = agent._build_system_prompt(system_message)

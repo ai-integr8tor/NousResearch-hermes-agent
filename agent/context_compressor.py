@@ -1446,6 +1446,7 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         self,
         turns_to_summarize: List[Dict[str, Any]],
         focus_topic: Optional[str] = None,
+        provider_context: str = "",
     ) -> Optional[str]:
         """Generate a structured summary of conversation turns.
 
@@ -1459,6 +1460,9 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
                 provided, the summariser prioritises preserving information
                 related to this topic and is more aggressive about compressing
                 everything else.  Inspired by Claude Code's ``/compact``.
+            provider_context: Optional context from external memory providers
+                gathered via on_pre_compress(). Injected into the summary prompt
+                so provider insights are preserved in the compaction summary.
 
         Returns None if all attempts fail — the caller should drop
         the middle turns without a summary rather than inject a useless
@@ -1626,6 +1630,16 @@ TURNS TO SUMMARIZE:
 Use this exact structure:
 
 {_template_sections}"""
+
+        # Inject provider context from on_pre_compress() hooks.
+        # This ensures external memory provider insights are preserved in the summary.
+        if provider_context and provider_context.strip():
+            prompt += f"""
+
+EXTERNAL MEMORY PROVIDER CONTEXT (gathered before compression):
+{provider_context}
+
+Incorporate any relevant information from the provider context above into the summary."""
 
         # Inject focus topic guidance when the user provides one via /compress <focus>.
         # This goes at the end of the prompt so it takes precedence.
@@ -2351,7 +2365,7 @@ This compaction should PRIORITISE preserving all information related to the focu
     # Main compression entry point
     # ------------------------------------------------------------------
 
-    def compress(self, messages: List[Dict[str, Any]], current_tokens: int = None, focus_topic: str = None, force: bool = False) -> List[Dict[str, Any]]:
+    def compress(self, messages: List[Dict[str, Any]], current_tokens: int = None, focus_topic: str = None, provider_context: str = "", force: bool = False) -> List[Dict[str, Any]]:
         """Compress conversation messages by summarizing middle turns.
 
         Algorithm:
@@ -2369,6 +2383,9 @@ This compaction should PRIORITISE preserving all information related to the focu
                 provided, the summariser will prioritise preserving information
                 related to this topic and be more aggressive about compressing
                 everything else.  Inspired by Claude Code's ``/compact``.
+            provider_context: Optional context from external memory providers
+                gathered via on_pre_compress(). Injected into the summary prompt
+                so provider insights are preserved in the compaction summary.
             force: If True, clear any active summary-failure cooldown before
                 running so a manual ``/compress`` can retry immediately after
                 an auto-compression abort.  Auto-compress callers pass False.
@@ -2484,7 +2501,7 @@ This compaction should PRIORITISE preserving all information related to the focu
 
         # Phase 3: Generate structured summary
         summary_focus_topic = focus_topic or self._derive_auto_focus_topic(messages)
-        summary = self._generate_summary(turns_to_summarize, focus_topic=summary_focus_topic)
+        summary = self._generate_summary(turns_to_summarize, focus_topic=summary_focus_topic, provider_context=provider_context)
 
         # If summary generation failed, behavior splits on
         # ``abort_on_summary_failure`` (config: compression.abort_on_summary_failure):
