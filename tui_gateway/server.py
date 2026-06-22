@@ -321,6 +321,84 @@ def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> No
             pass
 
 
+def _teardown_session(session: dict | None) -> None:
+    """Fully tear down a session: finalize, unregister, close agent + worker.
+
+    Shared by ``session.close`` and the orphaned-WS-session reaper so the
+    slash-worker subprocess is always closed exactly once via the same path.
+    Idempotent: the ``_finalized`` guard in ``_finalize_session`` and the
+    ``poll()`` guard in ``_SlashWorker.close`` make repeat calls harmless.
+    """
+    if not session:
+        return
+    _finalize_session(session)
+    try:
+        from tools.approval import unregister_gateway_notify
+
+        unregister_gateway_notify(session["session_key"])
+    except Exception:
+        pass
+    try:
+        agent = session.get("agent")
+        if agent:
+            # Bug #50197: drain memory provider before closing
+            if hasattr(agent, "shutdown_memory_provider"):
+                session_messages = getattr(agent, "_session_messages", None)
+                if isinstance(session_messages, list):
+                    agent.shutdown_memory_provider(session_messages)
+                else:
+                    agent.shutdown_memory_provider()
+            if hasattr(agent, "close"):
+                agent.close()
+    except Exception:
+        pass
+    try:
+        worker = session.get("slash_worker")
+        if worker:
+            worker.close()
+    except Exception:
+        pass
+
+
+def _ws_session_is_orphaned(session: dict | None) -> bool:
+    """True if a WS session has no live transport and no in-flight turn.
+
+    After ``handle_ws`` detaches a disconnected client it points the session
+    at ``_stdio_transport``. In the dashboard's in-process gateway there is no
+    real stdio peer reading those frames, so a session left on the stdio
+    transport (and not mid-turn) is genuinely orphaned and safe to reap.
+    """
+    if not session or session.get("_finalized"):
+        return False
+    if session.get("running"):
+        return False
+    return session.get("transport") is _stdio_transport
+
+
+def _schedule_ws_orphan_reap(sid: str) -> None:
+    """After a grace window, reap session ``sid`` iff it's still orphaned.
+
+    Called from the WS-disconnect path. The grace window lets a transient
+    reconnect (or a ``session.resume`` that reattaches the transport) cancel
+    the reap by re-binding a live transport. Disabled when the grace is 0.
+    """
+    if _WS_ORPHAN_REAP_GRACE_S <= 0:
+        return
+
+    def _reap() -> None:
+        with _session_resume_lock:
+            session = _sessions.get(sid)
+            if not _ws_session_is_orphaned(session):
+                return
+            _sessions.pop(sid, None)
+        try:
+            _teardown_session(session)
+        except Exception:
+            pass
+
+    timer = threading.Timer(_WS_ORPHAN_REAP_GRACE_S, _reap)
+    timer.daemon = True
+    timer.start()
 def _shutdown_sessions() -> None:
     for session in list(_sessions.values()):
         _finalize_session(session, end_reason="tui_shutdown")
@@ -3812,12 +3890,29 @@ def _(rid, params: dict) -> dict:
         try:
             from run_agent import AIAgent
 
-            result = AIAgent(
+            agent = AIAgent(
                 **_background_agent_kwargs(session["agent"], task_id)
-            ).run_conversation(
-                user_message=text,
-                task_id=task_id,
             )
+            try:
+                # Bug #50233: reapply profile HERMES_HOME override in this
+                # thread context (ContextVar doesn't propagate from the
+                # session-create thread to ephemeral agent threads).
+                _ph = session.get("profile_home")
+                _ht = set_hermes_home_override(_ph) if _ph else None
+                try:
+                    result = agent.run_conversation(
+                        user_message=text,
+                        task_id=task_id,
+                    )
+                finally:
+                    if _ht is not None:
+                        reset_hermes_home_override(_ht)
+            finally:
+                # Bug #50197: close ephemeral background agent
+                try:
+                    agent.close()
+                except Exception:
+                    pass
             _emit(
                 "background.complete",
                 parent,
@@ -3837,6 +3932,135 @@ def _(rid, params: dict) -> dict:
                 {"task_id": task_id, "text": f"error: {e}"},
             )
         finally:
+            _clear_session_context(session_tokens)
+
+    threading.Thread(target=run, daemon=True).start()
+    return _ok(rid, {"task_id": task_id})
+
+
+@method("preview.restart")
+def _(rid, params: dict) -> dict:
+    session, err = _sess(params, rid)
+    if err:
+        return err
+
+    url = str(params.get("url") or "").strip()
+    cwd = str(params.get("cwd") or "").strip()
+    context = str(params.get("context") or "").strip()
+
+    if not url:
+        return _err(rid, 4012, "url required")
+
+    task_id = f"preview_{uuid.uuid4().hex[:6]}"
+    parent = params.get("session_id", "")
+    parent_history = _preview_restart_history(session)
+    has_history = bool(parent_history)
+    prompt = "\n".join(
+        line
+        for line in [
+            "The desktop preview pane cannot load a local server URL.",
+            "",
+            f"Preview URL: {url}",
+            f"Current working directory: {cwd or '(unknown)'}",
+            "",
+            f"Preview console:\n{context}" if context else "",
+            "" if context else "",
+            (
+                "The conversation history above is from the user's main session — including the commands you (the assistant) previously ran to start servers, edit files, or check ports. Use it to figure out exactly which server should be running at this Preview URL. The user did not start a brand new task; recover what they had working."
+                if has_history
+                else None
+            ),
+            "Restart exactly the app intended for the Preview URL, not Hermes Desktop itself.",
+            "The Preview URL and port are the target. Preserve that target unless you conclude it is impossible.",
+            "If the prior conversation shows a specific command that bound this URL/port, prefer re-running THAT exact command (in the same cwd) over guessing a new one.",
+            "First inspect what process, if any, owns the Preview URL port. If a stale server exists, inspect its cwd and prefer that cwd over the Hermes/Desktop process cwd.",
+            "The Current working directory is only a hint. Do not assume it is the preview app root when the port owner or files indicate another root.",
+            "If the console shows a module-script MIME error for src/main.tsx or similar, a static server is serving source files. Do not restart python -m http.server or any dumb static server for that app.",
+            "For module-script MIME failures, inspect package.json/vite config in the candidate app root and start the real dev server/bundler (for example npm/pnpm/yarn dev) so module transforms happen.",
+            "Before declaring success, verify the Preview URL responds with the intended app, not Hermes Desktop. If it serves Hermes/Desktop UI or another unrelated app, stop that process and report failure.",
+            "Do not modify files. Do not ask the user unless blocked.",
+            "Prefer existing project scripts or commands when they are clear.",
+            "If a stale process owns the needed port, handle it safely.",
+            "Start long-running servers detached/in the background, then return immediately.",
+            "Do not run a foreground dev server command that blocks this background task.",
+            "Keep the final response short: what command/server was started, or why it could not be restarted.",
+        ]
+        if line
+    )
+
+    # Normalize defensively: a malformed client path (embedded NUL, etc.) must
+    # not blow up the whole restart — treat it as "no validated cwd".
+    try:
+        preview_cwd = os.path.abspath(os.path.expanduser(cwd)) if cwd else ""
+        if preview_cwd and not os.path.isdir(preview_cwd):
+            preview_cwd = ""
+    except Exception:
+        preview_cwd = ""
+
+    def run():
+        # Pin the validated preview cwd, else the parent workspace — never an
+        # invalid client path, which would silently fall back to the launch dir.
+        session_tokens = _set_session_context(task_id, cwd=(preview_cwd or _session_cwd(session)))
+        try:
+            from run_agent import AIAgent
+            from tools.terminal_tool import register_task_env_overrides
+
+            if preview_cwd:
+                register_task_env_overrides(task_id, {"cwd": preview_cwd})
+
+            history_note = (
+                f" (with {len(parent_history)} parent-session messages of context)"
+                if parent_history
+                else ""
+            )
+            _emit(
+                "preview.restart.progress",
+                parent,
+                {"task_id": task_id, "text": f"Starting hidden restart agent{history_note}"},
+            )
+            agent = AIAgent(
+                **_ephemeral_preview_agent_kwargs(session["agent"], task_id),
+                **_preview_restart_callbacks(parent, task_id),
+            )
+            try:
+                # Bug #50233: reapply profile HERMES_HOME override in this
+                # thread context (ContextVar doesn't propagate from parent).
+                _ph = session.get("profile_home")
+                _ht = set_hermes_home_override(_ph) if _ph else None
+                try:
+                    result = agent.run_conversation(
+                        user_message=prompt,
+                        task_id=task_id,
+                        conversation_history=parent_history or None,
+                    )
+                finally:
+                    if _ht is not None:
+                        reset_hermes_home_override(_ht)
+            finally:
+                # Bug #50197: close ephemeral preview-restart agent
+                try:
+                    agent.close()
+                except Exception:
+                    pass
+            text = (
+                result.get("final_response", str(result))
+                if isinstance(result, dict)
+                else str(result)
+            )
+            _emit("preview.restart.complete", parent, {"task_id": task_id, "text": text})
+        except Exception as e:
+            _emit(
+                "preview.restart.complete",
+                parent,
+                {"task_id": task_id, "text": f"error: {e}"},
+            )
+        finally:
+            try:
+                from tools.terminal_tool import clear_task_env_overrides
+
+                clear_task_env_overrides(task_id)
+            except Exception:
+                pass
             _clear_session_context(session_tokens)
 
     threading.Thread(target=run, daemon=True).start()
