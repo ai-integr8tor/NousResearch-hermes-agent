@@ -805,6 +805,9 @@ export interface Translations {
     confirmArchive: string;
     confirmBlocked: string;
     confirmScheduled?: string;
+    confirmDoneMany: string;
+    confirmArchiveMany: string;
+    confirmBlockedMany: string;
     completionSummary: string;
     completionSummaryRequired: string;
     triagePlaceholder: string;

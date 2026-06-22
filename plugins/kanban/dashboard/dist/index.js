@@ -114,6 +114,13 @@
     archived: "Archive this task? It disappears from the default board view.",
     blocked: "Mark this task as blocked? The worker's claim is released.",
   };
+  // Pluralized variants used by getDestructiveConfirm() when count > 1.
+  // Each entry may use {n} as a placeholder for the count.
+  const FALLBACK_DESTRUCTIVE_MANY = {
+    done: "Mark {n} tasks as done? The workers' claims are released and dependent children become ready.",
+    archived: "Archive {n} tasks? They disappear from the default board view.",
+    blocked: "Mark {n} tasks as blocked? The workers' claims are released.",
+  };
   const FALLBACK_DIAGNOSTIC_EVENT_LABELS = {
     completion_blocked_hallucination: "⚠ Completion blocked — phantom card ids",
     suspected_hallucinated_references: "⚠ Prose referenced phantom card ids",
@@ -140,9 +147,18 @@
   function getColumnHelp(t, status) {
     return tx(t, "columnHelp." + status, FALLBACK_COLUMN_HELP[status] || "");
   }
-  function getDestructiveConfirm(t, status) {
+  function getDestructiveConfirm(t, status, count) {
     const key = DESTRUCTIVE_KEYS[status];
     if (!key) return null;
+    // For bulk operations, use the *Many variant of the i18n key so the
+    // copy pluralizes correctly ("Mark 3 tasks as done?" instead of
+    // "Mark this task as done?"). Falls back to the singular English
+    // string if a translation for the *Many key isn't shipped.
+    if (count && count > 1) {
+      const manyKey = key + "Many";
+      const manyFallback = FALLBACK_DESTRUCTIVE_MANY[status] || FALLBACK_DESTRUCTIVE[status];
+      return tx(t, manyKey, manyFallback, { n: count });
+    }
     return tx(t, key, FALLBACK_DESTRUCTIVE[status]);
   }
   function getDiagnosticEventLabel(t, kind) {
@@ -171,25 +187,73 @@
     return p.phantom_cards || p.phantom_refs || [];
   }
 
-  // Takes an optional `t` so the prompt/alert text is localised. Callers
-  // outside React components can pass null and fall through to English.
-  function withCompletionSummary(patch, count, t) {
-    if (!patch || patch.status !== "done") return patch;
-    const label = count && count > 1 ? `${count} selected task(s)` : "this task";
-    const value = window.prompt(
-      tx(t, "completionSummary",
-        "Completion summary for {label}. This is stored as the task result.",
-        { label: label }),
-      "",
-    );
-    if (value === null) return null;
-    const summary = value.trim();
-    if (!summary) {
-      window.alert(tx(t, "completionSummaryRequired",
-        "Completion summary is required before marking a task done."));
-      return null;
-    }
-    return Object.assign({}, patch, { result: summary, summary });
+  // Helpers for the dialog state machine used by `useKanbanDialogs` below.
+  // The dialog API is Promise-based so call sites can preserve their
+  // synchronous-ish flow: ``await kanbanDialogs.request(...)`` and then
+  // continue with the optimistic UI + PATCH. See #50547.
+  function dialogLabelForCount(count, t) {
+    return count && count > 1 ? tx(t, "selectedTasks", "{n} selected tasks", { n: count }) : tx(t, "thisTask", "this task");
+  }
+
+  /**
+   * Hook owning the kanban plugin's modal dialog state. Returns
+   *   - `request(req)` — imperative API. Resolves to
+   *     `{ confirmed: false }` if the user cancels, or
+   *     `{ confirmed: true, summary?: string }` if they confirm.
+   *   - `dialogState` — current dialog descriptor for rendering, or null.
+   *   - `dialogProps` — onConfirm/onCancel handlers bound to the current
+   *     request.
+   *
+   * `req` shapes:
+   *   { kind: "confirm", title, description, confirmLabel, destructive }
+   *   { kind: "completion", title, description, label, destructive, confirmLabel }
+   *   { kind: "copyFallback", command }   // clipboard API unavailable
+   */
+  function useKanbanDialogs(t) {
+    const [dialogState, setDialogState] = React.useState(null);
+    const resolverRef = React.useRef(null);
+
+    const request = React.useCallback(function (req) {
+      return new Promise(function (resolve) {
+        resolverRef.current = resolve;
+        setDialogState(req);
+      });
+    }, []);
+
+    const close = React.useCallback(function (confirmed, extras) {
+      const resolve = resolverRef.current;
+      resolverRef.current = null;
+      setDialogState(null);
+      if (resolve) {
+        resolve(Object.assign({ confirmed: confirmed }, extras || {}));
+      }
+    }, []);
+
+    const onConfirm = React.useCallback(function (maybeSummary) {
+      close(true, maybeSummary ? { summary: maybeSummary } : null);
+    }, [close]);
+    const onCancel = React.useCallback(function () { close(false, null); }, [close]);
+
+    // Wrap the ConfirmDialog props so call sites can hand them straight
+    // to <ConfirmDialog {...props} />. Title/description/confirmLabel are
+    // sourced from the current dialog state. For "completion" the dialog
+    // body (textarea + dual-validation) is rendered separately.
+    const dialogProps = React.useMemo(function () {
+      if (!dialogState) return null;
+      return {
+        open: true,
+        title: dialogState.title || "",
+        description: dialogState.description,
+        confirmLabel: dialogState.confirmLabel || (dialogState.kind === "completion"
+          ? tx(t, "confirm", "Confirm")
+          : tx(t, "ok", "OK")),
+        destructive: !!dialogState.destructive,
+        onConfirm: function () { onConfirm(); },
+        onCancel: onCancel,
+      };
+    }, [dialogState, t, onConfirm, onCancel]);
+
+    return { dialogState: dialogState, dialogProps: dialogProps, request: request };
   }
 
   const API = "/api/plugins/kanban";
@@ -459,11 +523,116 @@
   }
 
   // -------------------------------------------------------------------------
+  // Dialog renderer
+  // -------------------------------------------------------------------------
+
+  /**
+   * Single component that owns the kanban plugin's modal dialog UI. Renders
+   * whichever dialog `useKanbanDialogs` is currently requesting, or nothing
+   * if no dialog is open.
+   *
+   * Three dialog kinds:
+   *   - "confirm"        → standard ConfirmDialog (title + description + buttons)
+   *   - "completion"     → ConfirmDialog + textarea + dual-validation
+   *   - "copyFallback"   → ConfirmDialog with copyable command text
+   *
+   * The "completion" body is rendered via a small inline form because
+   * ConfirmDialog's props don't include an input slot. The dual-validation
+   * keeps the confirm button disabled until non-empty AND surfaces the
+   * i18n'd error on submit-attempted-empty (per #50547).
+   */
+  function KanbanDialogs(props) {
+    const { dialogProps, dialogState } = props;
+    if (!dialogState || !dialogProps) return null;
+    const ConfirmDialog = SDK.components.ConfirmDialog;
+    if (!ConfirmDialog) return null;
+    if (dialogState.kind === "completion") {
+      return h(CompletionSummaryDialogBody, {
+        dialogProps: dialogProps,
+        label: dialogState.label,
+      });
+    }
+    if (dialogState.kind === "copyFallback") {
+      return h(CopyFallbackDialogBody, {
+        dialogProps: dialogProps,
+        command: dialogState.command,
+      });
+    }
+    // "confirm" — pure ConfirmDialog. dialogProps.onConfirm / onCancel
+    // are already wired to close the dialog (set by useKanbanDialogs).
+    return h(ConfirmDialog, dialogProps);
+  }
+
+  function CompletionSummaryDialogBody(props) {
+    const { dialogProps, label } = props;
+    const ConfirmDialog = SDK.components.ConfirmDialog;
+    const { useState } = SDK.hooks;
+    const [summary, setSummary] = useState("");
+    const [showError, setShowError] = useState(false);
+    const valid = summary.trim().length > 0;
+    // Wrap the parent onConfirm so we validate first. If empty, keep the
+    // dialog open and show the inline error.
+    const wrappedOnConfirm = function () {
+      if (!valid) {
+        setShowError(true);
+        return;
+      }
+      // Pass the summary as the first arg to dialogProps.onConfirm. The
+      // hook's onConfirm shape: (maybeSummary?) => close(true, { summary }).
+      if (dialogProps.onConfirm) dialogProps.onConfirm(summary.trim());
+    };
+    return h(ConfirmDialog,
+      Object.assign({}, dialogProps, {
+        onConfirm: wrappedOnConfirm,
+      }),
+      h("div", { className: "mt-3 flex flex-col gap-1" },
+        h(Label, { className: "text-xs" },
+          tx(null, "completionSummaryBody", "Completion summary for {label}. This is stored as the task result.", { label: label || "" }),
+        ),
+        h("textarea", {
+          rows: 3,
+          autoFocus: true,
+          value: summary,
+          onChange: function (e) { setSummary(e.target.value); },
+          onKeyDown: function (e) {
+            if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && valid) {
+              wrappedOnConfirm();
+            }
+          },
+          className: "w-full rounded-md border bg-transparent px-3 py-2 text-sm " +
+            (showError && !valid ? "border-destructive" : "border-input"),
+          placeholder: tx(null, "completionSummaryPlaceholder", "What did the worker do?"),
+        }),
+        showError && !valid
+          ? h("div", { className: "text-xs text-destructive" },
+              tx(null, "completionSummaryRequired",
+                "Completion summary is required before marking a task done."))
+          : null,
+      ),
+    );
+  }
+
+  function CopyFallbackDialogBody(props) {
+    const { dialogProps, command, onSubmit } = props;
+    const ConfirmDialog = SDK.components.ConfirmDialog;
+    return h(ConfirmDialog, dialogProps,
+      h("div", { className: "mt-3" },
+        h("pre", {
+          className: "rounded-md border bg-muted px-3 py-2 text-xs whitespace-pre-wrap break-all",
+        }, command),
+        h("div", { className: "mt-2 text-xs text-muted-foreground" },
+          tx(null, "copyFallbackHint", "Clipboard API is unavailable in this context. Select the command above and copy it manually.")),
+      ),
+    );
+  }
+
+  // -------------------------------------------------------------------------
   // Root page
   // -------------------------------------------------------------------------
 
   function KanbanPage() {
     const { t } = useI18n();
+    const kanbanDialogs = useKanbanDialogs(t);
     const [board, setBoard] = useState(() => readSelectedBoard() || null);
     const [boardList, setBoardList] = useState([]);      // [{slug, name, counts, ...}]
     const [showNewBoard, setShowNewBoard] = useState(false);
@@ -673,17 +842,67 @@
     }, [boardData, tenantFilter, assigneeFilter, search]);
 
     // --- actions ------------------------------------------------------------
-    const moveTask = useCallback(function (taskId, newStatus) {
-      const confirmMsg = getDestructiveConfirm(t, newStatus);
-      if (confirmMsg && !window.confirm(confirmMsg)) return;
-      const patch = withCompletionSummary({ status: newStatus }, 1, t);
-      if (!patch) return;
+    // Performs the actual move (optimistic UI + PATCH) once any required
+    // confirmation and/or completion summary has been collected by the
+    // caller. Extracted so moveTask / moveSelected / applyBulk can all
+    // share the same dispatch path regardless of how confirmation was
+    // collected (synchronous window.confirm in the original code, async
+    // dialog via useKanbanDialogs now).
+    //   taskId  — required when count <= 1 (single-task PATCH endpoint)
+    //           — ignored when count >  1 (bulk endpoint uses selectedIds)
+    //   summary — completion summary string, or null/undefined to skip
+    const performMoveTask = useCallback(function (taskId, newStatus, count, summary) {
+      const patch = { status: newStatus };
+      const finalPatch = summary
+        ? Object.assign({}, patch, { result: summary, summary: summary })
+        : patch;
+      if (count > 1) {
+        // Bulk path: optimistic UI prepends all moved tasks to dest column.
+        setBoardData(function (b) {
+          if (!b) return b;
+          const moved = [];
+          const columns = b.columns.map(function (col) {
+            const kept = [];
+            for (const tk of col.tasks) {
+              if (selectedIds.has(tk.id)) moved.push(Object.assign({}, tk, { status: newStatus }));
+              else kept.push(tk);
+            }
+            return Object.assign({}, col, { tasks: kept });
+          });
+          const dest = columns.find(function (c) { return c.name === newStatus; });
+          if (dest) dest.tasks = moved.concat(dest.tasks);
+          return Object.assign({}, b, { columns });
+        });
+        const ids = Array.from(selectedIds);
+        SDK.fetchJSON(withBoard(`${API}/tasks/bulk`, board), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(Object.assign({ ids: ids }, finalPatch)),
+        }).then(function (res) {
+          const failed = (res.results || []).filter(function (r) { return !r.ok; });
+          if (failed.length > 0) {
+            setError(`Bulk move: ${failed.length} of ${res.results.length} failed`);
+            setFailedIds(new Set(failed.map(function (f) { return f.id; })));
+          } else {
+            setFailedIds(new Set());
+          }
+          setSelectedIds(new Set());
+          setLastSelectedId(null);
+          loadBoard();
+        }).catch(function (err) {
+          setError(`Move failed: ${err.message || err}`);
+          setFailedIds(new Set(selectedIds));
+          loadBoard();
+        });
+        return;
+      }
+      // Single-task path.
       setBoardData(function (b) {
         if (!b) return b;
         let moved = null;
         const columns = b.columns.map(function (col) {
-          const next = col.tasks.filter(function (t) {
-            if (t.id === taskId) { moved = Object.assign({}, t, { status: newStatus }); return false; }
+          const next = col.tasks.filter(function (tk) {
+            if (tk.id === taskId) { moved = Object.assign({}, tk, { status: newStatus }); return false; }
             return true;
           });
           return Object.assign({}, col, { tasks: next });
@@ -697,12 +916,62 @@
       SDK.fetchJSON(withBoard(`${API}/tasks/${encodeURIComponent(taskId)}`, board), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(patch),
+        body: JSON.stringify(finalPatch),
       }).catch(function (err) {
         setError(tx(t, "moveFailed", "Move failed: ") + parseApiErrorMessage(err));
         loadBoard();
       });
-    }, [loadBoard, board, t]);
+    }, [loadBoard, board, t, selectedIds]);
+
+    // Pre-dispatch dialog step for both moveTask and moveSelected. Drives
+    // the new in-app ConfirmDialog instead of window.confirm. The flow:
+    //   1. If newStatus is destructive (done/archived/blocked), open
+    //      a confirm dialog.
+    //   2. If newStatus is "done", additionally open a completion-summary
+    //      dialog (chained via Promise).
+    //   3. On confirm of all steps, call performMoveTask.
+    //   4. On cancel anywhere, do nothing.
+    const requestMoveConfirm = useCallback(function (newStatus, count) {
+      const confirmMsg = getDestructiveConfirm(t, newStatus, count);
+      if (!confirmMsg) return Promise.resolve({ confirmed: true });
+      return kanbanDialogs.request({
+        kind: "confirm",
+        title: tx(t, "confirmStatusTitle." + newStatus, "Confirm status change"),
+        description: confirmMsg,
+        confirmLabel: tx(t, "confirmStatusLabel." + newStatus, "Confirm"),
+        destructive: true,
+      });
+    }, [kanbanDialogs, t]);
+
+    const requestCompletionSummary = useCallback(function (count) {
+      const label = dialogLabelForCount(count, t);
+      return kanbanDialogs.request({
+        kind: "completion",
+        title: tx(t, "completionSummaryTitle", "Completion summary"),
+        description: tx(t, "completionSummaryFor", "Required for marking done. Stored as the task result."),
+        label: label,
+        confirmLabel: tx(t, "markDone", "Mark Done"),
+        destructive: false,
+      });
+    }, [kanbanDialogs, t]);
+
+    // Single-task card move. Drives confirmation + completion summary
+    // dialogs via the hook, then dispatches via performMoveTask.
+    const moveTask = useCallback(function (taskId, newStatus) {
+      requestMoveConfirm(newStatus, 1)
+        .then(function (r1) {
+          if (!r1.confirmed) return null;
+          if (newStatus !== "done") {
+            performMoveTask(taskId, newStatus, 1, null);
+            return null;
+          }
+          return requestCompletionSummary(1).then(function (r2) {
+            if (!r2.confirmed) return null;
+            performMoveTask(taskId, newStatus, 1, r2.summary || null);
+          });
+        })
+        .catch(function () { /* dialog cancelled */ });
+    }, [requestMoveConfirm, requestCompletionSummary, performMoveTask]);
 
     const clearSelected = useCallback(function () {
       setSelectedIds(new Set());
@@ -710,49 +979,23 @@
       setFailedIds(new Set());
     }, []);
     const moveSelected = useCallback(function (newStatus) {
-      const confirmMsg = DESTRUCTIVE_TRANSITIONS[newStatus];
-      if (confirmMsg && !window.confirm(confirmMsg)) return;
       if (selectedIds.size === 0) return;
-      const patch = withCompletionSummary({ status: newStatus }, selectedIds.size);
-      if (!patch) return;
-      const ids = Array.from(selectedIds);
-      // Optimistic UI: remove selected from all columns and prepend to target.
-      setBoardData(function (b) {
-        if (!b) return b;
-        const moved = [];
-        const columns = b.columns.map(function (col) {
-          const kept = [];
-          for (const t of col.tasks) {
-            if (selectedIds.has(t.id)) moved.push(Object.assign({}, t, { status: newStatus }));
-            else kept.push(t);
+      const count = selectedIds.size;
+      const taskId = Array.from(selectedIds)[0]; // representative id for performMoveTask's single-task branch
+      requestMoveConfirm(newStatus, count)
+        .then(function (r1) {
+          if (!r1.confirmed) return null;
+          if (newStatus !== "done") {
+            performMoveTask(taskId, newStatus, count, null);
+            return null;
           }
-          return Object.assign({}, col, { tasks: kept });
-        });
-        const dest = columns.find(function (c) { return c.name === newStatus; });
-        if (dest) dest.tasks = moved.concat(dest.tasks);
-        return Object.assign({}, b, { columns });
-      });
-      SDK.fetchJSON(withBoard(`${API}/tasks/bulk`, board), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(Object.assign({ ids }, patch)),
-      }).then(function (res) {
-        const failed = (res.results || []).filter(function (r) { return !r.ok; });
-        if (failed.length > 0) {
-          setError(`Bulk move: ${failed.length} of ${res.results.length} failed`);
-          setFailedIds(new Set(failed.map(function (f) { return f.id; })));
-        } else {
-          setFailedIds(new Set());
-        }
-        setSelectedIds(new Set());
-        setLastSelectedId(null);
-        loadBoard();
-      }).catch(function (err) {
-        setError(`Move failed: ${err.message || err}`);
-        setFailedIds(new Set(selectedIds));
-        loadBoard();
-      });
-    }, [selectedIds, loadBoard, board]);
+          return requestCompletionSummary(count).then(function (r2) {
+            if (!r2.confirmed) return null;
+            performMoveTask(taskId, newStatus, count, r2.summary || null);
+          });
+        })
+        .catch(function () { /* dialog cancelled */ });
+    }, [selectedIds, requestMoveConfirm, requestCompletionSummary, performMoveTask]);
 
     const createTask = useCallback(function (body) {
       return SDK.fetchJSON(withBoard(`${API}/tasks`, board), {
@@ -849,53 +1092,67 @@
 
     const applyBulk = useCallback(function (patch, confirmMsg) {
       if (selectedIds.size === 0) return;
-      if (confirmMsg && !window.confirm(confirmMsg)) return;
-      const finalPatch = withCompletionSummary(patch, selectedIds.size, t);
-      if (!finalPatch) return;
-      const body = Object.assign({ ids: Array.from(selectedIds) }, finalPatch);
-      // Optimistic UI for status moves (same pattern as moveSelected).
-      if (finalPatch.status) {
-        setBoardData(function (b) {
-          if (!b) return b;
-          const moved = [];
-          const columns = b.columns.map(function (col) {
-            const kept = [];
-            for (const t of col.tasks) {
-              if (selectedIds.has(t.id)) moved.push(Object.assign({}, t, { status: finalPatch.status }));
-              else kept.push(t);
-            }
-            return Object.assign({}, col, { tasks: kept });
+      const count = selectedIds.size;
+      const run = function () {
+        const finalPatch = patch;
+        const body = Object.assign({ ids: Array.from(selectedIds) }, finalPatch);
+        // Optimistic UI for status moves (same pattern as moveSelected).
+        if (finalPatch.status) {
+          setBoardData(function (b) {
+            if (!b) return b;
+            const moved = [];
+            const columns = b.columns.map(function (col) {
+              const kept = [];
+              for (const t of col.tasks) {
+                if (selectedIds.has(t.id)) moved.push(Object.assign({}, t, { status: finalPatch.status }));
+                else kept.push(t);
+              }
+              return Object.assign({}, col, { tasks: kept });
+            });
+            const dest = columns.find(function (c) { return c.name === finalPatch.status; });
+            if (dest) dest.tasks = moved.concat(dest.tasks);
+            return Object.assign({}, b, { columns });
           });
-          const dest = columns.find(function (c) { return c.name === finalPatch.status; });
-          if (dest) dest.tasks = moved.concat(dest.tasks);
-          return Object.assign({}, b, { columns });
-        });
-      }
-      SDK.fetchJSON(withBoard(`${API}/tasks/bulk`, board), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      })
-        .then(function (res) {
-          const failed = (res.results || []).filter(function (r) { return !r.ok; });
-          if (failed.length > 0) {
-            setError(tx(t, "bulkFailed", "Bulk: ") +
-              `${failed.length} of ${res.results.length} failed: ` +
-              failed.slice(0, 3).map(function (f) { return `${f.id} (${f.error})`; }).join("; "));
-            setFailedIds(new Set(failed.map(function (f) { return f.id; })));
-          } else {
-            setFailedIds(new Set());
-          }
-          setSelectedIds(new Set());
-          setLastSelectedId(null);
-          loadBoard();
+        }
+        SDK.fetchJSON(withBoard(`${API}/tasks/bulk`, board), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
         })
-        .catch(function (e) {
-          setError(String(e.message || e));
-          setFailedIds(new Set(selectedIds));
-          loadBoard();
-        });
-    }, [selectedIds, loadBoard, board, t]);
+          .then(function (res) {
+            const failed = (res.results || []).filter(function (r) { return !r.ok; });
+            if (failed.length > 0) {
+              setError(tx(t, "bulkFailed", "Bulk: ") +
+                `${failed.length} of ${res.results.length} failed: ` +
+                failed.slice(0, 3).map(function (f) { return `${f.id} (${f.error})`; }).join("; "));
+              setFailedIds(new Set(failed.map(function (f) { return f.id; })));
+            } else {
+              setFailedIds(new Set());
+            }
+            setSelectedIds(new Set());
+            setLastSelectedId(null);
+            loadBoard();
+          })
+          .catch(function (e) {
+            setError(String(e.message || e));
+            setFailedIds(new Set(selectedIds));
+            loadBoard();
+          });
+      };
+      if (!confirmMsg) {
+        run();
+        return;
+      }
+      kanbanDialogs.request({
+        kind: "confirm",
+        title: tx(t, "bulkConfirmTitle", "Apply bulk change"),
+        description: confirmMsg,
+        confirmLabel: tx(t, "apply", "Apply"),
+        destructive: false,
+      }).then(function (r) {
+        if (r.confirmed) run();
+      }).catch(function () { /* cancelled */ });
+    }, [selectedIds, loadBoard, board, t, kanbanDialogs]);
 
     // --- board switching ----------------------------------------------------
     const switchBoard = useCallback(function (nextSlug) {
@@ -940,30 +1197,46 @@
     }, [board, loadBoardList, switchBoard]);
 
    const deleteTask = useCallback(function (taskId) {
-     if (!window.confirm(tx(t, "trash.confirm", FALLBACK_TRASH.confirm))) return Promise.resolve();
-     return SDK.fetchJSON(`${API}/tasks/${encodeURIComponent(taskId)}`, {
-       method: "DELETE",
-     }).then(function () {
-       loadBoard();
-       setSelectedIds(function (prev) {
-         const next = new Set(prev);
-         next.delete(taskId);
-         return next;
-       });
-     }).catch(function (e) { setError(String(e.message || e)); });
-   }, [board, loadBoard, t]);
+     return kanbanDialogs.request({
+       kind: "confirm",
+       title: tx(t, "trash.confirmTitle", "Delete task?"),
+       description: tx(t, "trash.confirm", FALLBACK_TRASH.confirm),
+       confirmLabel: tx(t, "common.delete", "Delete"),
+       destructive: true,
+     }).then(function (r) {
+       if (!r.confirmed) return null;
+       return SDK.fetchJSON(`${API}/tasks/${encodeURIComponent(taskId)}`, {
+         method: "DELETE",
+       }).then(function () {
+         loadBoard();
+         setSelectedIds(function (prev) {
+           const next = new Set(prev);
+           next.delete(taskId);
+           return next;
+         });
+       }).catch(function (e) { setError(String(e.message || e)); });
+     }).catch(function () { /* cancelled */ });
+   }, [board, loadBoard, t, kanbanDialogs]);
 
     const deleteSelected = useCallback(function (count) {
       if (selectedIds.size === 0) return Promise.resolve();
-      if (!window.confirm(tx(t, "trash.confirmMany", "Permanently delete {n} selected tasks? This cannot be undone.", { n: count }))) return Promise.resolve();
-      const ids = Array.from(selectedIds);
-      setSelectedIds(new Set());
-      return Promise.all(ids.map(function (id) {
-        return SDK.fetchJSON(`${API}/tasks/${encodeURIComponent(id)}`, { method: "DELETE" });
-      })).then(function () {
-        loadBoard();
-      }).catch(function (e) { setError(String(e.message || e)); });
-    }, [selectedIds, board, loadBoard, t]);
+      kanbanDialogs.request({
+        kind: "confirm",
+        title: tx(t, "trash.confirmManyTitle", "Delete {n} tasks?", { n: count }),
+        description: tx(t, "trash.confirmMany", "Permanently delete {n} selected tasks? This cannot be undone.", { n: count }),
+        confirmLabel: tx(t, "common.delete", "Delete"),
+        destructive: true,
+      }).then(function (r) {
+        if (!r.confirmed) return null;
+        const ids = Array.from(selectedIds);
+        setSelectedIds(new Set());
+        return Promise.all(ids.map(function (id) {
+          return SDK.fetchJSON(`${API}/tasks/${encodeURIComponent(id)}`, { method: "DELETE" });
+        })).then(function () {
+          loadBoard();
+        }).catch(function (e) { setError(String(e.message || e)); });
+      }).catch(function () { /* cancelled */ });
+    }, [selectedIds, board, loadBoard, t, kanbanDialogs]);
 
     // --- render -------------------------------------------------------------
     if (loading && !boardData) {
@@ -1028,6 +1301,10 @@
          onDelete: deleteSelected,
        }) : null,
         error ? h("div", { className: "text-xs text-destructive px-2" }, error) : null,
+        h(KanbanDialogs, {
+          dialogProps: kanbanDialogs.dialogProps,
+          dialogState: kanbanDialogs.dialogState,
+        }),
         h(BoardColumns, {
           board: filteredBoard,
           laneByProfile,
