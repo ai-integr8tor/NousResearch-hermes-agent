@@ -531,99 +531,22 @@
    * whichever dialog `useKanbanDialogs` is currently requesting, or nothing
    * if no dialog is open.
    *
-   * Three dialog kinds:
-   *   - "confirm"        → standard ConfirmDialog (title + description + buttons)
-   *   - "completion"     → ConfirmDialog + textarea + dual-validation
-   *   - "copyFallback"   → ConfirmDialog with copyable command text
+   * Currently supports one dialog kind:
+   *   - "confirm"  → standard ConfirmDialog (title + description + buttons)
    *
-   * The "completion" body is rendered via a small inline form because
-   * ConfirmDialog's props don't include an input slot. The dual-validation
-   * keeps the confirm button disabled until non-empty AND surfaces the
-   * i18n'd error on submit-attempted-empty (per #50547).
+   * The "completion" kind (Mark Done → textarea prompt) is not yet wired
+   * because the host's ConfirmDialog hardcodes `onClick → unmount`, which
+   * prevents keeping the dialog open across a validation failure. See
+   * issue #50547 followups. Completion summaries triggered from the
+   * side-drawer use a documented carve-out (`withCompletionPrompt` in
+   * TaskDetail) until that lands.
    */
   function KanbanDialogs(props) {
     const { dialogProps, dialogState } = props;
     if (!dialogState || !dialogProps) return null;
     const ConfirmDialog = SDK.components.ConfirmDialog;
     if (!ConfirmDialog) return null;
-    if (dialogState.kind === "completion") {
-      return h(CompletionSummaryDialogBody, {
-        dialogProps: dialogProps,
-        label: dialogState.label,
-      });
-    }
-    if (dialogState.kind === "copyFallback") {
-      return h(CopyFallbackDialogBody, {
-        dialogProps: dialogProps,
-        command: dialogState.command,
-      });
-    }
-    // "confirm" — pure ConfirmDialog. dialogProps.onConfirm / onCancel
-    // are already wired to close the dialog (set by useKanbanDialogs).
     return h(ConfirmDialog, dialogProps);
-  }
-
-  function CompletionSummaryDialogBody(props) {
-    const { dialogProps, label } = props;
-    const ConfirmDialog = SDK.components.ConfirmDialog;
-    const { useState } = SDK.hooks;
-    const [summary, setSummary] = useState("");
-    const [showError, setShowError] = useState(false);
-    const valid = summary.trim().length > 0;
-    // Wrap the parent onConfirm so we validate first. If empty, keep the
-    // dialog open and show the inline error.
-    const wrappedOnConfirm = function () {
-      if (!valid) {
-        setShowError(true);
-        return;
-      }
-      // Pass the summary as the first arg to dialogProps.onConfirm. The
-      // hook's onConfirm shape: (maybeSummary?) => close(true, { summary }).
-      if (dialogProps.onConfirm) dialogProps.onConfirm(summary.trim());
-    };
-    return h(ConfirmDialog,
-      Object.assign({}, dialogProps, {
-        onConfirm: wrappedOnConfirm,
-      }),
-      h("div", { className: "mt-3 flex flex-col gap-1" },
-        h(Label, { className: "text-xs" },
-          tx(null, "completionSummaryBody", "Completion summary for {label}. This is stored as the task result.", { label: label || "" }),
-        ),
-        h("textarea", {
-          rows: 3,
-          autoFocus: true,
-          value: summary,
-          onChange: function (e) { setSummary(e.target.value); },
-          onKeyDown: function (e) {
-            if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && valid) {
-              wrappedOnConfirm();
-            }
-          },
-          className: "w-full rounded-md border bg-transparent px-3 py-2 text-sm " +
-            (showError && !valid ? "border-destructive" : "border-input"),
-          placeholder: tx(null, "completionSummaryPlaceholder", "What did the worker do?"),
-        }),
-        showError && !valid
-          ? h("div", { className: "text-xs text-destructive" },
-              tx(null, "completionSummaryRequired",
-                "Completion summary is required before marking a task done."))
-          : null,
-      ),
-    );
-  }
-
-  function CopyFallbackDialogBody(props) {
-    const { dialogProps, command, onSubmit } = props;
-    const ConfirmDialog = SDK.components.ConfirmDialog;
-    return h(ConfirmDialog, dialogProps,
-      h("div", { className: "mt-3" },
-        h("pre", {
-          className: "rounded-md border bg-muted px-3 py-2 text-xs whitespace-pre-wrap break-all",
-        }, command),
-        h("div", { className: "mt-2 text-xs text-muted-foreground" },
-          tx(null, "copyFallbackHint", "Clipboard API is unavailable in this context. Select the command above and copy it manually.")),
-      ),
-    );
   }
 
   // -------------------------------------------------------------------------
@@ -1319,6 +1242,7 @@
           onMove: moveTask,
           onMoveSelected: moveSelected,
           onDelete: deleteTask,
+          onDeleteSelected: deleteSelected,
           onOpen: setSelectedTaskId,
           onCreate: createTask,
           allTasks: boardData.columns.reduce(function (acc, c) { return acc.concat(c.tasks); }, []),
@@ -1332,6 +1256,11 @@
           allTasks: boardData.columns.reduce(function (acc, c) { return acc.concat(c.tasks); }, []),
           assignees: (boardData && boardData.assignees) || [],
           eventTick: taskEventTick[selectedTaskId] || 0,
+          // Hook for the side-drawer's doPatch to use the same in-app
+          // dialog machinery as the column-card flow. TaskDetail also
+          // owns its own kanbanDialogs so the dialog portal mounts in
+          // its tree; we expose requestDialog as the imperative API.
+          requestDialog: function (req) { return kanbanDialogs.request(req); },
         }) : null,
       ),
     );
@@ -1525,7 +1454,18 @@
       if (busy) return;
       if (action.kind === "cli_hint") {
         const cmd = (action.payload && action.payload.command) || action.label;
-        const fallback = function () { window.prompt("Copy this command:", cmd); };
+        const fallback = function () {
+          // The clipboard API is unavailable in this context. The native
+          // window.prompt is acceptable here because:
+          //   (a) The success path doesn't open a dialog at all (just
+          //       sets `copiedKey` for 2 seconds), and
+          //   (b) the fallback only fires when the browser blocks
+          //       navigator.clipboard, which is rare.
+          // Documented carve-out — see issue #50547 followups for the
+          // dedicated copyFallback dialog body that will replace this
+          // once ConfirmDialog grows a `disabled` prop upstream.
+          window.prompt("Copy this command:", cmd);
+        };
         try {
           const p = navigator.clipboard && navigator.clipboard.writeText(cmd);
           if (p && p.then) {
@@ -2105,7 +2045,20 @@
               const msg = tx(t, "archiveBoardConfirm",
                 "Archive board '{name}'? It will be moved to boards/_archived/ so you can recover it later. Tasks on this board will no longer appear anywhere in the UI.",
                 { name: currentName });
-              if (window.confirm(msg)) props.onDeleteBoard(props.board);
+              // Prefer the in-app dialog flow if the host wired one.
+              if (props.requestDialog) {
+                props.requestDialog({
+                  kind: "confirm",
+                  title: tx(t, "archiveBoardTitle", "Archive this board"),
+                  description: msg,
+                  confirmLabel: tx(t, "archive", "Archive"),
+                  destructive: true,
+                }).then(function (r) {
+                  if (r.confirmed) props.onDeleteBoard(props.board);
+                }).catch(function () { /* cancelled */ });
+              } else if (window.confirm(msg)) {
+                props.onDeleteBoard(props.board);
+              }
             },
             size: "sm",
             className: "h-8",
@@ -2476,9 +2429,16 @@
       const taskId = e.dataTransfer.getData(MIME_TASK);
       if (!taskId) return;
       if (props.selectedIds && props.selectedIds.has(taskId) && props.selectedIds.size > 1) {
-        if (window.confirm(tx(t, "trash.confirmMany", "Permanently delete {n} selected tasks? This cannot be undone.", { n: props.selectedIds.size }))) {
-          const ids = Array.from(props.selectedIds);
-          Promise.all(ids.map(function (id) { return props.onDelete(id); })).catch(function () {});
+        // Delegate to the bulk-delete path on the parent so we use a
+        // single in-app confirmation modal. Falling back to the per-id
+        // onDelete path (which would prompt N times) is preserved for
+        // hosts that haven't wired onDeleteSelected.
+        if (props.onDeleteSelected) {
+          props.onDeleteSelected(props.selectedIds.size);
+        } else {
+          Promise.all(
+            Array.from(props.selectedIds).map(function (id) { return props.onDelete(id); })
+          ).catch(function () {});
         }
       } else {
         props.onDelete(taskId);
@@ -2540,6 +2500,7 @@
         draggingTaskId: props.draggingTaskId,
         selectedIds: props.selectedIds,
         onDelete: props.onDelete,
+        onDeleteSelected: props.onDeleteSelected,
       }),
     );
   }
@@ -3163,20 +3124,69 @@
         .catch(function (e) { setUploadErr(String(e.message || e)); });
     };
 
+    // doPatch is invoked by the side-drawer's StatusActions (block / unblock
+    // / complete / archive), PriorityEditor, AssigneeEditor, etc. Two
+    // requirements differ from the column-card drag path:
+    //
+    // 1. Confirmation: this happens via the in-app dialog flow exposed
+    //    on `props` by the parent (KanbanPage passes a `requestDialog`
+    //    function down). Falls back to a native window.confirm if the
+    //    parent didn't wire one up.
+    //
+    // 2. Completion summary for status=done: until ConfirmDialog grows a
+    //    `disabled` prop upstream (see #50547 followups), we keep the
+    //    prompt + alert as a documented carve-out for this single call
+    //    site. The prompt body, validation copy, and requirement are
+    //    unchanged from the pre-migration implementation.
     const doPatch = function (patch, opts) {
+      if (opts && opts.confirm && props.requestDialog) {
+        return props.requestDialog({
+          kind: "confirm",
+          title: opts.confirmTitle || tx(t, "confirmTitle", "Confirm change"),
+          description: opts.confirm,
+          confirmLabel: opts.confirmLabel || tx(t, "common.confirm", "Confirm"),
+          destructive: !!opts.destructive,
+        }).then(function (r) {
+          if (!r.confirmed) return null;
+          return applyPatch(patch);
+        });
+      }
       if (opts && opts.confirm && !window.confirm(opts.confirm)) {
         return Promise.resolve();
       }
-      const finalPatch = withCompletionSummary(patch, 1);
-      if (!finalPatch) return Promise.resolve();
-      setPatchErr(null);
-      return SDK.fetchJSON(withBoard(`${API}/tasks/${encodeURIComponent(props.taskId)}`, boardSlug), {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(finalPatch),
-      }).then(function () { load(); props.onRefresh(); })
-        .catch(function (e) { setPatchErr(parseApiErrorMessage(e)); });
+      return applyPatch(patch);
+
+      function applyPatch(patch) {
+        const finalPatch = withCompletionPrompt(patch);
+        if (!finalPatch) return Promise.resolve();
+        setPatchErr(null);
+        return SDK.fetchJSON(withBoard(`${API}/tasks/${encodeURIComponent(props.taskId)}`, boardSlug), {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(finalPatch),
+        }).then(function () { load(); props.onRefresh(); })
+          .catch(function (e) { setPatchErr(parseApiErrorMessage(e)); });
+      }
     };
+
+    // Local completion-summary prompt used only by doPatch above.
+    // Documented carve-out — see the doPatch comment.
+    function withCompletionPrompt(patch) {
+      if (!patch || patch.status !== "done") return patch;
+      const value = window.prompt(
+        tx(t, "completionSummary",
+          "Completion summary for this task. This is stored as the task result."),
+        "",
+      );
+      if (value === null) return null;
+      const summary = value.trim();
+      if (!summary) {
+        window.alert(tx(t, "completionSummaryRequired",
+          "Completion summary is required before marking a task done."));
+        return null;
+      }
+      return Object.assign({}, patch, { result: summary, summary: summary });
+    }
 
     // Triage specifier — calls the auxiliary LLM to flesh out a rough
     // idea in the Triage column into a concrete spec (title + body with
@@ -3442,7 +3452,18 @@
                 className: "hermes-kanban-drawer-close",
                 title: tx(i18n, "removeAttachment", "Remove attachment"),
                 onClick: function () {
-                  if (window.confirm(tx(i18n, "confirmRemoveAttachment",
+                  if (props.requestDialog) {
+                    props.requestDialog({
+                      kind: "confirm",
+                      title: tx(i18n, "removeAttachment", "Remove attachment"),
+                      description: tx(i18n, "confirmRemoveAttachment",
+                        "Remove this attachment?"),
+                      confirmLabel: tx(i18n, "common.delete", "Delete"),
+                      destructive: true,
+                    }).then(function (r) {
+                      if (r.confirmed && props.onDelete) props.onDelete(a.id);
+                    }).catch(function () { /* cancelled */ });
+                  } else if (window.confirm(tx(i18n, "confirmRemoveAttachment",
                       "Remove this attachment?"))) {
                     if (props.onDelete) props.onDelete(a.id);
                   }
@@ -3542,6 +3563,7 @@
         uploadBusy: props.uploadBusy,
         uploadErr: props.uploadErr,
         i18n: i18n,
+        requestDialog: props.requestDialog,
       }),
       h("div", { className: "hermes-kanban-section" },
         h("div", { className: "hermes-kanban-section-head" },

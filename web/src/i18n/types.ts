@@ -821,5 +821,9 @@ export interface Translations {
     workspacePathOptional: string;
     logTruncated: string;
     logAt: string;
+    trash: {
+      confirmTitle: string;
+      confirmManyTitle: string;
+    };
   };
 }
