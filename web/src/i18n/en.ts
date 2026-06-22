@@ -823,5 +823,9 @@ export const en: Translations = {
       "workspace path (optional, derived from assignee if blank)",
     logTruncated: "(showing last 100 KB — full log at ",
     logAt: ")",
+    trash: {
+      confirmTitle: "Delete task?",
+      confirmManyTitle: "Delete {n} tasks?",
+    },
   },
 };
