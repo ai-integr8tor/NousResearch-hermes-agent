@@ -119,7 +119,7 @@ export interface EnvVarInfo {
   url: null | string
 }
 
-export type MemoryProviderFieldKind = 'secret' | 'select' | 'text'
+export type MemoryProviderFieldKind = 'boolean' | 'secret' | 'select' | 'text'
 
 export interface MemoryProviderFieldOption {
   description: string
@@ -127,7 +127,15 @@ export interface MemoryProviderFieldOption {
   value: string
 }
 
+/** A conditional-visibility clause: the field is shown only when the field
+ *  named `key` currently equals `value`. */
+export interface MemoryProviderFieldWhen {
+  key: string
+  value: string
+}
+
 export interface MemoryProviderField {
+  default: string
   description: string
   is_set: boolean
   key: string
@@ -135,13 +143,29 @@ export interface MemoryProviderField {
   label: string
   options: MemoryProviderFieldOption[]
   placeholder: string
+  required: boolean
+  url: string
   value: string
+  value_type: string
+  when: MemoryProviderFieldWhen[]
 }
 
 export interface MemoryProviderConfig {
   fields: MemoryProviderField[]
   label: string
   name: string
+}
+
+export interface MemoryProviderInfo {
+  configured: boolean
+  description: string
+  name: string
+}
+
+export interface MemoryStatus {
+  active: string
+  builtin_files: Record<string, number>
+  providers: MemoryProviderInfo[]
 }
 
 export interface MessagingEnvVarInfo {
