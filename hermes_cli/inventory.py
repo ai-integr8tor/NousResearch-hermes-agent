@@ -178,11 +178,20 @@ def build_models_payload(
         _is_aggregator = None  # type: ignore[assignment]
 
     if _is_aggregator is not None:
-        user_models: set[str] = set()
+        # Collect models from user-defined providers, keyed by slug so we
+        # can skip self-dedup (a custom provider that is also classified as
+        # an aggregator must not remove its *own* models from itself).
+        user_models_by_slug: dict[str, set[str]] = {}
         for row in rows:
             if row.get("is_user_defined"):
-                user_models.update(m.lower() for m in (row.get("models") or []))
-        if user_models:
+                slug = row.get("slug", "")
+                user_models_by_slug[slug] = {
+                    m.lower() for m in (row.get("models") or [])
+                }
+        all_user_models: set[str] = set()
+        for s in user_models_by_slug.values():
+            all_user_models.update(s)
+        if all_user_models:
             for row in rows:
                 # A user's own configured provider is never an "aggregator
                 # duplicate" of itself: user_models is built from these very
@@ -195,8 +204,12 @@ def build_models_payload(
                 slug = row.get("slug", "")
                 if not _is_aggregator(slug):
                     continue
+                own = user_models_by_slug.get(slug, set())
                 original = row.get("models") or []
-                filtered = [m for m in original if m.lower() not in user_models]
+                filtered = [
+                    m for m in original
+                    if m.lower() not in all_user_models or m.lower() in own
+                ]
                 if len(filtered) < len(original):
                     row["models"] = filtered
                     row["total_models"] = len(filtered)

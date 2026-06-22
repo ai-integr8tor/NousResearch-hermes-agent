@@ -774,3 +774,75 @@ def test_custom_providers_discover_models_false_string_is_normalised(monkeypatch
     assert gateway_prov is not None
     assert calls == [], "string 'false' must disable live discovery"
     assert gateway_prov["models"] == ["only-model"]
+
+
+def test_build_models_payload_custom_provider_self_dedup(monkeypatch):
+    """Custom provider classified as aggregator must NOT remove its own models.
+
+    Regression test for #47042: is_aggregator("custom:X") returns True, so the
+    dedup loop treated custom providers as aggregators and filtered out their
+    own models from themselves, producing models=[].
+    """
+    from hermes_cli.inventory import build_models_payload
+
+    # Simulate rows: one custom provider (user-defined, aggregator) and one
+    # aggregator (openrouter) that shares a model name.
+    mock_rows = [
+        {
+            "slug": "custom:myproxy",
+            "name": "MyProxy",
+            "models": ["gpt-4o", "my-custom-model"],
+            "total_models": 2,
+            "is_user_defined": True,
+            "api_url": "https://myproxy.example.com/v1",
+        },
+        {
+            "slug": "openrouter",
+            "name": "OpenRouter",
+            "models": ["gpt-4o", "claude-sonnet-4"],
+            "total_models": 2,
+            "is_user_defined": False,
+            "api_url": "https://openrouter.ai/api/v1",
+        },
+    ]
+
+    monkeypatch.setattr(
+        "hermes_cli.model_switch.list_authenticated_providers",
+        lambda **kw: list(mock_rows),
+    )
+    monkeypatch.setattr(
+        "hermes_cli.inventory.load_picker_context",
+        lambda: type(
+            "Ctx",
+            (),
+            {
+                "current_provider": "custom:myproxy",
+                "current_base_url": "https://myproxy.example.com/v1",
+                "current_model": "gpt-4o",
+                "user_providers": [],
+                "custom_providers": [],
+            },
+        )(),
+    )
+
+    ctx = type(
+        "Ctx",
+        (),
+        {
+            "current_provider": "custom:myproxy",
+            "current_base_url": "https://myproxy.example.com/v1",
+            "current_model": "gpt-4o",
+            "user_providers": [],
+            "custom_providers": [],
+        },
+    )()
+
+    result = build_models_payload(ctx)
+    providers = {p["slug"]: p for p in result["providers"]}
+
+    # Custom provider must retain ALL its models (no self-defeating dedup)
+    assert providers["custom:myproxy"]["models"] == ["gpt-4o", "my-custom-model"]
+
+    # OpenRouter should have gpt-4o removed (cross-dedup from custom provider)
+    assert "gpt-4o" not in providers["openrouter"]["models"]
+    assert "claude-sonnet-4" in providers["openrouter"]["models"]
