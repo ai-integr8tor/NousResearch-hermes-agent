@@ -1361,6 +1361,14 @@ class CLICommandsMixin:
         parts = cmd.strip().split()
         args = parts[1:] if len(parts) > 1 else []
         store = getattr(self.agent, "_memory_store", None) if getattr(self, "agent", None) else None
+        if store is None:
+            # The TUI slash-worker and other contexts may not have a live
+            # agent with an initialized memory store.  Fall back to a fresh
+            # on-disk store (same approach as the messaging-gateway handler)
+            # so /memory approve works from every surface.  (#47363)
+            from tools.memory_tool import MemoryStore
+            store = MemoryStore()
+            store.load_from_disk()
         out = handle_pending_subcommand(
             wa.MEMORY, args,
             memory_store=store,
