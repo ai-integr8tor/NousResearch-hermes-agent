@@ -259,6 +259,12 @@ import shutil
 import stat
 import subprocess
 from pathlib import Path
+
+# Windows subprocess noise suppression: on Windows, every subprocess.run()
+# that launches a console-mode executable (git, uv, python, etc.) creates a
+# visible CMD window. Setting CREATE_NO_WINDOW (0x08000000) suppresses it.
+# This constant is a no-op on POSIX where the flag doesn't exist.
+_WINDOWS_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 from typing import Optional
 
 
@@ -4447,9 +4453,10 @@ def _capture_head_sha(git_cmd, cwd) -> str | None:
             capture_output=True,
             text=True,
             check=True,
+            creationflags=_WINDOWS_NO_WINDOW,
         )
         return result.stdout.strip() or None
-    except (subprocess.CalledProcessError, OSError):
+    except Exception:
         return None
 
 
@@ -6158,19 +6165,23 @@ def _update_via_zip(args):
         # avoiding PEP 668 'externally-managed-environment' errors on Debian/Ubuntu.
         # Some environments lose pip inside the venv; bootstrap it back with
         # ensurepip before trying the editable install.
+        pip_cmd = [sys.executable, "-m", "pip"]
         try:
             subprocess.run(
                 pip_cmd + ["--version"],
                 cwd=PROJECT_ROOT,
                 check=True,
                 capture_output=True,
+                creationflags=_WINDOWS_NO_WINDOW,
             )
         except subprocess.CalledProcessError:
             subprocess.run(
                 [sys.executable, "-m", "ensurepip", "--upgrade", "--default-pip"],
                 cwd=PROJECT_ROOT,
                 check=True,
+                creationflags=_WINDOWS_NO_WINDOW,
             )
+
         _install_python_dependencies_with_optional_fallback(pip_cmd)
 
     _update_node_dependencies()
@@ -6231,6 +6242,7 @@ def _stash_local_changes_if_needed(git_cmd: list[str], cwd: Path) -> Optional[st
         capture_output=True,
         text=True,
         check=True,
+        creationflags=_WINDOWS_NO_WINDOW,
     )
     if not status.stdout.strip():
         return None
@@ -6244,10 +6256,11 @@ def _stash_local_changes_if_needed(git_cmd: list[str], cwd: Path) -> Optional[st
         cwd=cwd,
         capture_output=True,
         text=True,
+        creationflags=_WINDOWS_NO_WINDOW,
     )
     if unmerged.stdout.strip():
         print("→ Clearing unmerged index entries from a previous conflict...")
-        subprocess.run(git_cmd + ["reset"], cwd=cwd, capture_output=True)
+        subprocess.run(git_cmd + ["reset"], cwd=cwd, capture_output=True, creationflags=_WINDOWS_NO_WINDOW)
 
     from datetime import datetime, timezone
 
@@ -6259,6 +6272,7 @@ def _stash_local_changes_if_needed(git_cmd: list[str], cwd: Path) -> Optional[st
         git_cmd + ["stash", "push", "--include-untracked", "-m", stash_name],
         cwd=cwd,
         check=True,
+        creationflags=_WINDOWS_NO_WINDOW,
     )
     stash_ref = subprocess.run(
         git_cmd + ["rev-parse", "--verify", "refs/stash"],
@@ -6266,6 +6280,7 @@ def _stash_local_changes_if_needed(git_cmd: list[str], cwd: Path) -> Optional[st
         capture_output=True,
         text=True,
         check=True,
+        creationflags=_WINDOWS_NO_WINDOW,
     ).stdout.strip()
     return stash_ref
 
@@ -6279,6 +6294,7 @@ def _resolve_stash_selector(
         capture_output=True,
         text=True,
         check=True,
+        creationflags=_WINDOWS_NO_WINDOW,
     )
     for line in stash_list.stdout.splitlines():
         selector, _, commit = line.partition(" ")
@@ -6333,6 +6349,7 @@ def _restore_stashed_changes(
         cwd=cwd,
         capture_output=True,
         text=True,
+        creationflags=_WINDOWS_NO_WINDOW,
     )
 
     # Check for unmerged (conflicted) files — can happen even when returncode is 0
@@ -6341,6 +6358,7 @@ def _restore_stashed_changes(
         cwd=cwd,
         capture_output=True,
         text=True,
+        creationflags=_WINDOWS_NO_WINDOW,
     )
     has_conflicts = bool(unmerged.stdout.strip())
 
@@ -6368,6 +6386,7 @@ def _restore_stashed_changes(
             git_cmd + ["reset", "--hard", "HEAD"],
             cwd=cwd,
             capture_output=True,
+            creationflags=_WINDOWS_NO_WINDOW,
         )
         print("Working tree reset to clean state.")
         print(f"Restore your changes later with: git stash apply {stash_ref}")
@@ -6391,6 +6410,7 @@ def _restore_stashed_changes(
             cwd=cwd,
             capture_output=True,
             text=True,
+            creationflags=_WINDOWS_NO_WINDOW,
         )
         if drop.returncode != 0:
             print(
@@ -6443,11 +6463,12 @@ def _discard_stashed_changes(
         cwd=cwd,
         capture_output=True,
         text=True,
+        creationflags=_WINDOWS_NO_WINDOW,
     )
     if drop.returncode != 0:
         print(
-            "⚠ Configured to discard local changes, but Hermes couldn't drop "
-            "the saved stash entry."
+            "⚠ Configured to discard local changes, but Hermes couldn't "
+            "drop the saved stash entry."
         )
         if drop.stderr.strip():
             print(f"  {drop.stderr.strip().splitlines()[0]}")
@@ -6480,6 +6501,7 @@ def _get_origin_url(git_cmd: list[str], cwd: Path) -> Optional[str]:
             cwd=cwd,
             capture_output=True,
             text=True,
+            creationflags=_WINDOWS_NO_WINDOW,
         )
         if result.returncode == 0:
             return result.stdout.strip()
@@ -6513,6 +6535,7 @@ def _has_upstream_remote(git_cmd: list[str], cwd: Path) -> bool:
             cwd=cwd,
             capture_output=True,
             text=True,
+            creationflags=_WINDOWS_NO_WINDOW,
         )
         return result.returncode == 0
     except Exception:
@@ -6527,6 +6550,7 @@ def _add_upstream_remote(git_cmd: list[str], cwd: Path) -> bool:
             cwd=cwd,
             capture_output=True,
             text=True,
+            creationflags=_WINDOWS_NO_WINDOW,
         )
         return result.returncode == 0
     except Exception:
@@ -6541,6 +6565,7 @@ def _count_commits_between(git_cmd: list[str], cwd: Path, base: str, head: str) 
             cwd=cwd,
             capture_output=True,
             text=True,
+            creationflags=_WINDOWS_NO_WINDOW,
         )
         if result.returncode == 0:
             return int(result.stdout.strip())
@@ -6577,6 +6602,7 @@ def _sync_fork_with_upstream(git_cmd: list[str], cwd: Path) -> bool:
             cwd=cwd,
             capture_output=True,
             text=True,
+            creationflags=_WINDOWS_NO_WINDOW,
         )
         return result.returncode == 0
     except Exception:
@@ -6640,6 +6666,7 @@ def _sync_with_upstream_if_needed(git_cmd: list[str], cwd: Path) -> None:
             cwd=cwd,
             capture_output=True,
             check=True,
+            creationflags=_WINDOWS_NO_WINDOW,
         )
     except subprocess.CalledProcessError:
         print("  ✗ Failed to fetch upstream. Skipping upstream sync.")
@@ -6679,6 +6706,7 @@ def _sync_with_upstream_if_needed(git_cmd: list[str], cwd: Path) -> None:
             git_cmd + ["pull", "--ff-only", "upstream", "main"],
             cwd=cwd,
             check=True,
+            creationflags=_WINDOWS_NO_WINDOW,
         )
     except subprocess.CalledProcessError:
         print(
@@ -6871,6 +6899,7 @@ def _recover_from_interrupted_install() -> None:
                     [sys.executable, "-m", "ensurepip", "--upgrade", "--default-pip"],
                     cwd=PROJECT_ROOT,
                     capture_output=True,
+                    creationflags=_WINDOWS_NO_WINDOW,
                 )
             except Exception as exc:
                 logger.debug("ensurepip during install recovery failed: %s", exc)
@@ -6950,6 +6979,7 @@ def _run_install_with_heartbeat(
             cwd=PROJECT_ROOT,
             check=True,
             env=env,
+            creationflags=_WINDOWS_NO_WINDOW,
         )
     finally:
         done.set()
@@ -7736,7 +7766,7 @@ def _ensure_uv_for_termux(pip_cmd: list[str]) -> str | None:
         return None
     try:
         print("  → Termux detected: trying to install uv for faster dependency updates...")
-        subprocess.run(pip_cmd + ["install", "uv"], cwd=PROJECT_ROOT, check=False)
+        subprocess.run(pip_cmd + ["install", "uv"], cwd=PROJECT_ROOT, check=False, creationflags=_WINDOWS_NO_WINDOW)
     except Exception:
         pass
     # After pip install, check managed path first, then PATH
@@ -8658,6 +8688,7 @@ def _discard_lockfile_churn(git_cmd, repo_root):
             cwd=repo_root,
             capture_output=True,
             text=True,
+            creationflags=_WINDOWS_NO_WINDOW,
         )
         if diff.returncode != 0:
             return
@@ -8680,6 +8711,7 @@ def _discard_lockfile_churn(git_cmd, repo_root):
             capture_output=True,
             text=True,
             check=False,
+            creationflags=_WINDOWS_NO_WINDOW,
         )
         print(f"→ Discarded npm lockfile churn ({len(dirty)} file(s))")
     except Exception:
@@ -8896,6 +8928,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
             cwd=PROJECT_ROOT,
             check=False,
             capture_output=True,
+            creationflags=_WINDOWS_NO_WINDOW,
         )
 
     # Build git command once — reused for fork detection and the update itself.
@@ -8945,6 +8978,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
             cwd=PROJECT_ROOT,
             capture_output=True,
             text=True,
+            creationflags=_WINDOWS_NO_WINDOW,
         )
         if fetch_result.returncode != 0:
             stderr = fetch_result.stderr.strip()
@@ -8970,6 +9004,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
             capture_output=True,
             text=True,
             check=True,
+            creationflags=_WINDOWS_NO_WINDOW,
         )
         current_branch = result.stdout.strip()
 
@@ -8992,6 +9027,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 cwd=PROJECT_ROOT,
                 capture_output=True,
                 text=True,
+                creationflags=_WINDOWS_NO_WINDOW,
             )
             if checkout_result.returncode != 0:
                 # Local checkout doesn't have this branch yet. Try to set
@@ -9003,6 +9039,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                     cwd=PROJECT_ROOT,
                     capture_output=True,
                     text=True,
+                    creationflags=_WINDOWS_NO_WINDOW,
                 )
                 if track_result.returncode != 0:
                     # Restore the user's prior branch + stash before bailing
@@ -9035,6 +9072,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
             capture_output=True,
             text=True,
             check=True,
+            creationflags=_WINDOWS_NO_WINDOW,
         )
         commit_count = int(result.stdout.strip())
 
@@ -9061,6 +9099,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                     capture_output=True,
                     text=True,
                     check=False,
+                    creationflags=_WINDOWS_NO_WINDOW,
                 )
             print("✓ Already up to date!")
             _resume_windows_gateways_after_update(_windows_gateway_resume)
@@ -9099,6 +9138,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 cwd=PROJECT_ROOT,
                 capture_output=True,
                 text=True,
+                creationflags=_WINDOWS_NO_WINDOW,
             )
             if pull_result.returncode != 0:
                 # ff-only failed — local and remote have diverged (e.g. upstream
@@ -9112,6 +9152,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                     cwd=PROJECT_ROOT,
                     capture_output=True,
                     text=True,
+                    creationflags=_WINDOWS_NO_WINDOW,
                 )
                 if reset_result.returncode != 0:
                     print(f"✗ Failed to reset to origin/{branch}.")
@@ -9148,6 +9189,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                         cwd=PROJECT_ROOT,
                         capture_output=True,
                         text=True,
+                        creationflags=_WINDOWS_NO_WINDOW,
                     )
                     if rollback_result.returncode == 0:
                         print("  ✓ Rollback complete — your install is unchanged.")
@@ -9254,12 +9296,14 @@ def _cmd_update_impl(args, gateway_mode: bool):
                     cwd=PROJECT_ROOT,
                     check=True,
                     capture_output=True,
+                    creationflags=_WINDOWS_NO_WINDOW,
                 )
             except subprocess.CalledProcessError:
                 subprocess.run(
                     [sys.executable, "-m", "ensurepip", "--upgrade", "--default-pip"],
                     cwd=PROJECT_ROOT,
                     check=True,
+                    creationflags=_WINDOWS_NO_WINDOW,
                 )
             if _is_termux_env():
                 install_group = "termux-all"
