@@ -1222,6 +1222,17 @@ DEFAULT_CONFIG = {
     # small so a slow/dead server adds little to first-response latency.
     "mcp_discovery_timeout": 1.5,
 
+    # Single-query (`hermes -q/-z "..."`) variant of mcp_discovery_timeout.
+    # In one-shot mode there is only ONE turn, so the between-turns late-binding
+    # refresh never runs: a server that misses the small interactive bound is
+    # invisible to the LLM for the whole session (#51316).  This larger bound
+    # gives slow cold-start servers (e.g. `npx -y @modelcontextprotocol/...`,
+    # 15-20s on first run) a chance to land in the one tool snapshot the model
+    # sees.  Like the interactive bound, the wait returns the INSTANT discovery
+    # completes, so fast servers and no-MCP users pay ~0s — the bound only caps
+    # how long a genuinely slow server may block the single response.
+    "mcp_single_query_discovery_timeout": 30.0,
+
     # Tool-output truncation thresholds. When terminal output or a
     # single read_file page exceeds these limits, Hermes truncates the
     # payload sent to the model (keeping head + tail for terminal,
