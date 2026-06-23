@@ -4845,6 +4845,48 @@ def test_interrupt_clears_multiple_own_pending():
             server._answers.pop(key, None)
 
 
+
+def test_interrupt_emits_session_info_with_running_false():
+    """session.interrupt must emit session.info with running=False so the
+    Desktop UI clears the running state immediately, without waiting for
+    the agent thread's finally block."""
+    import types
+
+    from unittest.mock import patch as _patch
+
+    emitted = []
+
+    def fake_emit(event, sid, data):
+        emitted.append((event, sid, data))
+
+    sess = _session()
+    sess["agent"] = types.SimpleNamespace(interrupt=lambda: None)
+    sess["running"] = True  # simulate active agent run
+    server._sessions["sid"] = sess
+
+    try:
+        with _patch.object(server, "_emit", fake_emit):
+            resp = server.handle_request(
+                {"id": "1", "method": "session.interrupt", "params": {"session_id": "sid"}}
+            )
+        assert resp.get("result"), f"got error: {resp.get('error')}"
+
+        # session["running"] must be False after interrupt
+        assert sess["running"] is False, "session.running should be False after interrupt"
+
+        # session.info must have been emitted
+        session_info_events = [e for e in emitted if e[0] == "session.info"]
+        assert len(session_info_events) >= 1, (
+            "session.info should be emitted after interrupt; "
+            f"emitted events: {[e[0] for e in emitted]}"
+        )
+        _, sid, info = session_info_events[-1]
+        assert sid == "sid"
+        assert info.get("running") is False, "session.info.running should be False"
+    finally:
+        server._sessions.pop("sid", None)
+
+
 def test_clear_pending_without_sid_clears_all():
     """_clear_pending(None) is the shutdown path — must still release
     every pending prompt regardless of owning session."""
