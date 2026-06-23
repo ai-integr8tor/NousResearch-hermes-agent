@@ -167,6 +167,18 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
 
   const selectedProviderModels = selectedProviderRow?.models ?? []
 
+  // Show the current model even when it isn't in the provider's advertised
+  // catalog (e.g. a custom/overridden id like a Nous-proxied OpenAI model) —
+  // otherwise Radix Select renders a blank box for a value with no matching
+  // item, hiding what's actually configured.
+  const modelSelectItems =
+    selectedModel && !selectedProviderModels.includes(selectedModel)
+      ? [selectedModel, ...selectedProviderModels]
+      : selectedProviderModels
+
+  const currentModelMissing =
+    !!selectedModel && selectedProviderModels.length > 0 && !selectedProviderModels.includes(selectedModel)
+
   // An unconfigured provider was picked: no credentials yet, so there are no
   // models to choose. `api_key` providers can be activated inline (paste key);
   // OAuth / external flows hand off to the onboarding sign-in.
@@ -181,6 +193,15 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
   const auxDraftProviderModels = useMemo(
     () => providers.find(provider => provider.slug === auxDraft.provider)?.models ?? [],
     [auxDraft.provider, providers]
+  )
+
+  // Same out-of-catalog guard as the main model select (see modelSelectItems).
+  const auxDraftModelItems = useMemo(
+    () =>
+      auxDraft.model && !auxDraftProviderModels.includes(auxDraft.model)
+        ? [auxDraft.model, ...auxDraftProviderModels]
+        : auxDraftProviderModels,
+    [auxDraft.model, auxDraftProviderModels]
   )
 
   const auxiliaryTaskLabel = useCallback((key: string) => m.tasks[key]?.label ?? key, [m.tasks])
@@ -467,7 +488,7 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
                   <SelectValue placeholder={m.model} />
                 </SelectTrigger>
                 <SelectContent>
-                  {(selectedProviderModels.length ? selectedProviderModels : []).map(model => (
+                  {modelSelectItems.map(model => (
                     <SelectItem key={model} value={model}>
                       {model}
                     </SelectItem>
@@ -485,6 +506,14 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
             </>
           )}
         </div>
+        {currentModelMissing && (
+          <p className="mt-2 flex items-center gap-1.5 text-xs text-amber-600 dark:text-amber-400">
+            <AlertTriangle className="size-3.5 shrink-0" />
+            <span>
+              <span className="font-mono">{selectedModel}</span> {m.notInCatalog}
+            </span>
+          </p>
+        )}
         {needsSetup && !setupIsApiKey && (
           <p className="mt-2 text-xs text-muted-foreground">
             {selectedProviderRow?.auth_type === 'api_key'
@@ -619,7 +648,7 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
                           <SelectValue placeholder={m.model} />
                         </SelectTrigger>
                         <SelectContent>
-                          {(auxDraftProviderModels.length ? auxDraftProviderModels : []).map(model => (
+                          {auxDraftModelItems.map(model => (
                             <SelectItem key={model} value={model}>
                               {model}
                             </SelectItem>
