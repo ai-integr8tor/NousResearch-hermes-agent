@@ -197,19 +197,19 @@ export function SidebarSessionRow({
           {handoffSource && handoffLabel ? (
             <Tip label={r.handoffOrigin(handoffLabel)}>
               <PlatformAvatar
-                className="size-4 rounded-[4px] text-[0.5rem] [&_svg]:size-2.5"
+                className="size-4 rounded-[4px] text-[8px] [&_svg]:size-2.5"
                 platformId={handoffSource}
                 platformName={handoffLabel}
               />
             </Tip>
           ) : null}
-          <span className="min-w-0 flex-1 truncate text-[0.8125rem] font-normal text-(--ui-text-secondary) group-hover:text-foreground group-data-[working=true]:text-foreground/90">
+          <span className="min-w-0 flex-1 truncate text-[13px] font-normal text-(--ui-text-secondary) group-hover:text-foreground group-data-[working=true]:text-foreground/90">
             {title}
           </span>
         </button>
         <div className="relative z-2 grid w-[1.375rem] place-items-center">
           {!isWorking && (
-            <span className="pointer-events-none absolute right-6 top-1/2 min-w-6 -translate-y-1/2 text-right text-[0.625rem] leading-none text-(--ui-text-tertiary) opacity-0 transition-opacity group-hover:opacity-100">
+            <span className="pointer-events-none absolute right-6 top-1/2 min-w-6 -translate-y-1/2 text-right text-[10px] leading-none text-(--ui-text-tertiary) opacity-0 transition-opacity group-hover:opacity-100">
               {age}
             </span>
           )}

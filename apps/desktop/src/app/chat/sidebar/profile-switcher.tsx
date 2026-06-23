@@ -403,7 +403,7 @@ function ProfileSquare({ active, color, label, onDelete, onRecolor, onRename, on
                 <TooltipTrigger asChild>
                   <button
                     className={cn(
-                      'grid size-5 shrink-0 cursor-grab touch-none select-none place-items-center rounded-[3px] text-[0.5625rem] font-semibold uppercase leading-none transition-opacity hover:opacity-100',
+                      'grid size-5 shrink-0 cursor-grab touch-none select-none place-items-center rounded-[3px] text-[9px] font-semibold uppercase leading-none transition-opacity hover:opacity-100',
                       active ? 'opacity-100' : 'opacity-55',
                       isDragging && 'z-10 cursor-grabbing opacity-100'
                     )}
@@ -511,7 +511,7 @@ function ProfileSquare({ active, color, label, onDelete, onRecolor, onRename, on
           ))}
         </div>
         <button
-          className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-md py-1 text-xs text-(--ui-text-tertiary) transition hover:bg-(--ui-control-hover-background) hover:text-foreground"
+          className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-md py-1 text-[12px] text-(--ui-text-tertiary) transition hover:bg-(--ui-control-hover-background) hover:text-foreground"
           onClick={() => pickColor(null)}
           type="button"
         >

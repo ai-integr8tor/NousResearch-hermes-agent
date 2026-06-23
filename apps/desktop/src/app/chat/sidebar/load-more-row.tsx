@@ -16,7 +16,7 @@ export function SidebarLoadMoreRow({ step, onClick, loading = false }: SidebarLo
 
   return (
     <button
-      className="flex min-h-5 items-center gap-1.5 self-start bg-transparent pl-2 text-left text-[0.6875rem] text-(--ui-text-tertiary) transition-colors duration-100 ease-out hover:text-foreground hover:transition-none disabled:cursor-default disabled:opacity-60 disabled:hover:text-(--ui-text-tertiary)"
+      className="flex min-h-5 items-center gap-1.5 self-start bg-transparent pl-2 text-left text-[11px] text-(--ui-text-tertiary) transition-colors duration-100 ease-out hover:text-foreground hover:transition-none disabled:cursor-default disabled:opacity-60 disabled:hover:text-(--ui-text-tertiary)"
       disabled={loading}
       onClick={onClick}
       type="button"

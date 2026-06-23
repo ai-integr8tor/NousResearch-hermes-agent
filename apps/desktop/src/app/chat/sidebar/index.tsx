@@ -832,7 +832,7 @@ export function ChatSidebar({
                         // resolved region has been observed to swallow clicks on the
                         // top rows. Same carve-out as USER_BUBBLE_BASE_CLASS in
                         // thread.tsx.
-                        'flex h-7 w-full justify-start gap-2 rounded-md border border-transparent px-2 text-left text-[0.8125rem] font-medium text-(--ui-text-secondary) transition-colors duration-100 ease-out [-webkit-app-region:no-drag] hover:bg-(--ui-control-hover-background) hover:text-foreground hover:transition-none',
+                        'flex h-7 w-full justify-start gap-2 rounded-md border border-transparent px-2 text-left text-[13px] font-medium text-(--ui-text-secondary) transition-colors duration-100 ease-out [-webkit-app-region:no-drag] hover:bg-(--ui-control-hover-background) hover:text-foreground hover:transition-none',
                         active &&
                           'border-(--ui-stroke-tertiary) bg-(--ui-control-active-background) text-foreground shadow-none hover:border-(--ui-stroke-tertiary)!',
                         !isInteractive &&
@@ -877,6 +877,7 @@ export function ChatSidebar({
           <div className="shrink-0 px-2 pb-1 pt-1">
             <SearchField
               aria-label={s.searchAria}
+              inputClassName="text-[13px]"
               inputRef={searchInputRef}
               onChange={setSearchQuery}
               placeholder={s.searchPlaceholder}
@@ -892,7 +893,7 @@ export function ChatSidebar({
                 activeSessionId={activeSidebarSessionId}
                 contentClassName={cn('flex min-h-0 flex-1 flex-col gap-px pb-1.75', SCROLL_Y)}
                 emptyState={
-                  <div className="grid min-h-24 place-items-center rounded-lg px-2 text-center text-xs text-(--ui-text-tertiary)">
+                  <div className="grid min-h-24 place-items-center rounded-lg px-2 text-center text-[12px] text-(--ui-text-tertiary)">
                     {s.noMatch(trimmedQuery)}
                   </div>
                 }
@@ -1042,7 +1043,7 @@ export function ChatSidebar({
                     label={group.label}
                     labelIcon={
                       <PlatformAvatar
-                        className="size-4 rounded-[4px] text-[0.5625rem] [&_svg]:size-3"
+                        className="size-4 rounded-[4px] text-[9px] [&_svg]:size-3"
                         platformId={group.sourceId}
                         platformName={group.label}
                       />
@@ -1135,7 +1136,7 @@ function SidebarAllPinnedState() {
   const { t } = useI18n()
 
   return (
-    <div className="grid min-h-24 place-items-center rounded-lg text-center text-xs text-(--ui-text-tertiary)">
+    <div className="grid min-h-24 place-items-center rounded-lg text-center text-[12px] text-(--ui-text-tertiary)">
       {t.sidebar.allPinned}
     </div>
   )
@@ -1145,7 +1146,7 @@ function SidebarPinnedEmptyState() {
   const { t } = useI18n()
 
   return (
-    <div className="flex min-h-7 items-center gap-1.5 rounded-lg pl-2 text-[0.75rem] text-(--ui-text-tertiary)">
+    <div className="flex min-h-7 items-center gap-1.5 rounded-lg pl-2 text-[12px] text-(--ui-text-tertiary)">
       <span className="grid w-3.5 shrink-0 place-items-center text-(--ui-text-quaternary)">
         <Codicon name="pin" size="0.75rem" />
       </span>
@@ -1611,7 +1612,7 @@ function SortableSidebarWorkspaceParent(props: SortableWorkspaceParentProps) {
 }
 
 function SidebarCount({ children }: { children: React.ReactNode }) {
-  return <span className="text-[0.6875rem] font-medium text-(--ui-text-quaternary)">{children}</span>
+  return <span className="text-[11px] font-medium text-(--ui-text-quaternary)">{children}</span>
 }
 
 // Reveals the next page of already-loaded rows within a workspace/worktree.

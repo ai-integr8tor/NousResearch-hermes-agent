@@ -160,7 +160,7 @@ export function SidebarCronJobsSection({
           type="button"
         >
           <SidebarPanelLabel>{label}</SidebarPanelLabel>
-          <span className="text-[0.6875rem] font-medium text-(--ui-text-quaternary)">{countLabel}</span>
+          <span className="text-[11px] font-medium text-(--ui-text-quaternary)">{countLabel}</span>
           <DisclosureCaret
             className="text-(--ui-text-tertiary) opacity-0 transition group-hover/section-label:opacity-100"
             open={open}
@@ -243,7 +243,7 @@ function CronJobSidebarRow({
               )}
             />
           </span>
-          <span className="min-w-0 truncate text-[0.8125rem] text-(--ui-text-secondary) group-hover/cron:text-foreground">
+          <span className="min-w-0 truncate text-[13px] text-(--ui-text-secondary) group-hover/cron:text-foreground">
             {label}
           </span>
           <DisclosureCaret
@@ -256,7 +256,7 @@ function CronJobSidebarRow({
         </button>
         {/* Trailing cluster: countdown by default, quick actions on hover. */}
         <div className="flex items-center gap-0.5 justify-self-end pr-1">
-          <span className="text-[0.6875rem] text-(--ui-text-tertiary) tabular-nums group-hover/cron:hidden">
+          <span className="text-[11px] text-(--ui-text-tertiary) tabular-nums group-hover/cron:hidden">
             {meta}
           </span>
           <div className="hidden items-center gap-0.5 group-hover/cron:flex">
@@ -327,17 +327,17 @@ function CronJobSidebarRuns({ jobId, onOpenRun }: { jobId: string; onOpenRun: (s
   return (
     <div className="mb-1 ml-[1.375rem] flex flex-col gap-px">
       {runs === null ? (
-        <div className="flex items-center gap-1.5 py-1 pl-1 text-[0.6875rem] text-(--ui-text-tertiary)">
+        <div className="flex items-center gap-1.5 py-1 pl-1 text-[11px] text-(--ui-text-tertiary)">
           <Codicon name="loading" size="0.75rem" spinning />
         </div>
       ) : runs.length === 0 ? (
-        <div className="py-1 pl-1 text-[0.6875rem] text-(--ui-text-tertiary)">{c.noRuns}</div>
+        <div className="py-1 pl-1 text-[11px] text-(--ui-text-tertiary)">{c.noRuns}</div>
       ) : (
         <>
           {runs.map(run => (
             <button
               className={cn(
-                'truncate rounded-md px-1.5 py-0.5 text-left text-[0.6875rem] tabular-nums focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40',
+                'truncate rounded-md px-1.5 py-0.5 text-left text-[11px] tabular-nums focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40',
                 run.id === selectedSessionId
                   ? 'bg-(--ui-row-active-background) text-foreground'
                   : 'text-(--ui-text-secondary) hover:bg-(--chrome-action-hover) hover:text-foreground'
