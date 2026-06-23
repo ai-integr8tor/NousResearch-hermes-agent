@@ -3272,11 +3272,15 @@ def test_config_set_model_global_persists(monkeypatch):
         seen.update(kwargs)
         return result
 
+    def _save_config_value(key_path, value):
+        saved[key_path] = value
+        return True
+
     server._sessions["sid"] = _session(agent=_Agent())
     monkeypatch.setattr("hermes_cli.model_switch.switch_model", _switch_model)
     monkeypatch.setattr(server, "_restart_slash_worker", lambda sid, session: None)
     monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: None)
-    monkeypatch.setattr("hermes_cli.config.save_config", lambda cfg: saved.update(cfg))
+    monkeypatch.setattr("cli.save_config_value", _save_config_value)
 
     resp = server.handle_request(
         {
@@ -3292,9 +3296,9 @@ def test_config_set_model_global_persists(monkeypatch):
 
     assert resp["result"]["value"] == "anthropic/claude-sonnet-4.6"
     assert seen["is_global"] is True
-    assert saved["model"]["default"] == "anthropic/claude-sonnet-4.6"
-    assert saved["model"]["provider"] == "anthropic"
-    assert saved["model"]["base_url"] == "https://api.anthropic.com"
+    assert saved["model.default"] == "anthropic/claude-sonnet-4.6"
+    assert saved["model.provider"] == "anthropic"
+    assert saved["model.base_url"] == "https://api.anthropic.com"
 
 
 def test_config_set_model_explicit_provider_skips_broken_default_init(monkeypatch):
