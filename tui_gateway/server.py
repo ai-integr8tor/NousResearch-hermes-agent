@@ -1452,11 +1452,13 @@ def _apply_managed(cfg: dict) -> dict:
 
 def _save_cfg(cfg: dict):
     global _cfg_cache, _cfg_mtime, _cfg_path
-    import yaml
+    from utils import atomic_yaml_write
 
     path = _hermes_home / "config.yaml"
-    with open(path, "w", encoding="utf-8") as f:
-        yaml.safe_dump(cfg, f)
+    # Atomic write (temp file + fsync + os.replace): a crash or disk-full
+    # mid-write must never truncate the operator's config.yaml.  Matches the
+    # write path already used by hermes_cli.config / auth / doctor.
+    atomic_yaml_write(path, cfg, sort_keys=False)
     with _cfg_lock:
         _cfg_cache = copy.deepcopy(cfg)
         _cfg_path = path
