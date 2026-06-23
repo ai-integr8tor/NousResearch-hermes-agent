@@ -378,6 +378,26 @@ def _make_adapter():
     return adapter
 
 
+def _make_identity(room_id, **overrides):
+    """Build a MatrixRoomIdentity with sensible defaults for tests."""
+    from plugins.platforms.matrix.adapter import MatrixRoomIdentity
+    fields = dict(
+        room_id=room_id,
+        room_name=None,
+        room_topic=None,
+        canonical_alias=None,
+        server_name="example.org",
+        joined_member_count=2,
+        is_direct_account_data=False,
+        display_name=room_id,
+        has_explicit_name=False,
+        chat_type="room",
+        conflict=False,
+    )
+    fields.update(overrides)
+    return MatrixRoomIdentity(**fields)
+
+
 # ---------------------------------------------------------------------------
 # Typing indicator
 # ---------------------------------------------------------------------------
@@ -951,6 +971,141 @@ class TestMatrixRoomStateChanges:
         finally:
             for task in self.adapter._pending_text_batch_tasks.values():
                 task.cancel()
+
+
+# ---------------------------------------------------------------------------
+# DM detection: recording m.direct from invites
+# ---------------------------------------------------------------------------
+
+class TestMatrixDirectInvite:
+    """Like every Matrix client, the bot records direct chats in its own
+    m.direct account data on invite — the only place the is_direct signal
+    appears — so DM-vs-room classification is accurate from the first turn."""
+
+    ROOM = "!dm:example.org"
+    INVITER = "@iain:example.org"
+
+    def setup_method(self):
+        self.adapter = _make_adapter()
+        self.adapter._user_id = "@bot:example.org"
+        self.adapter._join_room_by_id = AsyncMock(return_value=True)
+        self.adapter._refresh_dm_cache = AsyncMock()
+
+    def _client(self, *, account_data=None):
+        client = MagicMock()
+        client.get_account_data = AsyncMock(return_value=account_data or {})
+        client.set_account_data = AsyncMock()
+        self.adapter._client = client
+        return client
+
+    @staticmethod
+    def _invite(*, is_direct, room_id="!dm:example.org", sender="@iain:example.org"):
+        return types.SimpleNamespace(
+            room_id=room_id,
+            sender=sender,
+            content={"is_direct": is_direct, "membership": "invite"},
+        )
+
+    @pytest.mark.asyncio
+    async def test_is_direct_invite_records_m_direct(self):
+        client = self._client(account_data={})
+        await self.adapter._on_invite(self._invite(is_direct=True))
+
+        self.adapter._join_room_by_id.assert_awaited_once_with(self.ROOM)
+        client.set_account_data.assert_awaited_once_with(
+            "m.direct", {self.INVITER: [self.ROOM]}
+        )
+        self.adapter._refresh_dm_cache.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_already_recorded_skips_write(self):
+        client = self._client(account_data={self.INVITER: [self.ROOM]})
+        await self.adapter._on_invite(self._invite(is_direct=True))
+
+        client.set_account_data.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_already_recorded_non_last_position_skips_write(self):
+        client = self._client(
+            account_data={self.INVITER: [self.ROOM, "!other:example.org"]}
+        )
+        await self.adapter._on_invite(self._invite(is_direct=True))
+
+        client.set_account_data.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_moves_room_from_stale_user(self):
+        client = self._client(account_data={"@old:example.org": [self.ROOM]})
+        await self.adapter._on_invite(self._invite(is_direct=True))
+
+        client.set_account_data.assert_awaited_once_with(
+            "m.direct", {"@old:example.org": [], self.INVITER: [self.ROOM]}
+        )
+
+    @pytest.mark.asyncio
+    async def test_duplicate_in_foreign_bucket_is_deduplicated(self):
+        client = self._client(
+            account_data={self.INVITER: [self.ROOM], "@old:example.org": [self.ROOM]}
+        )
+        await self.adapter._on_invite(self._invite(is_direct=True))
+
+        client.set_account_data.assert_awaited_once_with(
+            "m.direct", {self.INVITER: [self.ROOM], "@old:example.org": []}
+        )
+
+    @pytest.mark.asyncio
+    async def test_non_direct_two_member_room_uses_fallback(self):
+        client = self._client(account_data={})
+        self.adapter._resolve_room_identity = AsyncMock(
+            return_value=_make_identity(
+                self.ROOM, has_explicit_name=False, canonical_alias=None,
+                joined_member_count=2,
+            )
+        )
+        self.adapter._other_member_id = AsyncMock(return_value=self.INVITER)
+
+        await self.adapter._on_invite(self._invite(is_direct=False))
+
+        client.set_account_data.assert_awaited_once_with(
+            "m.direct", {self.INVITER: [self.ROOM]}
+        )
+
+    @pytest.mark.asyncio
+    async def test_non_direct_named_room_not_recorded(self):
+        client = self._client(account_data={})
+        self.adapter._resolve_room_identity = AsyncMock(
+            return_value=_make_identity(
+                self.ROOM, has_explicit_name=True, canonical_alias=None,
+                joined_member_count=2,
+            )
+        )
+
+        await self.adapter._on_invite(self._invite(is_direct=False))
+
+        client.set_account_data.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_non_direct_multi_member_room_not_recorded(self):
+        client = self._client(account_data={})
+        self.adapter._resolve_room_identity = AsyncMock(
+            return_value=_make_identity(
+                self.ROOM, has_explicit_name=False, canonical_alias=None,
+                joined_member_count=5,
+            )
+        )
+
+        await self.adapter._on_invite(self._invite(is_direct=False))
+
+        client.set_account_data.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_join_failure_skips_marking(self):
+        client = self._client(account_data={})
+        self.adapter._join_room_by_id = AsyncMock(return_value=False)
+
+        await self.adapter._on_invite(self._invite(is_direct=True))
+
+        client.set_account_data.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

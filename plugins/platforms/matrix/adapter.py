@@ -2893,7 +2893,7 @@ class MatrixAdapter(BasePlatformAdapter):
         await self.handle_message(msg_event)
 
     async def _on_invite(self, event: Any) -> None:
-        """Auto-join rooms when invited."""
+        """Auto-join rooms when invited, recording direct chats in m.direct."""
 
         room_id = str(getattr(event, "room_id", ""))
 
@@ -2901,7 +2901,110 @@ class MatrixAdapter(BasePlatformAdapter):
             "Matrix: invited to %s — joining",
             room_id,
         )
-        await self._join_room_by_id(room_id)
+
+        # The is_direct flag only appears on the invite. Capture it (and the
+        # inviter) before joining so we can record the room in our own m.direct
+        # account data, the way every Matrix client does — otherwise the bot
+        # never has the DM signal and misclassifies one-to-one chats as rooms.
+        invite_content = self._event_content_dict(event)
+        is_direct = bool(invite_content.get("is_direct"))
+        inviter = str(getattr(event, "sender", ""))
+
+        if not await self._join_room_by_id(room_id):
+            return
+
+        await self._record_direct_from_invite(room_id, inviter, is_direct)
+
+    async def _record_direct_from_invite(
+        self, room_id: str, inviter: str, is_direct: bool
+    ) -> None:
+        """Record the room in m.direct when the invite marks it as a DM.
+
+        When the invite carries no is_direct flag, fall back the way Matrix
+        clients do: an unnamed, alias-less, two-person room is treated as a DM
+        with the other member.
+        """
+        target = inviter if is_direct else await self._guess_direct_target(room_id)
+        if not target or self._is_self_sender(target):
+            return
+        await self._mark_room_direct(room_id, target)
+
+    async def _guess_direct_target(self, room_id: str) -> Optional[str]:
+        """Return the other member when a room looks like an unmarked DM, else None."""
+        identity = await self._resolve_room_identity(room_id, force_refresh=True)
+        if identity.has_explicit_name or identity.canonical_alias:
+            return None
+        if identity.joined_member_count != 2:
+            return None
+        return await self._other_member_id(room_id)
+
+    async def _other_member_id(self, room_id: str) -> Optional[str]:
+        """Return the sole other member's id in a two-person room, else None."""
+        state_store = (
+            getattr(self._client, "state_store", None) if self._client else None
+        )
+        if not state_store or not hasattr(state_store, "get_member_profiles"):
+            return None
+        try:
+            profiles = await state_store.get_member_profiles(RoomID(room_id))
+        except Exception:
+            return None
+        own = (self._user_id or "").strip().lower()
+        others = [str(uid) for uid in profiles if str(uid).strip().lower() != own]
+        return others[0] if len(others) == 1 else None
+
+    @staticmethod
+    def _normalize_m_direct(raw: Any) -> Dict[str, list]:
+        data = getattr(raw, "content", raw)
+        if not isinstance(data, dict):
+            return {}
+        result: Dict[str, list] = {}
+        for user_id, rooms in data.items():
+            if isinstance(rooms, list):
+                result[str(user_id)] = [r for r in rooms if isinstance(r, str)]
+        return result
+
+    async def _mark_room_direct(self, room_id: str, target_user_id: str) -> None:
+        """Add ``room_id`` to our m.direct under ``target_user_id`` (idempotent).
+
+        A room is a direct chat for exactly one user, so it is first removed
+        from every other entry — mirroring how Matrix clients maintain the map.
+        """
+        client = self._client
+        if not client or not hasattr(client, "set_account_data"):
+            return
+        try:
+            raw = await client.get_account_data("m.direct")
+        except Exception as exc:
+            logger.debug("Matrix: could not read m.direct before marking DM: %s", exc)
+            return
+
+        original = self._normalize_m_direct(raw)
+
+        # Already filed correctly (under the target, nowhere else) — nothing to
+        # write. Checked by membership rather than list equality so a differing
+        # order in the stored map doesn't trigger a redundant write.
+        if room_id in original.get(target_user_id, []) and all(
+            room_id not in rooms
+            for user_id, rooms in original.items()
+            if user_id != target_user_id
+        ):
+            return
+
+        desired = {
+            user_id: [r for r in rooms if r != room_id]
+            for user_id, rooms in original.items()
+        }
+        desired.setdefault(target_user_id, []).append(room_id)
+
+        try:
+            await client.set_account_data("m.direct", desired)
+        except Exception as exc:
+            logger.warning(
+                "Matrix: failed to record DM in m.direct for %s: %s", room_id, exc
+            )
+            return
+        await self._refresh_dm_cache()
 
     async def _join_room_by_id(self, room_id: str) -> bool:
         """Join a room by ID and refresh local caches on success."""
