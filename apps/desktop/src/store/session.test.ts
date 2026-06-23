@@ -9,11 +9,13 @@ import {
   $currentCwd,
   $workingSessionIds,
   applyConfiguredDefaultProjectDir,
+  filterHiddenSessions,
   getRecentlySettledSessionIds,
   mergeSessionPage,
   sessionPinId,
   setCurrentCwd,
   setSessionAttention,
+  setSessionLocallyHidden,
   setSessionWorking,
   workspaceCwdForNewSession
 } from './session'
@@ -148,13 +150,8 @@ describe('mergeSessionPage', () => {
     // the sidebar showed both the old tip and the new tip as separate rows.
     // The old tip must be evicted because its lineage key matches the incoming
     // new tip's lineage key.
-    const previous = [
-      session({ id: 'tip-4', _lineage_root_id: 'root' }),
-      session({ id: 'other' }),
-    ] as SessionInfo[]
-    const incoming = [
-      session({ id: 'tip-5', _lineage_root_id: 'root' }),
-    ] as SessionInfo[]
+    const previous = [session({ id: 'tip-4', _lineage_root_id: 'root' }), session({ id: 'other' })] as SessionInfo[]
+    const incoming = [session({ id: 'tip-5', _lineage_root_id: 'root' })] as SessionInfo[]
 
     // 'tip-4' is in the keep set (e.g. it was the active/working session),
     // but should still be evicted because the incoming page carries the same
@@ -171,15 +168,44 @@ describe('mergeSessionPage', () => {
     // from a different lineage that happen to be in the keep set.
     const previous = [
       session({ id: 'a-old', _lineage_root_id: 'lineage-a' }),
-      session({ id: 'b', _lineage_root_id: 'lineage-b' }),
+      session({ id: 'b', _lineage_root_id: 'lineage-b' })
     ] as SessionInfo[]
-    const incoming = [
-      session({ id: 'a-new', _lineage_root_id: 'lineage-a' }),
-    ] as SessionInfo[]
+
+    const incoming = [session({ id: 'a-new', _lineage_root_id: 'lineage-a' })] as SessionInfo[]
 
     const merged = mergeSessionPage(previous, incoming, ['b'])
 
     expect(merged.map(s => s.id)).toEqual(['b', 'a-new'])
+  })
+
+  it('filters locally hidden incoming sessions before merging', () => {
+    const hidden = session({ id: 'deleted' })
+    const visible = session({ id: 'visible' })
+
+    setSessionLocallyHidden('deleted', true)
+
+    try {
+      const incoming = [hidden, visible]
+
+      expect(filterHiddenSessions(incoming).map(s => s.id)).toEqual(['visible'])
+      expect(mergeSessionPage([], incoming, []).map(s => s.id)).toEqual(['visible'])
+    } finally {
+      setSessionLocallyHidden('deleted', false)
+    }
+  })
+
+  it('lets locally hidden sessions override keep ids and lineage pins', () => {
+    const hidden = session({ id: 'tip', _lineage_root_id: 'root' })
+
+    setSessionLocallyHidden('root', true)
+
+    try {
+      const merged = mergeSessionPage([hidden], [hidden], ['root', 'tip'])
+
+      expect(merged).toEqual([])
+    } finally {
+      setSessionLocallyHidden('root', false)
+    }
   })
 })
 

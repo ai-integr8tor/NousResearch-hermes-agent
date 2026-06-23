@@ -3,9 +3,21 @@ import type { MutableRefObject } from 'react'
 import { useEffect } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { getSessionMessages } from '@/hermes'
+import { deleteSession, getSessionMessages, setSessionArchived } from '@/hermes'
 import { $activeGatewayProfile, $newChatProfile } from '@/store/profile'
-import { $currentCwd, $messages, $resumeFailedSessionId, setMessages, setResumeFailedSessionId } from '@/store/session'
+import {
+  $currentCwd,
+  $messages,
+  $resumeFailedSessionId,
+  $sessions,
+  $sessionsTotal,
+  mergeSessionPage,
+  setMessages,
+  setResumeFailedSessionId,
+  setSessionLocallyHidden,
+  setSessions
+} from '@/store/session'
+import type { SessionInfo } from '@/types/hermes'
 
 import type { ClientSessionState } from '../../types'
 
@@ -21,6 +33,27 @@ vi.mock('@/hermes', async importOriginal => ({
 }))
 
 const RUNTIME_SESSION_ID = 'rt-new-001'
+
+function storedSession(overrides: Partial<SessionInfo>): SessionInfo {
+  return {
+    archived: false,
+    cwd: null,
+    ended_at: null,
+    id: 'stored-1',
+    input_tokens: 0,
+    is_active: false,
+    last_active: 0,
+    message_count: 1,
+    model: null,
+    output_tokens: 0,
+    preview: null,
+    source: null,
+    started_at: 0,
+    title: null,
+    tool_call_count: 0,
+    ...overrides
+  }
+}
 
 function Harness({
   onReady,
@@ -255,5 +288,177 @@ describe('resumeSession failure recovery', () => {
     await runResume(requestGateway)
 
     expect($resumeFailedSessionId.get()).toBeNull()
+  })
+})
+
+interface SessionMutationActions {
+  archiveSession: (storedSessionId: string) => Promise<void>
+  removeSession: (storedSessionId: string) => Promise<void>
+}
+
+function SessionMutationHarness({
+  onReady,
+  requestGateway
+}: {
+  onReady: (actions: SessionMutationActions) => void
+  requestGateway: <T>(method: string, params?: Record<string, unknown>) => Promise<T>
+}) {
+  const ref = <T,>(value: T): MutableRefObject<T> => ({ current: value })
+
+  const actions = useSessionActions({
+    activeSessionId: null,
+    activeSessionIdRef: ref<string | null>(null),
+    busyRef: ref(false),
+    creatingSessionRef: ref(false),
+    ensureSessionState: () => ({}) as ClientSessionState,
+    getRouteToken: () => 'token',
+    navigate: vi.fn() as never,
+    requestGateway,
+    runtimeIdByStoredSessionIdRef: ref(new Map<string, string>()),
+    selectedStoredSessionId: null,
+    selectedStoredSessionIdRef: ref<string | null>(null),
+    sessionStateByRuntimeIdRef: ref(new Map<string, ClientSessionState>()),
+    syncSessionStateToView: vi.fn(),
+    updateSessionState: (_sessionId, updater) => updater({} as ClientSessionState)
+  })
+
+  useEffect(() => {
+    onReady({ archiveSession: actions.archiveSession, removeSession: actions.removeSession })
+  }, [actions.archiveSession, actions.removeSession, onReady])
+
+  return null
+}
+
+describe('removeSession refresh race', () => {
+  afterEach(() => {
+    cleanup()
+    setSessions([])
+    $sessionsTotal.set(0)
+    setSessionLocallyHidden('archived', false)
+    setSessionLocallyHidden('deleted', false)
+    vi.restoreAllMocks()
+  })
+
+  it('does not resurrect a deleted session returned by a racing refresh', async () => {
+    const deleted = storedSession({ id: 'deleted' })
+    const other = storedSession({ id: 'other' })
+
+    let finishDelete: () => void = () => {
+      throw new Error('delete promise was not created')
+    }
+
+    vi.mocked(deleteSession).mockImplementation(
+      () =>
+        new Promise(resolve => {
+          finishDelete = () => resolve({ ok: true })
+        })
+    )
+
+    setSessions([deleted, other])
+    $sessionsTotal.set(2)
+
+    let actions: SessionMutationActions | null = null
+    render(
+      <SessionMutationHarness onReady={next => (actions = next)} requestGateway={vi.fn(async () => ({}) as never)} />
+    )
+    await waitFor(() => expect(actions).not.toBeNull())
+
+    const deletePromise = actions!.removeSession('deleted')
+
+    expect($sessions.get().map(session => session.id)).toEqual(['other'])
+
+    // Simulate desktop-controller refreshSessions/load-more landing before the
+    // backend DELETE transaction commits, so the server still returns the row.
+    setSessions(previous => mergeSessionPage(previous, [deleted, other], []))
+    expect($sessions.get().map(session => session.id)).toEqual(['other'])
+
+    finishDelete()
+    await deletePromise
+
+    expect($sessions.get().map(session => session.id)).toEqual(['other'])
+  })
+
+  it('restores visibility when delete fails', async () => {
+    const deleted = storedSession({ id: 'deleted' })
+    const other = storedSession({ id: 'other' })
+
+    vi.mocked(deleteSession).mockRejectedValue(new Error('delete failed'))
+
+    setSessions([deleted, other])
+    $sessionsTotal.set(2)
+
+    let actions: SessionMutationActions | null = null
+    render(
+      <SessionMutationHarness onReady={next => (actions = next)} requestGateway={vi.fn(async () => ({}) as never)} />
+    )
+    await waitFor(() => expect(actions).not.toBeNull())
+
+    await actions!.removeSession('deleted')
+
+    expect($sessions.get().map(session => session.id)).toEqual(['deleted', 'other'])
+
+    setSessions(() => mergeSessionPage([], [deleted], []))
+    expect($sessions.get().map(session => session.id)).toEqual(['deleted'])
+  })
+
+  it('does not resurrect an archived session returned by a racing refresh', async () => {
+    const archived = storedSession({ id: 'archived' })
+    const other = storedSession({ id: 'other' })
+
+    let finishArchive: () => void = () => {
+      throw new Error('archive promise was not created')
+    }
+
+    vi.mocked(setSessionArchived).mockImplementation(
+      () =>
+        new Promise(resolve => {
+          finishArchive = () => resolve({ ok: true })
+        })
+    )
+
+    setSessions([archived, other])
+    $sessionsTotal.set(2)
+
+    let actions: SessionMutationActions | null = null
+    render(
+      <SessionMutationHarness onReady={next => (actions = next)} requestGateway={vi.fn(async () => ({}) as never)} />
+    )
+    await waitFor(() => expect(actions).not.toBeNull())
+
+    const archivePromise = actions!.archiveSession('archived')
+
+    expect($sessions.get().map(session => session.id)).toEqual(['other'])
+
+    setSessions(previous => mergeSessionPage(previous, [archived, other], []))
+    expect($sessions.get().map(session => session.id)).toEqual(['other'])
+
+    finishArchive()
+    await archivePromise
+
+    setSessions(previous => mergeSessionPage(previous, [archived, other], []))
+    expect($sessions.get().map(session => session.id)).toEqual(['other'])
+  })
+
+  it('restores visibility when archive fails', async () => {
+    const archived = storedSession({ id: 'archived' })
+    const other = storedSession({ id: 'other' })
+
+    vi.mocked(setSessionArchived).mockRejectedValue(new Error('archive failed'))
+
+    setSessions([archived, other])
+    $sessionsTotal.set(2)
+
+    let actions: SessionMutationActions | null = null
+    render(
+      <SessionMutationHarness onReady={next => (actions = next)} requestGateway={vi.fn(async () => ({}) as never)} />
+    )
+    await waitFor(() => expect(actions).not.toBeNull())
+
+    await actions!.archiveSession('archived')
+
+    expect($sessions.get().map(session => session.id)).toEqual(['archived', 'other'])
+
+    setSessions(() => mergeSessionPage([], [archived], []))
+    expect($sessions.get().map(session => session.id)).toEqual(['archived'])
   })
 })
