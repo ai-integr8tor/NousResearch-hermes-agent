@@ -1622,15 +1622,52 @@ def init_agent(
             if isinstance(t, dict)
         }
         for _schema in agent.context_compressor.get_tool_schemas():
-            _tname = _schema.get("name", "")
-            if _tname and _tname in _existing_tool_names:
-                continue  # already registered via plugin/cache path
-            _wrapped = {"type": "function", "function": _schema}
-            agent.tools.append(_wrapped)
-            if _tname:
+            # Validate/normalize the schema before wrapping.
+            # If the schema is already in OpenAI tool form, use it as-is
+            # to avoid double-wrapping.
+            if (
+                isinstance(_schema, dict)
+                and _schema.get("type") == "function"
+                and "function" in _schema
+            ):
+                # Already wrapped — extract the inner schema for name lookup.
+                _inner = _schema.get("function") or {}
+                _tname = _inner.get("name", "")
+                if _tname and _tname in _existing_tool_names:
+                    continue
+                if not _tname:
+                    logger.warning(
+                        "Context engine returned a pre-wrapped tool schema "
+                        "without a name — skipping: %s",
+                        _schema,
+                    )
+                    continue
+                agent.tools.append(_schema)
                 agent.valid_tool_names.add(_tname)
                 agent._context_engine_tool_names.add(_tname)
                 _existing_tool_names.add(_tname)
+            elif isinstance(_schema, dict):
+                _tname = _schema.get("name", "")
+                if _tname and _tname in _existing_tool_names:
+                    continue  # already registered via plugin/cache path
+                if not _tname:
+                    logger.warning(
+                        "Context engine returned a tool schema without a "
+                        "name — skipping: %s",
+                        _schema,
+                    )
+                    continue
+                _wrapped = {"type": "function", "function": _schema}
+                agent.tools.append(_wrapped)
+                agent.valid_tool_names.add(_tname)
+                agent._context_engine_tool_names.add(_tname)
+                _existing_tool_names.add(_tname)
+            else:
+                logger.warning(
+                    "Context engine returned a non-dict tool schema — "
+                    "skipping: %r",
+                    _schema,
+                )
 
     # Notify context engine of session start
     if hasattr(agent, "context_compressor") and agent.context_compressor:
