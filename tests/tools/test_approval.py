@@ -765,11 +765,12 @@ class TestPatternKeyUniqueness:
         _, key_delete, _ = detect_dangerous_command("find . -name '*.tmp' -delete")
         session = "test_find_collision"
         _clear_session(session)
-        approve_session(session, key_exec)
-        assert is_approved(session, key_exec) is True
-        assert is_approved(session, key_delete) is False, (
-            "approving find -exec rm should not auto-approve find -delete"
-        )
+        with mock_patch.object(approval_module, "_permanent_approved", set()):
+            approve_session(session, key_exec)
+            assert is_approved(session, key_exec) is True
+            assert is_approved(session, key_delete) is False, (
+                "approving find -exec rm should not auto-approve find -delete"
+            )
         _clear_session(session)
 
     def test_legacy_find_key_still_approves_find_exec(self):
@@ -884,6 +885,20 @@ class TestGatewayProtection:
         dangerous, key, desc = detect_dangerous_command(cmd)
         assert dangerous is True
         assert "stop/restart" in desc
+
+    def test_launchctl_kickstart_hermes_gateway_flagged(self):
+        """launchd kickstart can restart the macOS gateway and must be gated."""
+        cmd = "launchctl kickstart -k gui/501/ai.hermes.gateway"
+        dangerous, key, desc = detect_dangerous_command(cmd)
+        assert dangerous is True
+        assert "launchd hermes gateway lifecycle" in desc
+
+    def test_launchctl_unload_hermes_gateway_plist_flagged(self):
+        """launchd unload/remove variants are gateway lifecycle too."""
+        cmd = "launchctl unload ~/Library/LaunchAgents/ai.hermes.gateway.plist"
+        dangerous, key, desc = detect_dangerous_command(cmd)
+        assert dangerous is True
+        assert "launchd hermes gateway lifecycle" in desc
 
     def test_pkill_hermes_detected(self):
         """pkill targeting hermes/gateway processes must be caught."""

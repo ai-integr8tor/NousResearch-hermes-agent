@@ -373,6 +373,40 @@ def _sudo_stdin_block_result(description: str) -> dict:
     }
 
 
+_GATEWAY_SELF_RESTART_RE = re.compile(
+    r'(?:'
+    r'\bhermes\s+gateway\s+(?:stop|restart)\b|'
+    r'\bhermes\s+update\b|'
+    r'\blaunchctl\b[^\n;`]*(?:kickstart|bootout|bootstrap|stop|remove|unload|load)\b'
+    r'[^\n;`]*\bai\.hermes\.gateway(?:\.plist)?\b|'
+    r'\bsystemctl\s+(?:--user\s+)?(?:stop|restart)\s+hermes-gateway(?:\.service)?\b'
+    r')',
+    _RE_FLAGS,
+)
+
+
+def _check_gateway_self_restart_guard(command: str) -> tuple:
+    """Detect Hermes gateway lifecycle commands from inside gateway sessions."""
+    normalized = _normalize_command_for_detection(command).lower()
+    if _GATEWAY_SELF_RESTART_RE.search(normalized):
+        return (True, "Hermes gateway lifecycle command from inside the gateway")
+    return (False, None)
+
+
+def _gateway_self_restart_block_result(description: str) -> dict:
+    """Build the block result for gateway self-restart attempts."""
+    return {
+        "approved": False,
+        "hardline": True,
+        "message": (
+            f"BLOCKED (gateway self-restart guard): {description}. "
+            "A running Hermes gateway session must not restart or kickstart "
+            "its own gateway process. Ask for an operator shell outside the "
+            "running gateway, then verify after that external restart."
+        ),
+    }
+
+
 # =========================================================================
 # Dangerous command patterns
 # =========================================================================
@@ -426,6 +460,7 @@ DANGEROUS_PATTERNS = [
     # terminates all running agents mid-work.
     (r'\bhermes\s+gateway\s+(stop|restart)\b', "stop/restart hermes gateway (kills running agents)"),
     (r'\bhermes\s+update\b', "hermes update (restarts gateway, kills running agents)"),
+    (r'\blaunchctl\b[^\n;`]*(kickstart|bootout|bootstrap|stop|remove|unload|load)\b[^\n;`]*\bai\.hermes\.gateway(\.plist)?\b', "launchd hermes gateway lifecycle (kills running agents)"),
     # Docker container lifecycle — any user with docker.sock mounted (a common
     # Docker Compose pattern) gives the agent the ability to restart/stop/kill
     # containers without approval.  These are agent-initiated lifecycle operations
@@ -1500,6 +1535,12 @@ def check_all_command_guards(command: str, env_type: str,
                        sudo_guess_desc, command[:200])
         return _sudo_stdin_block_result(sudo_guess_desc)
 
+    is_gateway_self_restart, gateway_self_restart_desc = _check_gateway_self_restart_guard(command)
+    if is_gateway_self_restart and _is_gateway_approval_context():
+        logger.warning("Gateway self-restart guard block: %s (command: %s)",
+                       gateway_self_restart_desc, command[:200])
+        return _gateway_self_restart_block_result(gateway_self_restart_desc)
+
     # --yolo or approvals.mode=off: bypass all approval prompts.
     # Gateway /yolo is session-scoped; CLI --yolo remains process-scoped.
     approval_mode = _get_approval_mode()
@@ -1797,12 +1838,18 @@ def check_execute_code_guard(code: str, env_type: str) -> dict:
     if env_type in {"docker", "singularity", "modal", "daytona", "vercel_sandbox"}:
         return {"approved": True, "message": None}
 
+    is_gateway = _is_gateway_approval_context()
+    is_gateway_self_restart, gateway_self_restart_desc = _check_gateway_self_restart_guard(code)
+    if is_gateway_self_restart and is_gateway:
+        logger.warning("Gateway self-restart guard block in execute_code: %s",
+                       gateway_self_restart_desc)
+        return _gateway_self_restart_block_result(gateway_self_restart_desc)
+
     # --yolo or approvals.mode=off: bypass (session- or process-scoped).
     approval_mode = _get_approval_mode()
     if _YOLO_MODE_FROZEN or is_current_session_yolo_enabled() or approval_mode == "off":
         return {"approved": True, "message": None}
 
-    is_gateway = _is_gateway_approval_context()
     is_ask = env_var_enabled("HERMES_EXEC_ASK")
 
     # Cron: no user is present to approve arbitrary code.

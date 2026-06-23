@@ -8,6 +8,7 @@ import pytest
 import tools.approval as approval_module
 from tools.approval import (
     approve_session,
+    check_execute_code_guard,
     check_all_command_guards,
     check_dangerous_command,
     is_approved,
@@ -73,6 +74,43 @@ class TestContainerSkip:
     def test_daytona_skips_both(self):
         result = check_all_command_guards("rm -rf /", "daytona")
         assert result["approved"] is True
+
+
+# ---------------------------------------------------------------------------
+# Gateway self-restart guard
+# ---------------------------------------------------------------------------
+
+class TestGatewaySelfRestartGuard:
+    def test_launchctl_kickstart_blocked_from_gateway_before_approval_mode(self):
+        os.environ["HERMES_GATEWAY_SESSION"] = "1"
+        with patch.object(approval_module, "_get_approval_mode", return_value="off"):
+            result = check_all_command_guards(
+                "launchctl kickstart -k gui/501/ai.hermes.gateway",
+                "local",
+            )
+
+        assert result["approved"] is False
+        assert result.get("hardline") is True
+        assert "gateway self-restart guard" in result["message"]
+
+    def test_launchctl_kickstart_not_hard_blocked_outside_gateway(self):
+        with patch.object(approval_module, "_get_approval_mode", return_value="off"):
+            result = check_all_command_guards(
+                "launchctl kickstart -k gui/501/ai.hermes.gateway",
+                "local",
+            )
+
+        assert result["approved"] is True
+
+    def test_execute_code_gateway_kickstart_blocked_before_approval_mode(self):
+        os.environ["HERMES_GATEWAY_SESSION"] = "1"
+        code = "import subprocess\nsubprocess.run(['launchctl', 'kickstart', '-k', 'gui/501/ai.hermes.gateway'])"
+        with patch.object(approval_module, "_get_approval_mode", return_value="off"):
+            result = check_execute_code_guard(code, "local")
+
+        assert result["approved"] is False
+        assert result.get("hardline") is True
+        assert "gateway self-restart guard" in result["message"]
 
 
 # ---------------------------------------------------------------------------
