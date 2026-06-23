@@ -716,16 +716,11 @@ describe('usePromptActions file attachment sync', () => {
     })
   })
 
-  it('passes a path-less @file: ref straight through (no path = nothing to upload)', async () => {
-    // Submit-layer contract: only attachments that carry a `path` are upload
-    // candidates. A path-less ref (an @-mention/context ref or pasted text)
-    // has no bytes to send, so syncAttachments leaves it untouched and the ref
-    // reaches the gateway as-is — correct for workspace-relative refs.
-    //
-    // The MahmoudR drag-drop bug (a Finder PDF that became a local-path text
-    // ref in remote mode) is fixed upstream at the DROP layer: OS drops now
-    // carry a path and route through the upload pipeline instead of becoming a
-    // path-less inline ref. See partitionDroppedFiles in use-composer-actions.
+  it('recovers a local path from a path-less @file ref and submits the staged workspace ref', async () => {
+    // Some Desktop paths can lose ComposerAttachment.path and leave only a
+    // pre-rendered @file:/Users/... ref. Submitting that raw path hits the
+    // backend workspace guard, so submit-time sync must recover obvious local
+    // filesystem paths and route them through file.attach.
     $connection.set({ mode: 'remote' } as never)
     const readFileDataUrl = vi.fn(async () => 'data:application/pdf;base64,JVBERi0=')
     Object.defineProperty(window, 'hermesDesktop', {
@@ -744,6 +739,14 @@ describe('usePromptActions file attachment sync', () => {
     const calls: { method: string; params?: Record<string, unknown> }[] = []
     const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
       calls.push({ method, params })
+      if (method === 'file.attach') {
+        return {
+          attached: true,
+          path: '/remote/work/.hermes/desktop-attachments/DEVIS_signed.pdf',
+          ref_text: '@file:.hermes/desktop-attachments/DEVIS_signed.pdf',
+          uploaded: true
+        } as never
+      }
       return {} as never
     })
 
@@ -753,10 +756,50 @@ describe('usePromptActions file attachment sync', () => {
     const ok = await handle!.submitText('read this file', { attachments: [pathlessRef] })
 
     expect(ok).toBe(true)
-    // No path → no file.attach, no byte read: the ref passes through unchanged.
+    expect(calls.map(c => c.method)).toEqual(['file.attach', 'prompt.submit'])
+    expect(readFileDataUrl).toHaveBeenCalledWith('/Users/mahmoud/Downloads/DEVIS_signed.pdf')
+    expect(calls[0]?.params).toMatchObject({
+      session_id: RUNTIME_SESSION_ID,
+      path: '/Users/mahmoud/Downloads/DEVIS_signed.pdf',
+      name: 'DEVIS_signed.pdf',
+      data_url: 'data:application/pdf;base64,JVBERi0='
+    })
+    expect(calls[1]?.params).toEqual({
+      session_id: RUNTIME_SESSION_ID,
+      text: '@file:.hermes/desktop-attachments/DEVIS_signed.pdf\n\nread this file'
+    })
+  })
+
+  it('passes a path-less workspace-relative @file ref straight through', async () => {
+    $connection.set({ mode: 'remote' } as never)
+    const readFileDataUrl = vi.fn(async () => 'data:application/pdf;base64,JVBERi0=')
+    Object.defineProperty(window, 'hermesDesktop', {
+      configurable: true,
+      value: { readFileDataUrl }
+    })
+
+    const pathlessRef: ComposerAttachment = {
+      id: 'file:workspace',
+      kind: 'file',
+      label: 'report.pdf',
+      refText: '@file:`docs/report.pdf`'
+    }
+
+    const calls: { method: string; params?: Record<string, unknown> }[] = []
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      calls.push({ method, params })
+      return {} as never
+    })
+
+    let handle: HarnessHandle | null = null
+    render(<Harness onReady={h => (handle = h)} refreshSessions={async () => undefined} requestGateway={requestGateway} />)
+
+    const ok = await handle!.submitText('read this file', { attachments: [pathlessRef] })
+
+    expect(ok).toBe(true)
     expect(calls.map(c => c.method)).toEqual(['prompt.submit'])
     expect(readFileDataUrl).not.toHaveBeenCalled()
-    expect(calls[0]?.params?.text).toContain('@file:`/Users/mahmoud/Downloads/DEVIS_signed.pdf`')
+    expect(calls[0]?.params?.text).toContain('@file:`docs/report.pdf`')
   })
 
   it('passes the path directly via file.attach in local mode (no byte upload)', async () => {
@@ -1077,14 +1120,14 @@ describe('uploadComposerAttachment remote read failures', () => {
     vi.restoreAllMocks()
   })
 
-  it('turns the raw 16MB IPC cap error into a friendly remote-gateway message', async () => {
+  it('turns the raw data-url IPC cap error into a friendly remote-gateway message', async () => {
     // electron/hardening.cjs rejects the readFileDataUrl IPC with this exact
     // shape when a file exceeds DATA_URL_READ_MAX_BYTES.
     Object.defineProperty(window, 'hermesDesktop', {
       configurable: true,
       value: {
         readFileDataUrl: vi.fn(async () => {
-          throw new Error('File preview failed: file is too large (20971520 bytes; limit 16777216 bytes).')
+          throw new Error('File preview failed: file is too large (150994944 bytes; limit 134217728 bytes).')
         })
       }
     })
@@ -1096,7 +1139,7 @@ describe('uploadComposerAttachment remote read failures', () => {
         { id: 'file:big', kind: 'file', label: 'huge.csv', path: '/abs/huge.csv' },
         { remote: true, requestGateway, sessionId: RUNTIME_SESSION_ID }
       )
-    ).rejects.toThrow('huge.csv is too large to upload to the remote gateway (max 16 MB).')
+    ).rejects.toThrow('huge.csv is too large to upload to the remote gateway (max 128 MB).')
 
     // The cap is hit before any gateway round-trip.
     expect(requestGateway).not.toHaveBeenCalled()

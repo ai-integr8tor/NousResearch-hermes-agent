@@ -6,6 +6,7 @@ const test = require('node:test')
 const { pathToFileURL } = require('node:url')
 
 const {
+  DATA_URL_READ_MAX_BYTES,
   DEFAULT_FETCH_TIMEOUT_MS,
   encryptDesktopSecret,
   resolveDirectoryForIpc,
@@ -21,6 +22,10 @@ async function rejectsWithCode(promise, code) {
     return true
   })
 }
+
+test('data-url file reads allow large site-plan PDFs up to 128 MB', () => {
+  assert.equal(DATA_URL_READ_MAX_BYTES, 128 * 1024 * 1024)
+})
 
 test('resolveTimeoutMs falls back to defaults and accepts overrides', () => {
   assert.equal(resolveTimeoutMs(undefined), DEFAULT_FETCH_TIMEOUT_MS)

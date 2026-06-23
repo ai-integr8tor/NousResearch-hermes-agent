@@ -190,8 +190,38 @@ async function readFileDataUrlForAttach(filePath: string): Promise<string | null
   return dataUrl || null
 }
 
+const FILE_REF_RE = /^@file:(`[^`\n]+`|"[^"\n]+"|'[^'\n]+'|\S+)$/
+
+function unwrapContextRefValue(raw: string): string {
+  if (raw.length >= 2) {
+    const head = raw[0]
+    const tail = raw[raw.length - 1]
+
+    if ((head === '`' && tail === '`') || (head === '"' && tail === '"') || (head === "'" && tail === "'")) {
+      return raw.slice(1, -1)
+    }
+  }
+
+  return raw.replace(/[,.;!?]+$/, '').trim()
+}
+
+function isLikelyLocalFilesystemPath(value: string): boolean {
+  return value.startsWith('/') || value.startsWith('~/') || /^[A-Za-z]:[\\/]/.test(value) || value.startsWith('\\\\')
+}
+
+/**
+ * Recover local filesystem paths from pre-rendered @file refs that lost their
+ * attachment.path metadata. Workspace-relative refs intentionally return ''.
+ */
+function localFilePathFromRefText(refText?: string): string {
+  const match = (refText || '').trim().match(FILE_REF_RE)
+  const value = match ? unwrapContextRefValue(match[1] || '') : ''
+
+  return value && isLikelyLocalFilesystemPath(value) ? value : ''
+}
+
 // The readFileDataUrl IPC base64-loads the whole file into memory and is
-// hard-capped (DATA_URL_READ_MAX_BYTES, 16 MB) in electron/hardening.cjs, which
+// hard-capped (DATA_URL_READ_MAX_BYTES, 128 MB) in electron/hardening.cjs, which
 // rejects with a raw "file is too large (N bytes; limit M bytes)" string. In
 // remote mode every attachment's bytes go through that read, so a big file
 // surfaces that internal message verbatim in the failure toast. Translate it
@@ -447,6 +477,19 @@ export function usePromptActions({
 
       for (const original of attachments) {
         let attachment = original
+
+        if (!attachment.path && attachment.kind === 'file') {
+          const recoveredPath = localFilePathFromRefText(attachment.refText)
+
+          if (recoveredPath) {
+            attachment = {
+              ...attachment,
+              detail: attachment.detail || recoveredPath,
+              label: attachment.label || pathLabel(recoveredPath),
+              path: recoveredPath
+            }
+          }
+        }
 
         // Join a drop-time eager upload still in flight for this attachment
         // before deciding anything — otherwise submit and the eager task both
