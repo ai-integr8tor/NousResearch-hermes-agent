@@ -126,7 +126,11 @@ class TestStableWindowsGatewayWorkingDir:
         assert gateway_windows._stable_gateway_working_dir(project) == str(project)
 
 
-def test_write_task_script_anchors_cmd_cd_at_hermes_home(monkeypatch, tmp_path):
+def test_write_task_script_writes_vbs_with_hermes_home_anchor(monkeypatch, tmp_path):
+    """The .vbs launcher should anchor its working directory at HERMES_HOME.
+
+    The .cmd is now a thin wrapper that hands off to the .vbs, so the
+    stable-directory contract lives in the VBS launcher instead."""
     project = tmp_path / "project"
     hermes_home = tmp_path / "hermes-home"
     hermes_home.mkdir()
@@ -143,11 +147,19 @@ def test_write_task_script_anchors_cmd_cd_at_hermes_home(monkeypatch, tmp_path):
     monkeypatch.setattr(gateway_windows, "get_task_script_path", lambda: script_path)
 
     written = gateway_windows._write_task_script()
-    content = script_path.read_text(encoding="utf-8")
 
+    # The .cmd is written and returned
     assert written == script_path
-    assert f"cd /d {gateway_windows._quote_cmd_script_arg(str(hermes_home.resolve()))}" in content
-    assert f"cd /d {gateway_windows._quote_cmd_script_arg(str(project))}" not in content
+    cmd_content = script_path.read_text(encoding="utf-8")
+    assert "wscript.exe" in cmd_content
+
+    # The .vbs is written alongside and anchors at hermes_home
+    vbs_path = script_path.with_suffix(".vbs")
+    assert vbs_path.exists(), "VBS launcher must be written alongside .cmd"
+    vbs_content = vbs_path.read_text(encoding="utf-8")
+    assert f"WshShell.CurrentDirectory = \"{str(hermes_home.resolve())}\"" in vbs_content
+    # The VBS should NOT anchor CurrentDirectory at the project root
+    assert f'CurrentDirectory = "{str(project)}"' not in vbs_content
 
 
 def _arrange_startup_fallback(monkeypatch, tmp_path, running_pids):
@@ -188,8 +200,12 @@ def _arrange_startup_fallback(monkeypatch, tmp_path, running_pids):
     return script_path, calls
 
 
-def test_gateway_cmd_script_uses_pythonw_without_replace_or_start_churn(monkeypatch):
-    """Scheduled Task wrapper should launch pythonw once and avoid replace loops."""
+def test_gateway_cmd_script_delegates_to_vbs_launcher(monkeypatch):
+    """Scheduled Task .cmd should hand off to a VBS launcher, not run pythonw directly.
+
+    Running pythonw.exe through a .cmd wrapper causes a brief console flash
+    because Task Scheduler always opens a visible CMD window for .cmd files.
+    Delegating to wscript.exe + .vbs avoids this entirely."""
     monkeypatch.setattr(gateway_windows, "_derive_venv_pythonw", lambda exe: exe.replace("python.exe", "pythonw.exe"))
 
     content = gateway_windows._build_gateway_cmd_script(
@@ -199,11 +215,36 @@ def test_gateway_cmd_script_uses_pythonw_without_replace_or_start_churn(monkeypa
         "--profile alice",
     )
 
-    assert "pythonw.exe" in content
-    assert "gateway run" in content
-    assert "--replace" not in content
-    assert "start \"\"" not in content
+    assert "wscript.exe" in content
+    assert "%~dp0%~n0.vbs" in content, ".cmd must reference the companion .vbs by name"
     assert "exit /b 0" in content
+    # No direct pythonw invocation in the .cmd anymore
+    assert "pythonw.exe" not in content
+    assert "--replace" not in content
+
+
+def test_build_gateway_vbs_script_contains_env_and_hidden_run(monkeypatch):
+    """The VBS launcher must set environment variables and run pythonw hidden."""
+    monkeypatch.setattr(gateway_windows, "_derive_venv_pythonw", lambda exe: exe.replace("python.exe", "pythonw.exe"))
+
+    vbs = gateway_windows._build_gateway_vbs_script(
+        r"C:\\Hermes\\hermes-agent\\venv\\Scripts\\python.exe",
+        r"C:\\Hermes\\hermes-agent",
+        r"C:\\HermesHome\\profiles\\alice",
+        "--profile alice",
+    )
+
+    # Environment variables
+    assert 'HERMES_HOME' in vbs
+    assert 'PYTHONIOENCODING' in vbs
+    assert 'utf-8' in vbs
+    assert 'HERMES_GATEWAY_DETACHED' in vbs
+    assert 'VIRTUAL_ENV' in vbs
+    # Hidden run (SW_HIDE = 0)
+    assert 'WshShell.Run' in vbs
+    assert ', 0, False' in vbs, "Second argument to Run must be 0 (SW_HIDE)"
+    # Working directory
+    assert 'CurrentDirectory' in vbs
 
 
 def test_elevated_gateway_command_uses_pythonw_hidden_console(monkeypatch):

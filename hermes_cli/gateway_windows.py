@@ -335,6 +335,61 @@ def _stable_gateway_working_dir(project_root: Path) -> str:
 # Script rendering
 # ---------------------------------------------------------------------------
 
+def _build_gateway_vbs_script(
+    python_path: str,
+    working_dir: str,
+    hermes_home: str,
+    profile_arg: str,
+) -> str:
+    """Build the ``gateway.vbs`` launcher (CRLF-terminated).
+
+    VBScript runs as a true GUI-subsystem process through ``wscript.exe``,
+    so Windows Task Scheduler never opens a visible console window — not
+    even the brief flash that occurs when launching a ``.cmd`` wrapper.
+    The VBS sets the working directory and environment variables, then
+    spawns ``pythonw.exe`` with ``SW_HIDE`` (0).
+    """
+    pythonw_path = _derive_venv_pythonw(python_path)
+    venv_dir = str(Path(python_path).resolve().parent.parent)
+
+    prog_args = [pythonw_path, "-m", "hermes_cli.main"]
+    if profile_arg:
+        prog_args.extend(profile_arg.split())
+    prog_args.extend(["gateway", "run"])
+
+    # Build the Run() argument — VBS string with embedded quotes for args
+    # that contain spaces (e.g. paths with spaces in them).
+    def _vbs_quote(s: str) -> str:
+        """Escape a string for use inside a VBS string literal."""
+        return s.replace('"', '""')
+
+    run_line_parts = []
+    for arg in prog_args:
+        if " " in arg:
+            run_line_parts.append(f'"""{_vbs_quote(arg)}"""')
+        else:
+            run_line_parts.append(f'"{_vbs_quote(arg)}"')
+    run_line = " & ".join(run_line_parts)
+
+    lines = [
+        f"' {_TASK_DESCRIPTION}",
+        "Set WshShell = CreateObject(\"WScript.Shell\")",
+        "",
+        f"WshShell.CurrentDirectory = \"{_vbs_quote(working_dir)}\"",
+        "",
+        "Dim envProc",
+        "Set envProc = WshShell.Environment(\"Process\")",
+        f"envProc(\"HERMES_HOME\") = \"{_vbs_quote(hermes_home)}\"",
+        "envProc(\"PYTHONIOENCODING\") = \"utf-8\"",
+        "envProc(\"HERMES_GATEWAY_DETACHED\") = \"1\"",
+        f"envProc(\"VIRTUAL_ENV\") = \"{_vbs_quote(venv_dir)}\"",
+        "",
+        f"WshShell.Run {run_line}, 0, False",
+    ]
+
+    return "\r\n".join(lines) + "\r\n"
+
+
 def _build_gateway_cmd_script(
     python_path: str,
     working_dir: str,
@@ -343,38 +398,19 @@ def _build_gateway_cmd_script(
 ) -> str:
     """Build the ``gateway.cmd`` wrapper content (CRLF-terminated).
 
-    The script:
-      - cd's into a stable working directory
-      - exports HERMES_HOME, PYTHONIOENCODING, VIRTUAL_ENV
-      - invokes ``pythonw -m hermes_cli.main [--profile X] gateway run``
-        directly so the wrapper cmd.exe exits without a visible gateway console
+    The script delegates to a companion ``.vbs`` launcher via
+    ``wscript.exe`` so that the gateway process (``pythonw.exe``) starts
+    with no visible console window.  The VBS file is generated alongside
+    the ``.cmd`` by ``_write_task_script()``.
 
     We intentionally do NOT inline PATH overrides here — cmd.exe inherits
     the per-user PATH the Scheduled Task was created with, and forcibly
     rewriting PATH tends to break Homebrew/nvm-style installations.
     """
     lines = ["@echo off", f"rem {_TASK_DESCRIPTION}"]
-    lines.append(f"cd /d {_quote_cmd_script_arg(working_dir)}")
-    lines.append(f'set "HERMES_HOME={hermes_home}"')
-    lines.append('set "PYTHONIOENCODING=utf-8"')
-    lines.append('set "HERMES_GATEWAY_DETACHED=1"')
-    # VIRTUAL_ENV lets the gateway's own python detection find the venv
-    # if someone imports hermes_constants-based logic during startup.
-    venv_dir = str(Path(python_path).resolve().parent.parent)
-    lines.append(f'set "VIRTUAL_ENV={venv_dir}"')
-
-    pythonw_path = _derive_venv_pythonw(python_path)
-    prog_args = [pythonw_path, "-m", "hermes_cli.main"]
-    if profile_arg:
-        prog_args.extend(profile_arg.split())
-    prog_args.extend(["gateway", "run"])
-    # `pythonw.exe` is a GUI-subsystem executable: cmd.exe launches it and
-    # returns immediately, so the Scheduled Task action finishes without a
-    # visible console window. Do NOT use `start` here; that creates an extra
-    # wrapper process and made gateway lifecycle/status harder to reason about.
-    # Do NOT use `--replace` for service-managed starts; repeated /Run calls
-    # should be idempotent, not churn parent/child takeover loops.
-    lines.append(" ".join(_quote_cmd_script_arg(a) for a in prog_args))
+    # Hand off to the VBS launcher in the same directory.
+    # %~dp0 = directory of this script, %~n0 = script name without extension.
+    lines.append('wscript.exe //B //Nologo "%~dp0%~n0.vbs"')
     lines.append("exit /b 0")
     return "\r\n".join(lines) + "\r\n"
 
@@ -405,7 +441,13 @@ def _build_startup_launcher(script_path: Path) -> str:
 
 
 def _write_task_script() -> Path:
-    """Generate and write the gateway.cmd wrapper. Return its absolute path."""
+    """Generate and write the gateway wrapper scripts. Return the .cmd path.
+
+    Writes two files side by side in the gateway-service directory:
+
+    * ``<task_name>.cmd`` — thin wrapper that hands off to the VBS launcher
+    * ``<task_name>.vbs`` — VBScript launcher that runs ``pythonw.exe`` hidden
+    """
     _assert_windows()
     # Local imports to avoid circular-init at module load time.
     from hermes_cli.config import get_hermes_home
@@ -420,12 +462,21 @@ def _write_task_script() -> Path:
     hermes_home = str(Path(get_hermes_home()).resolve())
     profile_arg = _profile_arg(hermes_home)
 
-    content = _build_gateway_cmd_script(python_path, working_dir, hermes_home, profile_arg)
-    script_path = get_task_script_path()
-    tmp = script_path.with_suffix(".tmp")
-    tmp.write_text(content, encoding="utf-8", newline="")
-    tmp.replace(script_path)
-    return script_path
+    # Write the .cmd wrapper (thin — delegates to .vbs)
+    cmd_content = _build_gateway_cmd_script(python_path, working_dir, hermes_home, profile_arg)
+    cmd_path = get_task_script_path()
+    tmp = cmd_path.with_suffix(".tmp")
+    tmp.write_text(cmd_content, encoding="utf-8", newline="")
+    tmp.replace(cmd_path)
+
+    # Write the .vbs launcher (does the actual work — runs pythonw hidden)
+    vbs_content = _build_gateway_vbs_script(python_path, working_dir, hermes_home, profile_arg)
+    vbs_path = cmd_path.with_suffix(".vbs")
+    tmp_vbs = vbs_path.with_suffix(".vbs.tmp")
+    tmp_vbs.write_text(vbs_content, encoding="utf-8", newline="")
+    tmp_vbs.replace(vbs_path)
+
+    return cmd_path
 
 
 # ---------------------------------------------------------------------------
