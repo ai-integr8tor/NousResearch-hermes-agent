@@ -132,6 +132,42 @@ def _custom_provider_extra_body_for_agent(
     return fallback
 
 
+def _model_request_overrides_for_agent() -> Dict[str, Any]:
+    """Return model.request_overrides from config.yaml when present.
+
+    This is a low-level escape hatch for provider-native request fields that
+    Hermes has not promoted to first-class config yet. Explicit per-turn
+    request overrides still win over this global default.
+    """
+    try:
+        from hermes_cli.config import load_config
+
+        cfg = load_config()
+        model_cfg = cfg.get("model", {}) if isinstance(cfg, dict) else {}
+        raw = model_cfg.get("request_overrides") if isinstance(model_cfg, dict) else None
+        if isinstance(raw, dict):
+            return dict(raw)
+    except Exception:
+        pass
+    return {}
+
+
+def _merge_request_overrides(agent, additions: Dict[str, Any]) -> None:
+    if not isinstance(additions, dict) or not additions:
+        return
+    overrides = dict(getattr(agent, "request_overrides", {}) or {})
+    for key, value in additions.items():
+        if key == "extra_body" and isinstance(value, dict):
+            merged_extra_body = dict(value)
+            existing_extra_body = overrides.get("extra_body")
+            if isinstance(existing_extra_body, dict):
+                merged_extra_body.update(existing_extra_body)
+            overrides["extra_body"] = merged_extra_body
+        else:
+            overrides.setdefault(key, value)
+    agent.request_overrides = overrides
+
+
 def _merge_custom_provider_extra_body(agent, custom_providers: List[Dict[str, Any]]) -> None:
     extra_body = _custom_provider_extra_body_for_agent(
         provider=agent.provider,
@@ -142,13 +178,7 @@ def _merge_custom_provider_extra_body(agent, custom_providers: List[Dict[str, An
     if not extra_body:
         return
 
-    overrides = dict(getattr(agent, "request_overrides", {}) or {})
-    merged_extra_body = dict(extra_body)
-    existing_extra_body = overrides.get("extra_body")
-    if isinstance(existing_extra_body, dict):
-        merged_extra_body.update(existing_extra_body)
-    overrides["extra_body"] = merged_extra_body
-    agent.request_overrides = overrides
+    _merge_request_overrides(agent, {"extra_body": dict(extra_body)})
 
 
 def init_agent(
@@ -488,6 +518,7 @@ def init_agent(
     agent.reasoning_config = reasoning_config  # None = use default (medium for OpenRouter)
     agent.service_tier = service_tier
     agent.request_overrides = dict(request_overrides or {})
+    _merge_request_overrides(agent, _model_request_overrides_for_agent())
     agent.prefill_messages = prefill_messages or []  # Prefilled conversation turns
     agent._force_ascii_payload = False
     
