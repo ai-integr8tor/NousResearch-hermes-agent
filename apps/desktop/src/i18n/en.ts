@@ -608,6 +608,12 @@ export const en: Translations = {
       defaultDirDesc:
         'New sessions start in this folder unless you pick another. Leave it unset to use your home directory.',
       defaultDirUpdated: 'Default project directory updated — start a new chat (Ctrl/⌘+N) for it to take effect',
+      sidebarTitle: 'Sidebar',
+      cronInRecentsTitle: 'Show cron runs in Sessions',
+      cronInRecentsDesc:
+        'When enabled, scheduled run sessions appear in the normal Sessions list until archived. Leave this off to keep cron runs out of recents and available from Cron jobs.',
+      enabled: 'Enabled',
+      disabled: 'Disabled',
       defaultsTo: label => `Defaults to ${label}.`,
       change: 'Change',
       choose: 'Choose',

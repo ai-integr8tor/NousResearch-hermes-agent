@@ -701,6 +701,12 @@ export const zhHant = defineLocale({
       defaultDirTitle: '預設專案目錄',
       defaultDirDesc: '新工作階段預設從此資料夾開始，除非您選擇其他目錄。留空則使用您的家目錄。',
       defaultDirUpdated: '預設專案目錄已更新',
+      sidebarTitle: '側邊欄',
+      cronInRecentsTitle: '在工作階段中顯示排程執行',
+      cronInRecentsDesc:
+        '啟用後，排程工作執行會以一般工作階段顯示在工作階段清單中，直到封存。關閉則讓排程執行不佔用最近工作階段。',
+      enabled: '已啟用',
+      disabled: '已停用',
       defaultsTo: label => `預設使用 ${label}。`,
       change: '變更',
       choose: '選擇',

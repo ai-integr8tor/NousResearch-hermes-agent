@@ -727,6 +727,12 @@ export const ja = defineLocale({
       defaultDirDesc:
         '別のフォルダーを選択しない限り、新しいセッションはこのフォルダーで開始します。未設定の場合はホームディレクトリが使用されます。',
       defaultDirUpdated: 'デフォルトのプロジェクトディレクトリを更新しました',
+      sidebarTitle: 'サイドバー',
+      cronInRecentsTitle: 'Cron 実行をセッションに表示',
+      cronInRecentsDesc:
+        '有効にすると、スケジュール実行のセッションがアーカイブされるまで通常のセッション一覧に表示されます。無効の場合、Cron 実行は通常の最近のセッションから分離されます。',
+      enabled: '有効',
+      disabled: '無効',
       defaultsTo: label => `デフォルト: ${label}。`,
       change: '変更',
       choose: '選択',

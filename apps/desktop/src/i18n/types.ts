@@ -486,6 +486,11 @@ export interface Translations {
       defaultDirTitle: string
       defaultDirDesc: string
       defaultDirUpdated: string
+      sidebarTitle: string
+      cronInRecentsTitle: string
+      cronInRecentsDesc: string
+      enabled: string
+      disabled: string
       defaultsTo: (label: string) => string
       change: string
       choose: string

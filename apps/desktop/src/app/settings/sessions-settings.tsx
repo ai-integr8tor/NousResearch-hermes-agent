@@ -1,3 +1,4 @@
+import { useStore } from '@nanostores/react'
 import { useCallback, useEffect, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
@@ -7,6 +8,7 @@ import { useI18n } from '@/i18n'
 import { sessionTitle } from '@/lib/chat-runtime'
 import { triggerHaptic } from '@/lib/haptics'
 import { Archive, ArchiveOff, FolderOpen, Loader2, Trash2 } from '@/lib/icons'
+import { $sidebarCronSessionsInRecents, setSidebarCronSessionsInRecents } from '@/store/layout'
 import { notify, notifyError } from '@/store/notifications'
 import { applyConfiguredDefaultProjectDir, ensureDefaultWorkspaceCwd, setSessions } from '@/store/session'
 import type { SessionInfo } from '@/types/hermes'
@@ -38,6 +40,7 @@ export function SessionsSettings() {
   const [sessions, setLocalSessions] = useState<SessionInfo[]>([])
   const [loading, setLoading] = useState(true)
   const [busyId, setBusyId] = useState<string | null>(null)
+  const cronSessionsInRecents = useStore($sidebarCronSessionsInRecents)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -104,6 +107,30 @@ export function SessionsSettings() {
   return (
     <SettingsContent>
       <DefaultProjectDirSetting />
+
+      <div className="mb-6">
+        <SectionHeading icon={Archive} title={s.sidebarTitle} />
+        <div className="mt-2 divide-y divide-(--ui-stroke-tertiary)">
+          <ListRow
+            action={
+              <label className="inline-flex cursor-pointer items-center gap-2 text-[length:var(--conversation-caption-font-size)] text-(--ui-text-secondary)">
+                <input
+                  checked={cronSessionsInRecents}
+                  className="size-4 accent-(--dt-primary)"
+                  onChange={event => {
+                    triggerHaptic('selection')
+                    setSidebarCronSessionsInRecents(event.target.checked)
+                  }}
+                  type="checkbox"
+                />
+                <span>{cronSessionsInRecents ? s.enabled : s.disabled}</span>
+              </label>
+            }
+            description={s.cronInRecentsDesc}
+            title={s.cronInRecentsTitle}
+          />
+        </div>
+      </div>
 
       <SectionHeading
         icon={Archive}

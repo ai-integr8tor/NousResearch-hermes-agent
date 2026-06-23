@@ -798,6 +798,12 @@ export const zh: Translations = {
       defaultDirTitle: '默认项目目录',
       defaultDirDesc: '新会话默认从此文件夹开始，除非你选择其他目录。留空则使用你的 home 目录。',
       defaultDirUpdated: '默认项目目录已更新',
+      sidebarTitle: '侧边栏',
+      cronInRecentsTitle: '在会话中显示定时运行',
+      cronInRecentsDesc:
+        '启用后，定时任务运行会作为普通会话显示在会话列表中，直到归档。关闭则让定时运行不占用最近会话。',
+      enabled: '已启用',
+      disabled: '已禁用',
       defaultsTo: label => `默认使用 ${label}。`,
       change: '更改',
       choose: '选择',

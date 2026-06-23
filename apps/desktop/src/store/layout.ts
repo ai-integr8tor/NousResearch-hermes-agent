@@ -23,6 +23,7 @@ export const SIDEBAR_SESSIONS_PAGE_SIZE = 50
 const SIDEBAR_PINNED_STORAGE_KEY = 'hermes.desktop.pinnedSessions'
 const SIDEBAR_AGENTS_GROUPED_STORAGE_KEY = 'hermes.desktop.agentsGroupedByWorkspace'
 const SIDEBAR_CRON_OPEN_STORAGE_KEY = 'hermes.desktop.sidebarCronOpen'
+const SIDEBAR_CRON_IN_RECENTS_STORAGE_KEY = 'hermes.desktop.sidebarCronSessionsInRecents'
 const SIDEBAR_MESSAGING_OPEN_STORAGE_KEY = 'hermes.desktop.sidebarMessagingOpen'
 const SIDEBAR_SESSION_ORDER_STORAGE_KEY = 'hermes.desktop.sessionOrder'
 const SIDEBAR_SESSION_ORDER_MANUAL_STORAGE_KEY = 'hermes.desktop.sessionOrder.manual'
@@ -73,6 +74,10 @@ export const $sidebarPinsOpen = atom(true)
 // rows on `sidebarOpen || this`.
 export const $sidebarOverlayMounted = atom(false)
 export const $sidebarRecentsOpen = atom(true)
+// Optional inbox mode for users who triage scheduled work through Sessions.
+// Off by default so bursty cron jobs keep using the bounded Cron sessions
+// section and do not starve ordinary conversations from the recents page.
+export const $sidebarCronSessionsInRecents = atom(storedBoolean(SIDEBAR_CRON_IN_RECENTS_STORAGE_KEY, false))
 // Cron-job sessions live in their own section below recents, collapsed by
 // default (it only renders at all when cron sessions exist) so the
 // scheduler's `[IMPORTANT: …]` first-message previews don't spam recents.
@@ -89,6 +94,7 @@ export const $isSidebarResizing = atom(false)
 export const $sessionsLimit = atom(SIDEBAR_SESSIONS_PAGE_SIZE)
 
 $pinnedSessionIds.subscribe(ids => persistStringArray(SIDEBAR_PINNED_STORAGE_KEY, [...ids]))
+$sidebarCronSessionsInRecents.subscribe(enabled => persistBoolean(SIDEBAR_CRON_IN_RECENTS_STORAGE_KEY, enabled))
 $sidebarCronOpen.subscribe(open => persistBoolean(SIDEBAR_CRON_OPEN_STORAGE_KEY, open))
 $sidebarMessagingOpenIds.subscribe(ids => persistStringArray(SIDEBAR_MESSAGING_OPEN_STORAGE_KEY, [...ids]))
 $sidebarSessionOrderIds.subscribe(ids => persistStringArray(SIDEBAR_SESSION_ORDER_STORAGE_KEY, [...ids]))
@@ -151,6 +157,10 @@ export function setSidebarOverlayMounted(mounted: boolean) {
 
 export function setSidebarRecentsOpen(open: boolean) {
   $sidebarRecentsOpen.set(open)
+}
+
+export function setSidebarCronSessionsInRecents(enabled: boolean) {
+  $sidebarCronSessionsInRecents.set(enabled)
 }
 
 export function setSidebarCronOpen(open: boolean) {

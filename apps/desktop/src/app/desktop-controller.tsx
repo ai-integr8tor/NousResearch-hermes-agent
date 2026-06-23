@@ -28,6 +28,7 @@ import {
   $panesFlipped,
   $pinnedSessionIds,
   $sessionsLimit,
+  $sidebarCronSessionsInRecents,
   bumpSessionsLimit,
   FILE_BROWSER_DEFAULT_WIDTH,
   FILE_BROWSER_MAX_WIDTH,
@@ -140,18 +141,15 @@ const ProfilesView = lazy(async () => ({ default: (await import('./profiles')).P
 const SettingsView = lazy(async () => ({ default: (await import('./settings')).SettingsView }))
 const SkillsView = lazy(async () => ({ default: (await import('./skills')).SkillsView }))
 
-// Latest cron-job sessions surfaced in the collapsed "Cron jobs" section. The
-// Cron sessions are written by a background scheduler tick (the desktop
-// backend), so no user action signals the UI. Poll the bounded cron list on
-// this cadence while the app is open + visible so new runs surface promptly
-// instead of waiting for the next user-triggered refreshSessions().
+// Latest cron-job sessions surface in the collapsed "Cron sessions" section
+// unless the user opts into treating cron runs as normal Sessions inbox rows. The
+// scheduler writes runs in the background, so no user action signals the UI.
+// Poll on this cadence while the app is visible so new runs surface promptly.
 const CRON_POLL_INTERVAL_MS = 30_000
-// The recents list is local-only: cron rows have their own section, and each
-// messaging platform (telegram, discord, …) is fetched separately into its own
-// self-managed sidebar section (refreshMessagingSessions). Excluding both here
-// keeps "Load more" paging through interactive local chats instead of
-// interleaving gateway threads that bury them.
-const SIDEBAR_EXCLUDED_SOURCES = ['cron', 'subagent', 'tool', ...MESSAGING_SESSION_SOURCE_IDS]
+// The recents list excludes implementation-only rows and messaging platforms,
+// which render in their own sections. Cron rows are excluded only when the user
+// has not opted into showing scheduled runs in the Sessions inbox.
+const SIDEBAR_HIDDEN_SOURCES = ['subagent', 'tool']
 // The messaging slice is the inverse: drop cron + every local source so only
 // external-platform conversations remain, then split per platform in the UI.
 const MESSAGING_EXCLUDED_SOURCES = ['cron', ...LOCAL_SESSION_SOURCE_IDS]
@@ -204,6 +202,7 @@ export function DesktopController() {
   const gatewayState = useStore($gatewayState)
   const activeSessionId = useStore($activeSessionId)
   const currentCwd = useStore($currentCwd)
+  const cronSessionsInRecents = useStore($sidebarCronSessionsInRecents)
   const freshDraftReady = useStore($freshDraftReady)
   const resumeFailedSessionId = useStore($resumeFailedSessionId)
   const resumeExhaustedSessionId = useStore($resumeExhaustedSessionId)
@@ -356,11 +355,16 @@ export function DesktopController() {
     }
   }, [])
 
-  // Cron-job sessions as their own list (latest N). Independent of the recents
-  // page so the two never compete for slots. Cheap + bounded. Kept (even though
-  // the sidebar now lists cron *jobs*, not run sessions) so a pinned cron run
-  // still resolves into the Pinned section via sessionByAnyId.
+  // Cron-job sessions as their own list (latest N) unless the user opts into
+  // surfacing them in the normal Sessions list. Independent of the recents page
+  // by default so the two never compete for slots. Cheap + bounded.
   const refreshCronSessions = useCallback(async () => {
+    if (cronSessionsInRecents) {
+      setCronSessions([])
+
+      return
+    }
+
     try {
       const { sessions } = await listAllProfileSessions(CRON_SECTION_LIMIT, 1, 'exclude', 'recent', 'all', {
         source: 'cron'
@@ -370,7 +374,7 @@ export function DesktopController() {
     } catch {
       // Non-fatal: the cron section just stays empty/stale.
     }
-  }, [])
+  }, [cronSessionsInRecents])
 
   // Messaging-platform sessions as their own slice, fetched separately from
   // local recents so each platform renders a self-managed section and never
@@ -444,16 +448,22 @@ export function DesktopController() {
       // clutter the sidebar.
       // Unified cross-profile list (served read-only off each profile's
       // state.db; no per-profile backend is spawned). Single-profile users get
-      // the same rows tagged profile="default". Cron sessions are excluded here
-      // and fetched separately (refreshCronSessions) so the scheduler's
-      // always-newest rows can't consume the recents page budget.
+      // the same rows tagged profile="default". Cron sessions stay in their own
+      // bounded section by default, but users can opt into showing scheduled runs
+      // in Sessions if they triage cron output there.
       // Scope the fetch to the active profile (not always 'all') so a profile
       // with few recent sessions isn't windowed out of the cross-profile
       // recency page — the empty-history-on-profile-switch bug.
       const sessionProfile = profileScope === ALL_PROFILES ? 'all' : profileScope
 
+      const excludeSources = [
+        ...SIDEBAR_HIDDEN_SOURCES,
+        ...(cronSessionsInRecents ? [] : ['cron']),
+        ...MESSAGING_SESSION_SOURCE_IDS
+      ]
+
       const result = await listAllProfileSessions(limit, 1, 'exclude', 'recent', sessionProfile, {
-        excludeSources: SIDEBAR_EXCLUDED_SOURCES
+        excludeSources
       })
 
       if (refreshSessionsRequestRef.current === requestId) {
@@ -470,7 +480,7 @@ export function DesktopController() {
     void refreshCronSessions()
     void refreshCronJobs()
     void refreshMessagingSessions()
-  }, [profileScope, refreshCronSessions, refreshCronJobs, refreshMessagingSessions])
+  }, [cronSessionsInRecents, profileScope, refreshCronSessions, refreshCronJobs, refreshMessagingSessions])
 
   const loadMoreSessions = useCallback(() => {
     bumpSessionsLimit()
@@ -495,8 +505,14 @@ export function DesktopController() {
     const inKey = (s: SessionInfo) => normalizeProfileKey(s.profile) === key
     const loaded = $sessions.get().filter(inKey).length
 
+    const excludeSources = [
+      ...SIDEBAR_HIDDEN_SOURCES,
+      ...(cronSessionsInRecents ? [] : ['cron']),
+      ...MESSAGING_SESSION_SOURCE_IDS
+    ]
+
     const result = await listAllProfileSessions(loaded + SIDEBAR_SESSIONS_PAGE_SIZE, 1, 'exclude', 'recent', key, {
-      excludeSources: SIDEBAR_EXCLUDED_SOURCES
+      excludeSources
     })
 
     const keep = sessionsToKeep(key)
@@ -508,7 +524,7 @@ export function DesktopController() {
 
     const total = result.profile_totals?.[key] ?? result.total ?? result.sessions.length
     setSessionProfileTotals(prev => ({ ...prev, [key]: Math.max(total, result.sessions.length) }))
-  }, [])
+  }, [cronSessionsInRecents])
 
   const toggleSelectedPin = useCallback(() => {
     const sessionId = $selectedStoredSessionId.get()
@@ -861,9 +877,9 @@ export function DesktopController() {
     }
   }, [gatewayState, refreshCurrentModel, refreshSessions])
 
-  // Keep the cron jobs section live without a user action: the scheduler ticks
-  // in the background (advancing next-run/state and creating runs), so poll the
-  // job list on an interval (and on tab re-focus) while connected.
+  // Keep the cron jobs section and scheduler-created run sessions live without a
+  // user action. The scheduler ticks in the background, so poll the job list and
+  // whichever session surface is active on an interval while connected.
   useEffect(() => {
     if (gatewayState !== 'open') {
       return
@@ -872,6 +888,12 @@ export function DesktopController() {
     const tick = () => {
       if (document.visibilityState === 'visible') {
         void refreshCronJobs()
+
+        if (cronSessionsInRecents) {
+          void refreshSessions().catch(() => undefined)
+        } else {
+          void refreshCronSessions()
+        }
       }
     }
 
@@ -882,7 +904,7 @@ export function DesktopController() {
       window.clearInterval(intervalId)
       document.removeEventListener('visibilitychange', tick)
     }
-  }, [gatewayState, refreshCronJobs])
+  }, [cronSessionsInRecents, gatewayState, refreshCronJobs, refreshCronSessions, refreshSessions])
 
   useEffect(() => {
     if (gatewayState === 'open' && !activeSessionId && freshDraftReady) {
