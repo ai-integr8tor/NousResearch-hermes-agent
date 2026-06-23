@@ -5608,7 +5608,7 @@ class _ImmediateThread:
 
 
 def test_prompt_submit_auto_titles_session_on_complete(monkeypatch):
-    """maybe_auto_title is called after a successful (complete) prompt."""
+    """maybe_auto_title is called after a successful prompt and can refresh UI."""
 
     class _Agent:
         def run_conversation(
@@ -5624,7 +5624,8 @@ def test_prompt_submit_auto_titles_session_on_complete(monkeypatch):
 
     server._sessions["sid"] = _session(agent=_Agent())
     monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
-    monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: None)
+    emitted = []
+    monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: emitted.append(args))
     monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
     monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
     monkeypatch.setattr(server, "_get_db", lambda: None)
@@ -5643,6 +5644,13 @@ def test_prompt_submit_auto_titles_session_on_complete(monkeypatch):
     assert args[1] == "session-key"
     assert args[2] == "Tell me about Rome"
     assert args[3] == "Rome was founded in 753 BC."
+    callback = mock_title.call_args.kwargs["title_callback"]
+    callback("Rome Origins")
+    assert emitted[-1] == (
+        "session.title.updated",
+        "sid",
+        {"stored_session_id": "session-key", "title": "Rome Origins"},
+    )
 
 
 def test_prompt_submit_skips_auto_title_when_interrupted(monkeypatch):
