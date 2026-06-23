@@ -507,6 +507,26 @@ def get_all_skills_dirs() -> List[Path]:
     return dirs
 
 
+def is_external_skill_dir(skill_path: Path) -> bool:
+    """Return True when *skill_path* is inside any configured external skills directory.
+
+    Uses ``get_external_skills_dirs()`` to resolve the current external dirs
+    and checks whether the resolved *skill_path* is a subdirectory of any of them.
+    """
+    try:
+        resolved = skill_path.resolve()
+    except OSError:
+        resolved = skill_path
+
+    for ext_dir in get_external_skills_dirs():
+        try:
+            resolved.relative_to(ext_dir.resolve())
+            return True
+        except (ValueError, OSError):
+            continue
+    return False
+
+
 # ── Condition extraction ──────────────────────────────────────────────────
 
 
