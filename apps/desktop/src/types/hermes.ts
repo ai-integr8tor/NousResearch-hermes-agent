@@ -213,6 +213,7 @@ export interface HermesConfig {
     service_tier?: string
   }
   display?: {
+    background_process_notifications?: boolean | string
     personality?: string
     skin?: string
   }
