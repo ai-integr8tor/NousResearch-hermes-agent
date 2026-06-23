@@ -1213,8 +1213,14 @@ def get_running_pid(
     resolved_lock_path = _get_gateway_lock_path(resolved_pid_path)
     lock_active = is_gateway_runtime_lock_active(resolved_lock_path)
     if not lock_active:
-        _cleanup_invalid_pid_path(resolved_pid_path, cleanup_stale=cleanup_stale)
-        return None
+        # Only clean up when the lock file exists but is genuinely unlocked.
+        # When the lock file is absent (e.g. virtiofs unlinked the directory
+        # entry behind the gateway's open FD, or a user/CI deleted it while
+        # the gateway is still running), fall through to the PID-file check
+        # so we don't falsely report the gateway as down.
+        if resolved_lock_path.exists():
+            _cleanup_invalid_pid_path(resolved_pid_path, cleanup_stale=cleanup_stale)
+            return None
 
     primary_record = _read_pid_record(resolved_pid_path)
     fallback_record = _read_gateway_lock_record(resolved_lock_path)

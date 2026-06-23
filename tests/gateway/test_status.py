@@ -146,6 +146,62 @@ class TestGatewayPidState:
         assert status.get_running_pid(pid_path, cleanup_stale=False) == os.getpid()
         assert pid_path.exists()
 
+    def test_get_running_pid_falls_through_to_pid_when_lock_file_missing(self, tmp_path, monkeypatch):
+        """virtiofs can unlink the lock file while the gateway still holds the FD.
+
+        When the lock file is absent, ``get_running_pid`` must fall through
+        to the PID-file check instead of immediately returning None.
+        """
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        pid_path = tmp_path / "gateway.pid"
+        pid_path.write_text(json.dumps({
+            "pid": os.getpid(),
+            "kind": "hermes-gateway",
+            "argv": ["python", "-m", "hermes_cli.main", "gateway"],
+            "start_time": 123,
+        }))
+
+        monkeypatch.setattr(status.os, "kill", lambda pid, sig: None)
+        monkeypatch.setattr(status, "_get_process_start_time", lambda pid: 123)
+        monkeypatch.setattr(status, "_read_process_cmdline", lambda pid: None)
+        # Simulate missing lock file (virtiofs unlinked it)
+        monkeypatch.setattr(
+            status, "is_gateway_runtime_lock_active", lambda lock_path=None: False
+        )
+
+        assert status.get_running_pid(pid_path) == os.getpid()
+        # PID file must NOT be cleaned up — the gateway is still running.
+        assert pid_path.exists()
+
+    def test_get_running_pid_cleans_stale_when_lock_file_present_but_unlocked(self, tmp_path, monkeypatch):
+        """Lock file exists but is not held — genuine stale state.
+
+        The PID file should be cleaned up (original behavior preserved).
+        """
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        pid_path = tmp_path / "gateway.pid"
+        dead_pid = 999999
+        pid_path.write_text(json.dumps({
+            "pid": dead_pid,
+            "kind": "hermes-gateway",
+            "argv": ["python", "-m", "hermes_cli.main", "gateway"],
+            "start_time": 111,
+        }))
+
+        lock_path = tmp_path / "gateway.lock"
+        lock_path.write_text("{}")
+
+        def _dead_process(pid, sig):
+            raise ProcessLookupError
+
+        monkeypatch.setattr(status.os, "kill", _dead_process)
+        monkeypatch.setattr(
+            status, "is_gateway_runtime_lock_active", lambda lock_path=None: False
+        )
+
+        assert status.get_running_pid(pid_path) is None
+        assert not pid_path.exists()
+
     def test_runtime_lock_claims_and_releases_liveness(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
@@ -157,7 +213,9 @@ class TestGatewayPidState:
 
         assert status.is_gateway_runtime_lock_active() is False
 
-    def test_get_running_pid_treats_pid_file_as_stale_without_runtime_lock(self, tmp_path, monkeypatch):
+    def test_get_running_pid_falls_through_when_lock_file_missing(self, tmp_path, monkeypatch):
+        """When the lock file is absent (e.g. deleted or virtiofs-unlinked),
+        ``get_running_pid`` must fall through to the PID-file check."""
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         pid_path = tmp_path / "gateway.pid"
         pid_path.write_text(json.dumps({
@@ -171,8 +229,9 @@ class TestGatewayPidState:
         monkeypatch.setattr(status, "_get_process_start_time", lambda pid: 123)
         monkeypatch.setattr(status, "_read_process_cmdline", lambda pid: None)
 
-        assert status.get_running_pid() is None
-        assert not pid_path.exists()
+        # Lock file missing + live PID with gateway metadata → gateway found.
+        assert status.get_running_pid() == os.getpid()
+        assert pid_path.exists()
 
     def test_get_running_pid_cleans_stale_metadata_from_dead_foreign_pid(self, tmp_path, monkeypatch):
         """Stale PID file from a *different* PID (crashed process) must still be cleaned.
