@@ -6971,12 +6971,29 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
                 try:
                     from agent.title_generator import maybe_auto_title
 
+                    _effective_sid = session.get("session_key") or sid
+
+                    def _title_generated(title: str, _sid=_effective_sid) -> None:
+                        """Notify connected clients when title is auto-generated."""
+                        try:
+                            _emit("session.info", _sid, _session_info(agent, session))
+                        except Exception:
+                            pass
+
                     maybe_auto_title(
                         _get_db(),
-                        session.get("session_key") or sid,
+                        _effective_sid,
                         text,
                         raw,
                         session.get("history", []),
+                        title_callback=_title_generated,
+                        main_runtime={
+                            "model": getattr(agent, "model", None),
+                            "provider": getattr(agent, "provider", None),
+                            "base_url": getattr(agent, "base_url", None),
+                            "api_key": getattr(agent, "api_key", None),
+                            "api_mode": getattr(agent, "api_mode", None),
+                        } if agent else None,
                     )
                 except Exception:
                     pass
