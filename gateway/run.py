@@ -32,6 +32,7 @@ import logging
 import os
 import re
 import shlex
+import faulthandler
 import site
 import sys
 import signal
@@ -227,6 +228,7 @@ def _is_transient_network_error(exc: BaseException) -> bool:
     transient_class_names = {
         "TimedOut",
         "NetworkError",
+        "NameResolutionError",
         "ReadError",
         "WriteError",
         "ConnectError",
@@ -284,6 +286,17 @@ def _gateway_loop_exception_handler(
         )
         return
     # Fall back to the default handler for anything we don't recognise.
+    # On Windows, asyncio's ProactorEventLoop can raise
+    # OSError [WinError 10022] when cleaning up a socket that
+    # was already torn down by an unclosed WebSocket frame.
+    # This is harmless — swallow it to keep the event loop healthy.
+    if isinstance(exc, OSError) and getattr(exc, "winerror", None) == 10022:
+        logger.warning(
+            "Gateway swallowed asyncio transport cleanup "
+            "OSError [WinError 10022]: %s", exc,
+            exc_info=(type(exc), exc, exc.__traceback__),
+        )
+        return
     loop.default_exception_handler(context)
 
 
@@ -17317,6 +17330,10 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
                  Useful for systemd services to avoid restart-loop deadlocks
                  when the previous process hasn't fully exited yet.
     """
+    # Enable faulthandler so C-level crashes (segfaults in native
+    # extensions, asyncio transport corruption, etc.) produce a
+    # crash dump instead of the process disappearing silently.
+    faulthandler.enable()
     # ── Duplicate-instance guard ──────────────────────────────────────
     # Prevent two gateways from running under the same HERMES_HOME.
     # The PID file is scoped to HERMES_HOME, so future multi-profile
