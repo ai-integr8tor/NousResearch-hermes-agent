@@ -141,6 +141,8 @@ def _popen_bash(
     Backends with special Popen needs (e.g. local's ``preexec_fn``) can bypass
     this and call :func:`_pipe_stdin` directly.
     """
+    kwargs.setdefault("encoding", "utf-8")
+    kwargs.setdefault("errors", "replace")
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
