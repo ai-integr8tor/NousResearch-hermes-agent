@@ -741,6 +741,13 @@ platform_toolsets:
 #     extra:
 #       disable_link_previews: false  # Set true to suppress Telegram URL previews in bot messages
 #       rich_messages: false          # Bot API 10.1 rich messages (tables/task lists/details/math); default false for copyable legacy MarkdownV2, set true to opt in
+#   slack:
+#     reply_to_mode: "first"  # off | first | all
+#     extra:
+#       reply_in_thread: true         # Reply in a thread (default: true)
+#       channel_context: false        # Seed first-turn top-level channel messages with recent history (default: false)
+#       channel_context_limit: 3      # How many recent messages to include (default: 3, clamped 1-50)
+#       channel_context_ttl: 10       # Cache window per channel in seconds; bounds API calls (default: 10; 0 = off)
 #
 # Discord-specific settings (config.yaml top-level, not under platforms:):
 #

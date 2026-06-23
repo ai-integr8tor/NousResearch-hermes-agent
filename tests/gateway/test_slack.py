@@ -2908,6 +2908,299 @@ class TestThreadReplyHandling:
         adapter.handle_message.assert_not_called()
 
 
+class TestSlackNearbyChannelContext:
+    """Top-level deictic references should recover a small nearby context window."""
+
+    @pytest.mark.asyncio
+    async def test_top_level_reference_fetches_nearby_context(self, adapter):
+        adapter._team_bot_user_ids = {"T_TEAM": "U_BOT"}
+        adapter._app.client.conversations_history = AsyncMock(return_value={
+            "messages": [
+                {
+                    "ts": "123.455",
+                    "user": "U_REPORTER",
+                    "text": "Bug report: worker pool exhausted after retries spike",
+                }
+            ]
+        })
+
+        event = {
+            "text": "<@U_BOT> please identify the root cause of this bug report",
+            "user": "U_USER",
+            "channel": "C123",
+            "channel_type": "channel",
+            "ts": "123.456",
+            "team": "T_TEAM",
+        }
+
+        async def _name_lookup(user_id, chat_id=None):
+            return {
+                "U_REPORTER": "Baxter Black",
+                "U_USER": "Alice",
+            }.get(user_id, user_id)
+
+        with patch.object(adapter, "_resolve_user_name", new=AsyncMock(side_effect=_name_lookup)):
+            await adapter._handle_slack_message(event)
+
+        adapter._app.client.conversations_history.assert_awaited_once_with(
+            channel="C123",
+            latest="123.456",
+            inclusive=False,
+            limit=3,
+        )
+        msg_event = adapter.handle_message.call_args[0][0]
+        assert "[Slack nearby context" in msg_event.text
+        assert "Baxter Black: Bug report: worker pool exhausted after retries spike" in msg_event.text
+        assert "<@U_BOT>" not in msg_event.text
+        assert "please identify the root cause of this bug report" in msg_event.text
+
+    @pytest.mark.asyncio
+    async def test_nearby_context_permission_failure_is_surfaced(self, adapter):
+        adapter._team_bot_user_ids = {"T_TEAM": "U_BOT"}
+
+        class _SlackHistoryError(Exception):
+            def __init__(self):
+                super().__init__("missing_scope")
+                self.response = {
+                    "error": "missing_scope",
+                    "needed": "channels:history",
+                    "provided": "chat:write",
+                }
+
+        adapter._app.client.conversations_history = AsyncMock(side_effect=_SlackHistoryError())
+
+        event = {
+            "text": "<@U_BOT> please identify the root cause of this bug report",
+            "user": "U_USER",
+            "channel": "C123",
+            "channel_type": "channel",
+            "ts": "123.456",
+            "team": "T_TEAM",
+        }
+
+        with patch.object(adapter, "_resolve_user_name", new=AsyncMock(return_value="Alice")):
+            await adapter._handle_slack_message(event)
+
+        msg_event = adapter.handle_message.call_args[0][0]
+        assert msg_event.text.startswith(
+            "[Slack nearby context fetch failed: missing channels:history permission]"
+        )
+        assert "please identify the root cause of this bug report" in msg_event.text
+
+    @pytest.mark.asyncio
+    async def test_thread_reply_still_uses_thread_context_only(self, adapter):
+        adapter._team_bot_user_ids = {"T_TEAM": "U_BOT"}
+        adapter._app.client.conversations_replies = AsyncMock(return_value={
+            "messages": [
+                {"ts": "123.000", "user": "U_REPORTER", "text": "Bug report: thread parent"},
+                {"ts": "123.456", "user": "U_USER", "text": "<@U_BOT> please fix this bug report"},
+            ]
+        })
+        adapter._app.client.conversations_history = AsyncMock()
+
+        event = {
+            "text": "<@U_BOT> please fix this bug report",
+            "user": "U_USER",
+            "channel": "C123",
+            "channel_type": "channel",
+            "ts": "123.456",
+            "thread_ts": "123.000",
+            "team": "T_TEAM",
+        }
+
+        async def _name_lookup(user_id, chat_id=None):
+            return {
+                "U_REPORTER": "Baxter Black",
+                "U_USER": "Alice",
+            }.get(user_id, user_id)
+
+        with patch.object(adapter, "_resolve_user_name", new=AsyncMock(side_effect=_name_lookup)):
+            await adapter._handle_slack_message(event)
+
+        adapter._app.client.conversations_replies.assert_awaited_once()
+        adapter._app.client.conversations_history.assert_not_called()
+        msg_event = adapter.handle_message.call_args[0][0]
+        assert "[Thread context" in msg_event.text
+        assert "[Slack nearby context" not in msg_event.text
+
+    @pytest.mark.asyncio
+    async def test_channel_context_disabled_skips_non_deictic(self, adapter):
+        """Default (opt-in off): a top-level message with no deictic cue and
+        no shared/forwarded payload does not trigger a nearby-context fetch."""
+        adapter._team_bot_user_ids = {"T_TEAM": "U_BOT"}
+        adapter._app.client.conversations_history = AsyncMock()
+
+        event = {
+            "text": "<@U_BOT> do thing 2 in the same way as you did thing 1",
+            "user": "U_USER",
+            "channel": "C123",
+            "channel_type": "channel",
+            "ts": "123.456",
+            "team": "T_TEAM",
+        }
+
+        with patch.object(adapter, "_resolve_user_name", new=AsyncMock(return_value="Alice")):
+            await adapter._handle_slack_message(event)
+
+        adapter._app.client.conversations_history.assert_not_called()
+        msg_event = adapter.handle_message.call_args[0][0]
+        assert "[Slack nearby context" not in msg_event.text
+
+    @pytest.mark.asyncio
+    async def test_channel_context_enabled_seeds_non_deictic(self, adapter):
+        """With channel_context enabled, a non-deictic top-level follow-up is
+        seeded with recent channel history for cross-message continuity."""
+        adapter.config.extra["channel_context"] = True
+        adapter._team_bot_user_ids = {"T_TEAM": "U_BOT"}
+        adapter._app.client.conversations_history = AsyncMock(return_value={
+            "messages": [
+                {"ts": "123.455", "user": "U_USER", "text": "thing 1: rename the staging bucket"},
+            ]
+        })
+
+        event = {
+            "text": "<@U_BOT> do thing 2 in the same way as you did thing 1",
+            "user": "U_USER",
+            "channel": "C123",
+            "channel_type": "channel",
+            "ts": "123.456",
+            "team": "T_TEAM",
+        }
+
+        async def _name_lookup(user_id, chat_id=None):
+            return {"U_USER": "Alice"}.get(user_id, user_id)
+
+        with patch.object(adapter, "_resolve_user_name", new=AsyncMock(side_effect=_name_lookup)):
+            await adapter._handle_slack_message(event)
+
+        adapter._app.client.conversations_history.assert_awaited_once_with(
+            channel="C123",
+            latest="123.456",
+            inclusive=False,
+            limit=3,
+        )
+        msg_event = adapter.handle_message.call_args[0][0]
+        assert "[Slack nearby context" in msg_event.text
+        assert "Alice: thing 1: rename the staging bucket" in msg_event.text
+        assert "do thing 2 in the same way as you did thing 1" in msg_event.text
+
+    @pytest.mark.asyncio
+    async def test_channel_context_limit_override(self, adapter):
+        """channel_context_limit widens the fetch window (clamped to 1-50)."""
+        adapter.config.extra["channel_context"] = True
+        adapter.config.extra["channel_context_limit"] = 8
+        adapter._team_bot_user_ids = {"T_TEAM": "U_BOT"}
+        adapter._app.client.conversations_history = AsyncMock(return_value={"messages": []})
+
+        event = {
+            "text": "<@U_BOT> continue where we left off",
+            "user": "U_USER",
+            "channel": "C123",
+            "channel_type": "channel",
+            "ts": "123.456",
+            "team": "T_TEAM",
+        }
+
+        with patch.object(adapter, "_resolve_user_name", new=AsyncMock(return_value="Alice")):
+            await adapter._handle_slack_message(event)
+
+        adapter._app.client.conversations_history.assert_awaited_once_with(
+            channel="C123",
+            latest="123.456",
+            inclusive=False,
+            limit=8,
+        )
+
+    @pytest.mark.asyncio
+    async def test_channel_context_caches_per_channel(self, adapter):
+        """With channel_context on, a second first-turn message in the same
+        channel within the TTL is served from cache — one API call, not two."""
+        adapter.config.extra["channel_context"] = True
+        adapter._team_bot_user_ids = {"T_TEAM": "U_BOT"}
+        adapter._app.client.conversations_history = AsyncMock(return_value={
+            "messages": [
+                {"ts": "199.000", "user": "U_USER", "text": "earlier channel message"},
+            ]
+        })
+
+        def _event(ts):
+            return {
+                "text": "<@U_BOT> do the task",
+                "user": "U_USER",
+                "channel": "C123",
+                "channel_type": "channel",
+                "ts": ts,
+                "team": "T_TEAM",
+            }
+
+        with patch.object(adapter, "_resolve_user_name", new=AsyncMock(return_value="Alice")):
+            await adapter._handle_slack_message(_event("200.001"))
+            await adapter._handle_slack_message(_event("200.002"))
+
+        # One conversations.history call despite two first-turn messages...
+        adapter._app.client.conversations_history.assert_awaited_once()
+        # ...and both messages still receive the (cached) nearby context.
+        assert adapter.handle_message.call_count == 2
+        for call in adapter.handle_message.call_args_list:
+            assert "[Slack nearby context" in call.args[0].text
+            assert "Alice: earlier channel message" in call.args[0].text
+
+    @pytest.mark.asyncio
+    async def test_deictic_path_not_cached_when_channel_context_off(self, adapter):
+        """With channel_context disabled, the deictic path is unchanged from
+        #32346: each deictic message fetches (no per-channel caching)."""
+        adapter._team_bot_user_ids = {"T_TEAM": "U_BOT"}
+        adapter._app.client.conversations_history = AsyncMock(return_value={
+            "messages": [
+                {"ts": "199.000", "user": "U_USER", "text": "Bug report: disk full"},
+            ]
+        })
+
+        def _event(ts):
+            return {
+                "text": "<@U_BOT> fix this bug report",
+                "user": "U_USER",
+                "channel": "C123",
+                "channel_type": "channel",
+                "ts": ts,
+                "team": "T_TEAM",
+            }
+
+        with patch.object(adapter, "_resolve_user_name", new=AsyncMock(return_value="Alice")):
+            await adapter._handle_slack_message(_event("200.001"))
+            await adapter._handle_slack_message(_event("200.002"))
+
+        assert adapter._app.client.conversations_history.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_channel_context_ttl_zero_disables_cache(self, adapter):
+        """channel_context_ttl=0 forces a fresh fetch on every first-turn message."""
+        adapter.config.extra["channel_context"] = True
+        adapter.config.extra["channel_context_ttl"] = 0
+        adapter._team_bot_user_ids = {"T_TEAM": "U_BOT"}
+        adapter._app.client.conversations_history = AsyncMock(return_value={
+            "messages": [
+                {"ts": "199.000", "user": "U_USER", "text": "earlier channel message"},
+            ]
+        })
+
+        def _event(ts):
+            return {
+                "text": "<@U_BOT> do the task",
+                "user": "U_USER",
+                "channel": "C123",
+                "channel_type": "channel",
+                "ts": ts,
+                "team": "T_TEAM",
+            }
+
+        with patch.object(adapter, "_resolve_user_name", new=AsyncMock(return_value="Alice")):
+            await adapter._handle_slack_message(_event("200.001"))
+            await adapter._handle_slack_message(_event("200.002"))
+
+        assert adapter._app.client.conversations_history.await_count == 2
+
+
 # ---------------------------------------------------------------------------
 # TestAssistantThreadLifecycle
 # ---------------------------------------------------------------------------
