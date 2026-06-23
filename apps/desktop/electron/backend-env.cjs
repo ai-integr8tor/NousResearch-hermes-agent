@@ -91,6 +91,7 @@ function buildDesktopBackendEnv({
 
   return {
     PYTHONPATH: appendUniquePathEntries([...pythonPathEntries, currentPythonPath], { delimiter }),
+    PYTHONUTF8: '1',
     [key]: buildDesktopBackendPath({
       hermesHome,
       venvRoot,
