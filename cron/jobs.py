@@ -184,11 +184,24 @@ def _normalize_skill_list(skill: Optional[str] = None, skills: Optional[Any] = N
 
 
 def _apply_skill_fields(job: Dict[str, Any]) -> Dict[str, Any]:
-    """Return a job dict with canonical `skills` and legacy `skill` fields aligned."""
+    """Return a job dict with canonical compatibility fields aligned."""
     normalized = dict(job)
     skills = _normalize_skill_list(normalized.get("skill"), normalized.get("skills"))
     normalized["skills"] = skills
     normalized["skill"] = skills[0] if skills else None
+    try:
+        normalized["repeat"] = _normalize_repeat_state(
+            normalized.get("repeat"), normalized.get("repeat")
+        )
+    except ValueError as exc:
+        logger.warning(
+            "Job '%s' (%s) had invalid repeat state %r; returning infinite repeat: %s",
+            normalized.get("name", normalized.get("id", "unknown")),
+            normalized.get("id", "unknown"),
+            normalized.get("repeat"),
+            exc,
+        )
+        normalized["repeat"] = {"times": None, "completed": 0}
     return normalized
 
 
@@ -721,6 +734,76 @@ def _normalize_workdir(workdir: Optional[str]) -> Optional[str]:
     return str(resolved)
 
 
+def _is_plain_int(value: Any) -> bool:
+    """Return True for integers, excluding bool's int subclass."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _repeat_completed_count(repeat_state: Any) -> int:
+    """Extract a safe completed count from an existing repeat state."""
+    if isinstance(repeat_state, dict):
+        completed = repeat_state.get("completed", 0)
+        if _is_plain_int(completed) and completed >= 0:
+            return completed
+    return 0
+
+
+def _normalize_repeat_state(
+    repeat: Any,
+    existing_repeat: Optional[Any] = None,
+) -> Dict[str, Optional[int]]:
+    """Normalize repeat updates to the persisted scheduler shape.
+
+    Public edit surfaces send repeat as a scalar run limit (``int``) or
+    ``None`` to mean forever. Persisted jobs store a dict so the scheduler can
+    keep the completed-run counter. Preserve the existing completed count when
+    the run limit changes.
+    """
+    completed = _repeat_completed_count(existing_repeat)
+
+    if isinstance(repeat, dict):
+        times = repeat.get("times")
+        new_completed = repeat.get("completed", completed)
+        if not _is_plain_int(new_completed) or new_completed < 0:
+            raise ValueError("Repeat completed count must be a non-negative integer")
+        completed = new_completed
+    else:
+        times = repeat
+
+    if times is None:
+        normalized_times = None
+    elif _is_plain_int(times) and times > 0:
+        normalized_times = times
+    else:
+        raise ValueError("Repeat must be a positive integer or null")
+
+    return {"times": normalized_times, "completed": completed}
+
+
+def _normalize_profile(profile: Optional[str]) -> Optional[str]:
+    """Normalize and validate an optional cron job profile name.
+
+    Empty / None disables per-job profile selection. Otherwise the profile name
+    is canonicalized with the same rules as ``hermes -p`` and must refer to an
+    existing profile at create/update time. ``default`` is the built-in root
+    profile and is always valid.
+    """
+    if profile is None:
+        return None
+    raw = str(profile).strip()
+    if not raw:
+        return None
+
+    from hermes_cli.profiles import normalize_profile_name, resolve_profile_env
+
+    normalized = normalize_profile_name(raw)
+    # resolve_profile_env validates the canonical name and checks that named
+    # profiles exist. Store only the stable profile id, not the filesystem path,
+    # so profile directories can move with the Hermes root.
+    resolve_profile_env(normalized)
+    return normalized
+
+
 def create_job(
     prompt: Optional[str],
     schedule: str,
@@ -737,6 +820,7 @@ def create_job(
     context_from: Optional[Union[str, List[str]]] = None,
     enabled_toolsets: Optional[List[str]] = None,
     workdir: Optional[str] = None,
+    profile: Optional[str] = None,
     no_agent: bool = False,
 ) -> Dict[str, Any]:
     """
@@ -778,6 +862,11 @@ def create_job(
                 With ``no_agent=True``, ``workdir`` is still applied as the
                 script's cwd so relative paths inside the script behave
                 predictably.
+        profile: Optional Hermes profile name. When set, the job runs with
+                that profile's HERMES_HOME so profile-specific config,
+                credentials, scripts, skills, and memory paths resolve
+                consistently. ``default`` selects the root profile; empty /
+                None preserves the scheduler's existing behaviour.
         no_agent: When True, skip the agent entirely — run ``script`` on schedule
                 and deliver its stdout directly. Empty stdout = silent (no
                 delivery). Requires ``script`` to be set. Ideal for classic
@@ -789,8 +878,11 @@ def create_job(
     parsed_schedule = parse_schedule(schedule)
 
     # Normalize repeat: treat 0 or negative values as None (infinite)
-    if repeat is not None and repeat <= 0:
-        repeat = None
+    if repeat is not None:
+        if not _is_plain_int(repeat):
+            raise ValueError("Repeat must be an integer or None")
+        if repeat <= 0:
+            repeat = None
 
     # Auto-set repeat=1 for one-shot schedules if not specified
     if parsed_schedule["kind"] == "once" and repeat is None:
@@ -815,6 +907,7 @@ def create_job(
     normalized_toolsets = [str(t).strip() for t in enabled_toolsets if str(t).strip()] if enabled_toolsets else None
     normalized_toolsets = normalized_toolsets or None
     normalized_workdir = _normalize_workdir(workdir)
+    normalized_profile = _normalize_profile(profile)
     normalized_no_agent = bool(no_agent)
 
     # no_agent jobs are meaningless without a script — the script IS the job.
@@ -869,6 +962,7 @@ def create_job(
         "origin": origin,  # Tracks where job was created for "origin" delivery
         "enabled_toolsets": normalized_toolsets,
         "workdir": normalized_workdir,
+        "profile": normalized_profile,
     }
 
     with _jobs_lock():
@@ -959,6 +1053,18 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
                     updates["workdir"] = None
                 else:
                     updates["workdir"] = _normalize_workdir(_wd)
+
+            if "repeat" in updates:
+                updates["repeat"] = _normalize_repeat_state(updates["repeat"], job.get("repeat"))
+
+            # Validate / normalize profile if present in updates. Empty string or
+            # None both mean "clear the field" (restore old behaviour).
+            if "profile" in updates:
+                _profile = updates["profile"]
+                if _profile is None or _profile == "" or _profile is False:
+                    updates["profile"] = None
+                else:
+                    updates["profile"] = _normalize_profile(_profile)
 
             updated = _apply_skill_fields({**job, **updates})
             schedule_changed = "schedule" in updates
@@ -1092,18 +1198,32 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
                 # be claimed again on its next fire (Phase 4C CAS).
                 job["fire_claim"] = None
                 
+                # Normalize repeat into the canonical dict shape before
+                # incrementing. This repairs legacy scalar/null values that may
+                # have been persisted by older edit surfaces.
+                try:
+                    job["repeat"] = _normalize_repeat_state(job.get("repeat"), job.get("repeat"))
+                except ValueError as exc:
+                    logger.warning(
+                        "Job '%s' (%s) had invalid repeat state %r; resetting to infinite: %s",
+                        job.get("name", job["id"]),
+                        job["id"],
+                        job.get("repeat"),
+                        exc,
+                    )
+                    job["repeat"] = {"times": None, "completed": 0}
+
                 # Increment completed count
-                if job.get("repeat"):
-                    job["repeat"]["completed"] = job["repeat"].get("completed", 0) + 1
-                    
-                    # Check if we've hit the repeat limit
-                    times = job["repeat"].get("times")
-                    completed = job["repeat"]["completed"]
-                    if times is not None and times > 0 and completed >= times:
-                        # Remove the job (limit reached)
-                        jobs.pop(i)
-                        save_jobs(jobs)
-                        return
+                job["repeat"]["completed"] = job["repeat"].get("completed", 0) + 1
+
+                # Check if we've hit the repeat limit
+                times = job["repeat"].get("times")
+                completed = job["repeat"]["completed"]
+                if times is not None and times > 0 and completed >= times:
+                    # Remove the job (limit reached)
+                    jobs.pop(i)
+                    save_jobs(jobs)
+                    return
                 
                 # Compute next run
                 job["next_run_at"] = compute_next_run(job["schedule"], now)

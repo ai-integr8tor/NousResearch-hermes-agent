@@ -3278,7 +3278,9 @@ class APIServerAdapter(BasePlatformAdapter):
                 scan_error = _scan_cron_prompt(prompt)
                 if scan_error:
                     return web.json_response({"error": scan_error}, status=400)
-            if repeat is not None and (not isinstance(repeat, int) or repeat < 1):
+            if repeat is not None and (
+                not isinstance(repeat, int) or isinstance(repeat, bool) or repeat < 1
+            ):
                 return web.json_response({"error": "Repeat must be a positive integer"}, status=400)
 
             kwargs = {
@@ -3344,6 +3346,12 @@ class APIServerAdapter(BasePlatformAdapter):
                 return web.json_response(
                     {"error": f"Prompt must be ≤ {self._MAX_PROMPT_LENGTH} characters"}, status=400,
                 )
+            if "repeat" in sanitized:
+                repeat = sanitized["repeat"]
+                if repeat is not None and (
+                    not isinstance(repeat, int) or isinstance(repeat, bool) or repeat < 1
+                ):
+                    return web.json_response({"error": "Repeat must be a positive integer or null"}, status=400)
             if sanitized.get("prompt") and _scan_cron_prompt is not None:
                 scan_error = _scan_cron_prompt(sanitized["prompt"])
                 if scan_error:
