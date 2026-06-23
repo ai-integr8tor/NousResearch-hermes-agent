@@ -2131,6 +2131,60 @@ class TelegramAdapter(BasePlatformAdapter):
                             self.name, topic_name, seed_err,
                         )
 
+    async def _register_bot_commands(self) -> tuple[int, int]:
+        """Register the current Telegram command menu."""
+        from telegram import (
+            BotCommand,
+            BotCommandScopeAllPrivateChats,
+            BotCommandScopeAllGroupChats,
+            BotCommandScopeDefault,
+        )
+        from hermes_cli.commands import telegram_menu_commands
+
+        if self._bot is None:
+            return 0, 0
+
+        # Keep this in sync with startup registration so reload has parity.
+        menu_commands, hidden_count = telegram_menu_commands(max_commands=MAX_COMMANDS_PER_SCOPE)
+        bot_commands = [BotCommand(name, desc) for name, desc in menu_commands]
+
+        # Telegram picks the narrowest matching scope per chat type.
+        for scope_cls in (
+            BotCommandScopeDefault,
+            BotCommandScopeAllPrivateChats,
+            BotCommandScopeAllGroupChats,
+        ):
+            scope_name = scope_cls.__name__
+            try:
+                await self._bot.set_my_commands(bot_commands, scope=scope_cls())
+                logger.info(
+                    "[%s] set_my_commands OK for scope %s (%d cmds)",
+                    self.name,
+                    scope_name,
+                    len(bot_commands),
+                )
+            except Exception as scope_err:
+                logger.warning(
+                    "[%s] set_my_commands FAILED for scope %s: %s",
+                    self.name,
+                    scope_name,
+                    scope_err,
+                )
+
+        if hidden_count:
+            logger.info(
+                "[%s] Telegram menu: %d commands registered, %d hidden (over %d limit). Use /commands for full list.",
+                self.name,
+                len(menu_commands),
+                hidden_count,
+                MAX_COMMANDS_PER_SCOPE,
+            )
+        return len(menu_commands), hidden_count
+
+    async def refresh_skill_group(self) -> tuple[int, int]:
+        """Refresh Telegram BotCommand menus after /reload-skills."""
+        return await self._register_bot_commands()
+
     async def connect(self) -> bool:
         """Connect to Telegram via polling or webhook.
 
@@ -2369,37 +2423,7 @@ class TelegramAdapter(BasePlatformAdapter):
             # List is derived from the central COMMAND_REGISTRY — adding a new
             # gateway command there automatically adds it to the Telegram menu.
             try:
-                from telegram import (
-                    BotCommand,
-                    BotCommandScopeAllPrivateChats,
-                    BotCommandScopeAllGroupChats,
-                    BotCommandScopeDefault,
-                )
-                from hermes_cli.commands import telegram_menu_commands
-                # Telegram allows up to 100 commands but has an undocumented
-                # payload size limit (~4KB total).  Limit to 30 core commands
-                # to stay well under the threshold while covering all categories.
-                menu_commands, hidden_count = telegram_menu_commands(max_commands=MAX_COMMANDS_PER_SCOPE)
-                bot_commands = [BotCommand(name, desc) for name, desc in menu_commands]
-                # Register for all scopes independently — Telegram picks the
-                # narrowest matching scope per chat type (forum topics fall
-                # through to AllGroupChats or Default).
-                for scope_cls in (BotCommandScopeDefault, BotCommandScopeAllPrivateChats, BotCommandScopeAllGroupChats):
-                    scope_name = scope_cls.__name__
-                    try:
-                        await self._bot.set_my_commands(bot_commands, scope=scope_cls())
-                        logger.info("[%s] set_my_commands OK for scope %s (%d cmds)", self.name, scope_name, len(bot_commands))
-                    except Exception as scope_err:
-                        logger.warning("[%s] set_my_commands FAILED for scope %s: %s", self.name, scope_name, scope_err)
-                # Forum topics don't inherit AllGroupChats — Telegram resolves
-                # commands via BotCommandScopeChat(chat_id) for forum groups.
-                # Lazy registration happens in _ensure_forum_commands on first
-                # message from a forum topic (see _handle_text_message).
-                if hidden_count:
-                    logger.info(
-                        "[%s] Telegram menu: %d commands registered, %d hidden (over %d limit). Use /commands for full list.",
-                        self.name, len(menu_commands), hidden_count, 30,
-                    )
+                await self._register_bot_commands()
             except Exception as e:
                 logger.warning(
                     "[%s] Could not register Telegram command menu: %s",
