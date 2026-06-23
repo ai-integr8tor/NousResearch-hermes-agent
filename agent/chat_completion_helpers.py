@@ -1210,6 +1210,40 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
             agent._transport_cache.clear()
         agent._fallback_activated = True
 
+        # Per-entry reasoning effort override (#21256).  A fallback_model
+        # entry may carry ``reasoning_effort`` (none/minimal/low/medium/high/
+        # xhigh) to run that tier at a different thinking depth than the
+        # global ``agent.reasoning_effort`` — e.g. a last-resort Codex tier at
+        # ``xhigh``.  The primary's reasoning_config is snapshotted in
+        # ``_primary_runtime`` and restored on primary recovery, so this only
+        # affects the fallback turn(s).  Absent/blank → keep the current
+        # (primary/global) reasoning effort unchanged.
+        _fb_reasoning_effort = str(fb.get("reasoning_effort") or "").strip()
+        if _fb_reasoning_effort:
+            try:
+                from hermes_constants import parse_reasoning_effort
+                _fb_reasoning_config = parse_reasoning_effort(_fb_reasoning_effort)
+                # parse_reasoning_effort returns None for an unrecognized
+                # level; only override when it parsed to a real config so a
+                # typo doesn't silently disable reasoning.
+                if _fb_reasoning_config is not None:
+                    agent.reasoning_config = _fb_reasoning_config
+                    logger.info(
+                        "Fallback %s/%s: reasoning effort override → %s",
+                        fb_provider, fb_model, _fb_reasoning_effort,
+                    )
+                else:
+                    logger.warning(
+                        "Fallback %s/%s: unknown reasoning_effort '%s' — "
+                        "keeping current effort",
+                        fb_provider, fb_model, _fb_reasoning_effort,
+                    )
+            except Exception as _re_exc:  # noqa: BLE001
+                logger.warning(
+                    "Fallback %s/%s: failed to apply reasoning_effort '%s': %s",
+                    fb_provider, fb_model, _fb_reasoning_effort, _re_exc,
+                )
+
         # Clear the credential pool when the fallback provider doesn't match
         # the pool's provider.  The pool was seeded for the primary provider;
         # leaving it attached means downstream recovery (rate_limit / billing /
