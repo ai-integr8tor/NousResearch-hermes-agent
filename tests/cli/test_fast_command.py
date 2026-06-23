@@ -405,6 +405,39 @@ class TestIsAnthropicOpusTier:
         assert _is_anthropic_opus_tier("CLAUDE-OPUS-4-8") is True
         assert _is_anthropic_opus_tier("Anthropic/Claude-Opus-4.8") is True
 
+    def test_forward_compat_and_community_distill(self):
+        """Regression tests for the failure modes the prefix anchor prevents.
+
+        Three forward-compat cases pin the behavior across Anthropic slug
+        variants and the next Opus generation — the substring-based
+        implementation would have silently regressed on ``claude-opus-5``
+        because it only matched ``opus-3`` / ``opus-4`` substrings, and
+        the same substring implementation matched community / distill
+        slugs whose lowercase form merely *contains* the bytes ``opus``
+        (e.g. Jackrong's ``Qwopus3.6`` family — Qwen + Opus-reasoning
+        distill, not Anthropic pricing).
+        """
+        from hermes_cli.models import _is_anthropic_opus_tier
+
+        # Forward-compat: shipping + hypothetical future Anthropic Opus.
+        # claude-opus-4-9 is the next shipping family on the dash slug;
+        # claude-opus-4.9 is the same family on the dot slug (OpenRouter /
+        # native Anthropic); claude-opus-5-0 is the next-generation prefix
+        # the substring implementation would have rejected.
+        assert _is_anthropic_opus_tier("claude-opus-4-9") is True
+        assert _is_anthropic_opus_tier("claude-opus-4.9") is True
+        assert _is_anthropic_opus_tier("claude-opus-5-0") is True
+        assert _is_anthropic_opus_tier("anthropic/claude-opus-5-0") is True
+
+        # Negative regression: community / distill slugs that lowercased
+        # merely contain the substring ``opus`` and must NOT be classified
+        # as Anthropic Opus-tier (the substring implementation matched
+        # these as a side effect of ``opus-3.`` falling inside ``qwopus3.``).
+        assert _is_anthropic_opus_tier("qwopus3.6-27b-coder") is False
+        assert _is_anthropic_opus_tier("jackrong/qwopus3.6-27b-coder") is False
+        assert _is_anthropic_opus_tier("someorg/opus-4-clone") is False
+        assert _is_anthropic_opus_tier("opus-4") is False
+
     def test_fast_command_exposed_for_anthropic_model(self):
         cli_mod = _import_cli()
         stub = SimpleNamespace(

@@ -2067,23 +2067,21 @@ def _is_anthropic_opus_tier(model_id: Optional[str]) -> bool:
     Opus is the most expensive Anthropic tier (~$15/$75 per MTok on Opus 4.x)
     and is therefore an unsafe default for a freshly-authenticated provider
     picker — paid users landing on Opus from a one-click onboarding have
-    no opportunity to opt out before their config pins it as the main model.
-    Sonnet and Haiku are deliberately NOT classified as Opus here; Sonnet is
-    the Anthropic default the rest of the codebase already treats as
-    reasonable, and Haiku is cheap enough that it is not a billing hazard.
+    no opportunity to opt out before the choice pins their main model and
+    inherits into every cron job that doesn't override ``model.provider``.
 
-    Matches both dash (``claude-opus-4-8``) and dot (``claude-opus-4.8``)
-    slug variants because the same family id appears in both forms across
-    providers (Nous Portal uses dashes; OpenRouter / native Anthropic use
-    dots). Anything that doesn't start with ``claude-opus-`` is not Opus.
+    Anchored on the ``claude-opus-`` prefix (after vendor-strip and lowercase
+    normalization) so the predicate survives future Anthropic releases
+    (``claude-opus-5-0``, ``claude-opus-5``, etc. all match without code
+    changes) and rejects community / distill models whose slug merely
+    *contains* the substring ``opus`` (e.g. ``qwopus3.6-27b-coder``). Sonnet
+    and Haiku are deliberately NOT classified as Opus here — Sonnet is the
+    default the rest of the codebase treats as reasonable, and Haiku is
+    cheap enough that it is not a billing hazard.
     """
     raw = _strip_vendor_prefix(str(model_id or ""))
     base = raw.split(":")[0].lower()
-    if not base.startswith("claude-opus-"):
-        return False
-    # Both slug forms: claude-opus-4-8 (Nous) and claude-opus-4.8 (OpenRouter/Anthropic).
-    # Anything beyond the family prefix is still Opus for our purposes.
-    return "opus-4-" in base or "opus-4." in base or "opus-3-" in base or "opus-3." in base
+    return base.startswith("claude-opus-")
 
 
 def resolve_fast_mode_overrides(model_id: Optional[str]) -> dict[str, Any] | None:
