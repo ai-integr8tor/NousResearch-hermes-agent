@@ -2835,3 +2835,134 @@ def test_host_derived_key_helper_basic_cases():
     for k in ("DEEPSEEK_API_KEY", "GROQ_API_KEY", "MISTRAL_API_KEY",
               "OPENAI_API_KEY", "OPENROUTER_API_KEY"):
         _os.environ.pop(k, None)
+
+
+# ---------------------------------------------------------------------------
+# anthropic_messages /v1 suffix normalization for custom providers (#44181)
+# ---------------------------------------------------------------------------
+# The Anthropic SDK appends /v1/messages to base_url itself, so a configured
+# trailing /v1 produces /v1/v1/messages requests (a 404).  Custom providers
+# must get the same strip the opencode / azure-foundry resolvers already do.
+
+
+def test_named_custom_provider_anthropic_messages_strips_v1_suffix(monkeypatch):
+    """A custom_providers entry can share its gateway's /v1 base_url across protocols."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(
+        rp,
+        "load_config",
+        lambda: {
+            "custom_providers": [
+                {
+                    "name": "aiapi-claude",
+                    "base_url": "http://192.168.8.11:3001/v1",
+                    "api_key": "gateway-key",
+                    "api_mode": "anthropic_messages",
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        rp,
+        "resolve_provider",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError(
+                "resolve_provider should not be called for named custom providers"
+            )
+        ),
+    )
+
+    resolved = rp.resolve_runtime_provider(requested="custom:aiapi-claude")
+
+    assert resolved["provider"] == "custom"
+    assert resolved["api_mode"] == "anthropic_messages"
+    # /v1 stripped — the SDK appends /v1/messages, yielding .../v1/messages
+    assert resolved["base_url"] == "http://192.168.8.11:3001"
+    assert resolved["api_key"] == "gateway-key"
+
+
+def test_named_custom_provider_chat_completions_keeps_v1_suffix(monkeypatch):
+    """OpenAI-wire custom providers must keep their /v1 base_url untouched."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(
+        rp,
+        "load_config",
+        lambda: {
+            "custom_providers": [
+                {
+                    "name": "aiapi-completions",
+                    "base_url": "http://192.168.8.11:3001/v1",
+                    "api_key": "gateway-key",
+                    "api_mode": "chat_completions",
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        rp,
+        "resolve_provider",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError(
+                "resolve_provider should not be called for named custom providers"
+            )
+        ),
+    )
+
+    resolved = rp.resolve_runtime_provider(requested="custom:aiapi-completions")
+
+    assert resolved["api_mode"] == "chat_completions"
+    assert resolved["base_url"] == "http://192.168.8.11:3001/v1"
+
+
+def test_bare_custom_anthropic_messages_strips_v1_suffix(monkeypatch):
+    """model.api_mode: anthropic_messages with a /v1 base_url gets the same strip."""
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "custom")
+    monkeypatch.setattr(
+        rp,
+        "_get_model_config",
+        lambda: {
+            "provider": "custom",
+            "base_url": "http://127.0.0.1:3001/v1",
+            "api_mode": "anthropic_messages",
+            "default": "claude-opus-4-8",
+        },
+    )
+    monkeypatch.delenv("CUSTOM_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENROUTER_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    resolved = rp.resolve_runtime_provider(requested="custom")
+
+    assert resolved["provider"] == "custom"
+    assert resolved["api_mode"] == "anthropic_messages"
+    assert resolved["base_url"] == "http://127.0.0.1:3001"
+
+
+def test_custom_pool_anthropic_messages_strips_v1_suffix(monkeypatch):
+    """Pooled credentials for an anthropic_messages custom endpoint strip /v1 too."""
+
+    class _Entry:
+        access_token = "pool-token"
+        source = "pool"
+
+    class _Pool:
+        def has_credentials(self):
+            return True
+
+        def select(self):
+            return _Entry()
+
+    monkeypatch.setattr(rp, "get_custom_provider_pool_key", lambda *a, **k: "custom:gw")
+    monkeypatch.setattr(rp, "load_pool", lambda provider: _Pool())
+
+    resolved = rp._try_resolve_from_custom_pool(
+        "http://192.168.8.11:3001/v1", "custom", "anthropic_messages"
+    )
+
+    assert resolved is not None
+    assert resolved["api_mode"] == "anthropic_messages"
+    assert resolved["base_url"] == "http://192.168.8.11:3001"
+    assert resolved["api_key"] == "pool-token"

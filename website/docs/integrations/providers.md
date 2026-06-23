@@ -1168,6 +1168,8 @@ custom_providers:
     api_mode: anthropic_messages  # for Anthropic-compatible proxies
 ```
 
+For `api_mode: anthropic_messages` entries, a trailing `/v1` on `base_url` is stripped automatically: the Anthropic SDK appends `/v1/messages` to the base URL itself, so `http://gateway:3001/v1` would otherwise request `/v1/v1/messages` and 404. Several entries pointing at the same multi-protocol gateway can therefore share the gateway's `/v1` URL — OpenAI-wire entries use it as-is, Anthropic-wire entries normalize it.
+
 Some OpenAI-compatible endpoints need provider-specific request body fields. Add an `extra_body` map to the matching custom provider and Hermes will merge it into each chat-completions request for that endpoint:
 
 ```yaml

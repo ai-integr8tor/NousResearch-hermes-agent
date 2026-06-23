@@ -275,6 +275,30 @@ def _parse_api_mode(raw: Any) -> Optional[str]:
     return None
 
 
+def _strip_anthropic_v1_suffix(base_url: str, api_mode: Optional[str]) -> str:
+    """Drop a trailing ``/v1`` from Anthropic-style base URLs.
+
+    The Anthropic SDK appends ``/v1/messages`` to the base_url itself, so a
+    configured ``http://gateway:3001/v1`` would send requests to
+    ``/v1/v1/messages`` — a 404 on every gateway, surfaced only as an opaque
+    auth/probe failure.  The opencode and azure-foundry resolvers already
+    normalise this; routing custom providers through the same rule lets a
+    ``custom_providers`` entry with ``api_mode: anthropic_messages`` share
+    the ``/v1`` base_url of its OpenAI-compatible siblings on the same
+    gateway.  Refs #44181.
+    """
+    if api_mode != "anthropic_messages" or not base_url:
+        return base_url
+    stripped = re.sub(r"/v1/?$", "", base_url)
+    if stripped != base_url:
+        logger.debug(
+            "anthropic_messages base_url '%s' ends with /v1 — stripped to "
+            "'%s' (the Anthropic SDK appends /v1/messages itself)",
+            base_url, stripped,
+        )
+    return stripped
+
+
 def _maybe_apply_codex_app_server_runtime(
     *,
     provider: str,
@@ -474,10 +498,11 @@ def _try_resolve_from_custom_pool(
         pool_api_key = getattr(entry, "runtime_api_key", None) or getattr(entry, "access_token", "")
         if not pool_api_key:
             return None
+        api_mode = api_mode_override or _detect_api_mode_for_url(base_url) or "chat_completions"
         return {
             "provider": provider_label,
-            "api_mode": api_mode_override or _detect_api_mode_for_url(base_url) or "chat_completions",
-            "base_url": base_url,
+            "api_mode": api_mode,
+            "base_url": _strip_anthropic_v1_suffix(base_url, api_mode),
             "api_key": pool_api_key,
             "source": f"pool:{pool_key}",
             "credential_pool": pool,
@@ -899,12 +924,15 @@ def _resolve_named_custom_runtime(
     ]
     api_key = next((candidate for candidate in api_key_candidates if has_usable_secret(candidate)), "")
 
+    api_mode = (
+        custom_provider.get("api_mode")
+        or _detect_api_mode_for_url(base_url)
+        or "chat_completions"
+    )
     result = {
         "provider": "custom",
-        "api_mode": custom_provider.get("api_mode")
-        or _detect_api_mode_for_url(base_url)
-        or "chat_completions",
-        "base_url": base_url,
+        "api_mode": api_mode,
+        "base_url": _strip_anthropic_v1_suffix(base_url, api_mode),
         "api_key": api_key or "no-key-required",
         "source": f"custom_provider:{custom_provider.get('name', requested_provider)}",
     }
@@ -1049,12 +1077,15 @@ def _resolve_openrouter_runtime(
     if effective_provider == "custom" and not api_key and not _is_openrouter_url:
         api_key = "no-key-required"
 
+    api_mode = (
+        _parse_api_mode(model_cfg.get("api_mode"))
+        or _detect_api_mode_for_url(base_url)
+        or "chat_completions"
+    )
     return {
         "provider": effective_provider,
-        "api_mode": _parse_api_mode(model_cfg.get("api_mode"))
-        or _detect_api_mode_for_url(base_url)
-        or "chat_completions",
-        "base_url": base_url,
+        "api_mode": api_mode,
+        "base_url": _strip_anthropic_v1_suffix(base_url, api_mode),
         "api_key": api_key,
         "source": source,
     }
