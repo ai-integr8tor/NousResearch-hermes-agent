@@ -12,19 +12,16 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { Switch } from '@/components/ui/switch'
 import { useI18n } from '@/i18n'
+import {
+  DEFAULT_REASONING_EFFORT,
+  isThinkingEnabled,
+  normalizeReasoningEffort,
+  REASONING_EFFORT_OPTIONS
+} from '@/lib/model-status-label'
+import { applyReasoningPatch } from '@/lib/patch-reasoning'
 import { setModelPreset } from '@/store/model-presets'
 import { notifyError } from '@/store/notifications'
-import { $activeSessionId, setCurrentFastMode, setCurrentReasoningEffort } from '@/store/session'
-
-// Hermes' real reasoning levels (see VALID_REASONING_EFFORTS); `none` is owned
-// by the Thinking toggle, not the radio.
-const EFFORT_OPTIONS = [
-  { value: 'minimal', labelKey: 'minimal' },
-  { value: 'low', labelKey: 'low' },
-  { value: 'medium', labelKey: 'medium' },
-  { value: 'high', labelKey: 'high' },
-  { value: 'xhigh', labelKey: 'max' }
-] as const
+import { $activeSessionId, setCurrentFastMode } from '@/store/session'
 
 /** How "fast" is achieved for a given model — two different mechanisms:
  *  - `param`: the Anthropic/OpenAI `speed=fast` request parameter.
@@ -104,37 +101,25 @@ export function ModelEditSubmenu({
   const copy = t.shell.modelOptions
   const activeSessionId = useStore($activeSessionId)
 
-  const effortValue = normalizeEffort(effort)
+  const effortValue = normalizeReasoningEffort(effort)
   const thinkingOn = isThinkingEnabled(effort)
 
   // Editing always records the model's global preset; the active model also gets
   // it pushed onto the live session. Non-active edits stay preset-only — they do
-  // not switch you to that model.
-  const patchReasoning = async (next: string) => {
-    setModelPreset(provider, model, { effort: next })
-
-    if (!isActive) {
-      return
-    }
-
-    setCurrentReasoningEffort(next)
-
-    // Preset-only without a session: `isActive` holds for the global/default
-    // row pre-session, and the gateway's `config.set` falls back to global
-    // config when none matches — so don't reach it (preset + optimistic store
-    // are the whole effect). Same guard in applyModelPreset / toggleFast.
-    if (!activeSessionId) {
-      return
-    }
-
-    try {
-      await requestGateway('config.set', { key: 'reasoning', session_id: activeSessionId, value: next })
-    } catch (err) {
-      setCurrentReasoningEffort(effort)
-      setModelPreset(provider, model, { effort })
-      notifyError(err, copy.updateFailed)
-    }
-  }
+  // not switch you to that model. The shared write path is in
+  // `lib/patch-reasoning.ts` (used here and by the composer reasoning pill) so
+  // the follow-up generation-counter fix lands in one place.
+  const patchReasoning = async (next: string) =>
+    applyReasoningPatch({
+      failMessage: copy.updateFailed,
+      isActive,
+      model,
+      next,
+      prev: effort,
+      provider,
+      request: requestGateway,
+      sessionId: activeSessionId
+    })
 
   const toggleFast = (enabled: boolean) => {
     if (fastControl.kind === 'variant') {
@@ -192,7 +177,9 @@ export function ModelEditSubmenu({
               <Switch
                 checked={thinkingOn}
                 className="ml-auto"
-                onCheckedChange={checked => void patchReasoning(checked ? effortValue || 'medium' : 'none')}
+                onCheckedChange={checked =>
+                  void patchReasoning(checked ? effortValue || DEFAULT_REASONING_EFFORT : 'none')
+                }
                 size="xs"
               />
             </DropdownMenuItem>
@@ -208,7 +195,7 @@ export function ModelEditSubmenu({
               <DropdownMenuSeparator className="mx-0" />
               <DropdownMenuLabel className={dropdownMenuSectionLabel}>{copy.effort}</DropdownMenuLabel>
               <DropdownMenuRadioGroup onValueChange={value => void patchReasoning(value)} value={effortValue}>
-                {EFFORT_OPTIONS.map(option => (
+                {REASONING_EFFORT_OPTIONS.map(option => (
                   <DropdownMenuRadioItem
                     className={dropdownMenuRow}
                     key={option.value}
@@ -225,20 +212,4 @@ export function ModelEditSubmenu({
       )}
     </DropdownMenuSubContent>
   )
-}
-
-function isThinkingEnabled(effort: string): boolean {
-  // Empty = Hermes default (medium) = on; only an explicit "none" is off.
-  return (effort || 'medium').trim().toLowerCase() !== 'none'
-}
-
-function normalizeEffort(effort: string): string {
-  const value = (effort || 'medium').trim().toLowerCase()
-
-  // Thinking off → no effort selected in the radio group.
-  if (value === 'none') {
-    return ''
-  }
-
-  return EFFORT_OPTIONS.some(option => option.value === value) ? value : 'medium'
 }
