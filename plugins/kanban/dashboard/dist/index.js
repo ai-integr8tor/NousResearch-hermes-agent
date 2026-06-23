@@ -206,8 +206,10 @@
    *
    * `req` shapes:
    *   { kind: "confirm", title, description, confirmLabel, destructive }
-   *   { kind: "completion", title, description, label, destructive, confirmLabel }
-   *   { kind: "copyFallback", command }   // clipboard API unavailable
+   *
+   * The "completion" kind (textarea prompt) is deferred: the host's
+   * ConfirmDialog hardcodes onClick → unmount, preventing validation-
+   * state retention. See KanbanDialogs doc comment.
    */
   function useKanbanDialogs(t) {
     const [dialogState, setDialogState] = React.useState(null);
@@ -868,15 +870,27 @@
 
     const requestCompletionSummary = useCallback(function (count) {
       const label = dialogLabelForCount(count, t);
-      return kanbanDialogs.request({
-        kind: "completion",
-        title: tx(t, "completionSummaryTitle", "Completion summary"),
-        description: tx(t, "completionSummaryFor", "Required for marking done. Stored as the task result."),
-        label: label,
-        confirmLabel: tx(t, "markDone", "Mark Done"),
-        destructive: false,
-      });
-    }, [kanbanDialogs, t]);
+      // Uses window.prompt as a documented carve-out — the host's
+      // ConfirmDialog hardcodes onClick → unmount (confirmedRef + Radix
+      // AlertDialogAction), making it impossible to keep a dialog open
+      // across a validation failure. Once ConfirmDialog grows a
+      // disabled prop upstream, this switches to a Dialog-based
+      // completion body (see KanbanDialogs doc comment).
+      var summary = window.prompt(
+        tx(t, "completionSummary",
+          "Completion summary for {label}. This is stored as the task result.",
+          { label: label }),
+        "",
+      );
+      if (summary === null) return Promise.resolve({ confirmed: false });
+      summary = summary.trim();
+      if (!summary) {
+        window.alert(tx(t, "completionSummaryRequired",
+          "Completion summary is required before marking a task done."));
+        return Promise.resolve({ confirmed: false });
+      }
+      return Promise.resolve({ confirmed: true, summary: summary });
+    }, [t]);
 
     // Single-task card move. Drives confirmation + completion summary
     // dialogs via the hook, then dispatches via performMoveTask.
@@ -1189,6 +1203,7 @@
           onSwitch: switchBoard,
           onNewClick: function () { setShowNewBoard(true); },
           onDeleteBoard: deleteBoard,
+          requestDialog: function (req) { return kanbanDialogs.request(req); },
         }),
         showNewBoard ? h(NewBoardDialog, {
           onCancel: function () { setShowNewBoard(false); },
@@ -3334,6 +3349,7 @@
           onDeleteAttachment: handleDeleteAttachment,
           uploadBusy: uploadBusy,
           uploadErr: uploadErr,
+          requestDialog: props.requestDialog,
         }) : null,
         data ? h("div", { className: "hermes-kanban-drawer-comment-row" },
           h(Input, {
