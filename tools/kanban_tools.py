@@ -327,6 +327,7 @@ def _task_summary_dict(kb, conn, task) -> dict[str, Any]:
         "completed_at": task.completed_at,
         "current_run_id": task.current_run_id,
         "model_override": task.model_override,
+        "reasoning_override": task.reasoning_override,
         "parents": parents,
         "children": children,
         "parent_count": len(parents),
@@ -372,6 +373,7 @@ def _handle_show(args: dict, **kw) -> str:
                     "result": t.result,
                     "current_run_id": t.current_run_id,
                     "model_override": t.model_override,
+                    "reasoning_override": t.reasoning_override,
                 }
 
             def _run_dict(r):
@@ -824,6 +826,7 @@ def _handle_create(args: dict, **kw) -> str:
                     if max_runtime_seconds is not None else None
                 ),
                 skills=skills,
+                reasoning_override=args.get("reasoning_override"),
                 goal_mode=goal_mode,
                 goal_max_turns=(
                     int(goal_max_turns) if goal_max_turns is not None else None
@@ -1388,6 +1391,15 @@ KANBAN_CREATE_SCHEMA = {
                     "task, ['github-code-review'] for a reviewer task. "
                     "The names must match skills installed on the "
                     "assignee's profile."
+                ),
+            },
+            "reasoning_override": {
+                "type": "string",
+                "enum": ["none", "minimal", "low", "medium", "high", "xhigh"],
+                "description": (
+                    "Optional per-task reasoning effort override passed to "
+                    "the dispatched worker. Omit to use the assignee "
+                    "profile's configured agent.reasoning_effort."
                 ),
             },
             "goal_mode": {
