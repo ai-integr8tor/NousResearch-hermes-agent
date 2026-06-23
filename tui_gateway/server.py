@@ -1971,10 +1971,31 @@ def _display_mouse_tracking(display: dict) -> str:
 
 
 def _load_reasoning_config() -> dict | None:
-    from hermes_constants import parse_reasoning_effort
+    """Load reasoning effort from config.yaml, respecting per-model overrides.
 
+    Per-model overrides (agent.reasoning_overrides) take precedence
+    over the global value when the current model matches a key
+    (spelling-tolerant). Closes #21256.
+    """
+    from hermes_constants import parse_reasoning_effort, resolve_per_model_reasoning_effort
+
+    cfg = _load_cfg()
+
+    # Per-model override first
+    model_cfg = cfg.get("model") or {}
+    model = str(
+        (model_cfg.get("default", "") if isinstance(model_cfg, dict) else "")
+        or (model_cfg.get("model", "") if isinstance(model_cfg, dict) else "")
+        or ""
+    ).strip()
+    overrides = (cfg.get("agent") or {}).get("reasoning_overrides", {}) or {}
+    per_model = resolve_per_model_reasoning_effort(model, overrides)
+    if per_model is not None:
+        return per_model
+
+    # Global fallback
     effort = str(
-        (_load_cfg().get("agent") or {}).get("reasoning_effort", "") or ""
+        (cfg.get("agent") or {}).get("reasoning_effort", "") or ""
     ).strip()
     return parse_reasoning_effort(effort)
 
