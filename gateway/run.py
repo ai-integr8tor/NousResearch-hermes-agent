@@ -392,7 +392,13 @@ def _prepare_gateway_status_message(platform: Any, event_type: str, message: str
     text = str(message or "").strip()
     if not text:
         return None
-    if _gateway_platform_value(platform) != "telegram":
+    platform_val = _gateway_platform_value(platform)
+    # Matrix DMs between agents: suppress ALL status messages to prevent
+    # ping-pong loops where one agent's status text is treated as a user
+    # message by the other agent's gateway.  (Issue #43047)
+    if platform_val == "matrix":
+        return None
+    if platform_val != "telegram":
         return text
 
     text = _redact_gateway_user_facing_secrets(text)
