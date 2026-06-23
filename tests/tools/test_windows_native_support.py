@@ -852,6 +852,190 @@ class TestLocalEnvironmentPathInjectionGated:
         assert _append_missing_sane_path_entries(path) == path
 
 
+class TestLocalEnvironmentWindowsDetachFlags:
+    """``tools/environments/local.py`` must use the platform-aware detach helper
+    (``windows_detach_popen_kwargs()`` + ``windows_detach_flags_without_breakaway()``
+    nested fallback) instead of the legacy ``windows_hide_flags()`` pattern.
+
+    Mirrors the canonical pattern at ``hermes_cli/gateway.py:716-742``.
+
+    Without the fix, the spawned terminal command stays in the parent Hermes
+    job object on Windows (because the legacy ``windows_hide_flags()`` only
+    sets CREATE_NO_WINDOW) and is silently reaped when the parent job is
+    torn down by the OS — typically 30-60s after the user closes their
+    terminal or the Electron Desktop window. The new code sets all 4
+    detach flags including CREATE_BREAKAWAY_FROM_JOB, with a fallback to
+    no-breakaway if the parent job refuses breakaway.
+    """
+
+    def test_local_env_uses_windows_detach_popen_kwargs(self):
+        """The ``subprocess.Popen`` for the terminal command must use
+        ``windows_detach_popen_kwargs()`` — NOT ``windows_hide_flags()``.
+
+        Catches the static-text regression: a future maintainer reverting
+        to ``{"creationflags": windows_hide_flags()}`` would break the
+        Windows detached-spawn contract for terminal commands.
+        """
+        root = Path(__file__).resolve().parents[2]
+        source = (root / "tools" / "environments" / "local.py").read_text(encoding="utf-8")
+        # The new helper must be imported AND called inside the Popen.
+        assert "windows_detach_popen_kwargs" in source, (
+            "tools/environments/local.py must import and use windows_detach_popen_kwargs() "
+            "instead of the legacy windows_hide_flags() pattern. The legacy "
+            "helper only sets CREATE_NO_WINDOW (no DETACHED_PROCESS, no "
+            "CREATE_BREAKAWAY_FROM_JOB) so terminal commands on Windows "
+            "stay in the parent job and are reaped when it tears down."
+        )
+        # The legacy helper must NOT appear in local.py (any reference —
+        # import, call, or string mention).
+        assert "windows_hide_flags" not in source, (
+            "tools/environments/local.py still references windows_hide_flags. "
+            "Remove the import and use windows_detach_popen_kwargs() instead."
+        )
+
+    def test_local_env_subprocess_popen_is_wrapped_in_oserror_try(self):
+        """The ``subprocess.Popen`` call must be inside a ``try/except OSError``
+        block with a nested ``try/except OSError`` retry that uses
+        ``windows_detach_flags_without_breakaway()``.
+
+        Without the fallback, on a restrictive job object the terminal
+        command crashes with an unhandled ``PermissionError`` — strictly worse
+        than the pre-fix state. Mirrors hermes_cli/gateway.py:716-742.
+        """
+        import ast as _ast
+        root = Path(__file__).resolve().parents[2]
+        text = (root / "tools" / "environments" / "local.py").read_text(encoding="utf-8")
+        tree = _ast.parse(text)
+        # Find every ``subprocess.Popen(...)`` call inside the module.
+        popen_calls = [
+            n for n in _ast.walk(tree)
+            if isinstance(n, _ast.Call)
+            and isinstance(n.func, _ast.Attribute)
+            and n.func.attr == "Popen"
+            and isinstance(n.func.value, _ast.Name)
+            and n.func.value.id == "subprocess"
+        ]
+        # The terminal-spawned Popen is the one whose kwargs include
+        # `encoding=` AND a `**name` spread AND a `cwd=` kwarg. Find
+        # the PRIMARY Popen (not the fallback) by excluding spreads
+        # that are the fallback dict. The local variable name is
+        # decoupled — a future maintainer can rename ``_popen_kwargs``
+        # to anything as long as it's not ``fallback_kwargs``.
+        # (The "spread-of-Call-to-helper" test is more robust but
+        # doesn't match the current code, which assigns the helper's
+        # return to a variable and spreads the variable. The follow-up
+        # test #1 already asserts the helper is called, so we don't
+        # need to re-assert it here.)
+        primary_popen = None
+        for pc in popen_calls:
+            kw_names = {k.arg for k in pc.keywords if k.arg is not None}
+            spread_names = {k.value.id for k in pc.keywords if k.arg is None and isinstance(k.value, _ast.Name)}
+            if (
+                "encoding" in kw_names
+                and spread_names
+                and "cwd" in kw_names
+                and "fallback_kwargs" not in spread_names
+            ):
+                primary_popen = pc
+                break
+        assert primary_popen is not None, (
+            "Could not find the primary terminal-spawned subprocess.Popen "
+            "in tools/environments/local.py. The expected pattern is a "
+            "subprocess.Popen(...) call with `encoding=`, `cwd=`, and a "
+            "**spread that is NOT `**fallback_kwargs` (the primary call "
+            "spreads the result of `windows_detach_popen_kwargs()` "
+            "while the fallback call spreads the no-breakaway bundle). "
+            "If the spread was refactored away, update this test."
+        )
+        # Walk the parent chain to find an enclosing try/except OSError
+        # with a handler that catches OSError.
+        parent_map = {}
+        for parent in _ast.walk(tree):
+            for child in _ast.iter_child_nodes(parent):
+                parent_map[id(child)] = parent
+        enclosing_try = None
+        node = primary_popen
+        while id(node) in parent_map:
+            parent = parent_map[id(node)]
+            if isinstance(parent, _ast.Try) and any(n is primary_popen for n in _ast.walk(parent)):
+                enclosing_try = parent
+                break
+            node = parent
+        assert enclosing_try is not None, (
+            "The terminal-spawned subprocess.Popen is NOT inside a "
+            "try/except. On a restrictive Windows job object, CreateProcess "
+            "raises OSError — without a try/except wrapper, the terminal "
+            "command crashes with an unhandled PermissionError. The pattern "
+            "must mirror hermes_cli/gateway.py:716-742 (nested try/except "
+            "OSError with windows_detach_flags_without_breakaway() fallback)."
+        )
+        # Verify the except handler catches OSError.
+        oserror_caught = False
+        for handler in enclosing_try.handlers:
+            if handler.type is None:
+                continue  # bare except
+            if isinstance(handler.type, _ast.Name) and handler.type.id == "OSError":
+                oserror_caught = True
+                break
+            if isinstance(handler.type, _ast.Tuple):
+                for elt in handler.type.elts:
+                    if isinstance(elt, _ast.Name) and elt.id == "OSError":
+                        oserror_caught = True
+                        break
+        assert oserror_caught, (
+            "The terminal-spawned subprocess.Popen's try/except handler does "
+            "NOT catch OSError. CreateProcess can raise OSError on breakaway "
+            "denial; the handler must catch it."
+        )
+
+    def test_local_env_fallback_uses_windows_detach_flags_without_breakaway(self):
+        """The OSError retry path in tools/environments/local.py must use
+        ``windows_detach_flags_without_breakaway()`` — the helper that
+        returns the 3 other detach flags but NOT the breakaway bit.
+
+        Mirrors the canonical pattern at hermes_cli/gateway.py:716-742.
+        The sibling ``fix/cron-scheduler-windows-detach`` branch applies
+        the same pattern at cron/scheduler.py:1047.
+        """
+        import ast as _ast
+        root = Path(__file__).resolve().parents[2]
+        text = (root / "tools" / "environments" / "local.py").read_text(encoding="utf-8")
+        tree = _ast.parse(text)
+        # Find every call to windows_detach_flags_without_breakaway.
+        calls = []
+        for n in _ast.walk(tree):
+            if (
+                isinstance(n, _ast.Call)
+                and isinstance(n.func, _ast.Name)
+                and n.func.id == "windows_detach_flags_without_breakaway"
+            ):
+                calls.append(n)
+        assert calls, (
+            "tools/environments/local.py must call windows_detach_flags_without_breakaway() "
+            "in the OSError retry path. Without it, the fallback reuses "
+            "the same CREATE_BREAKAWAY_FROM_JOB bit that was just rejected "
+            "and crashes again on the same restrictive job object."
+        )
+        # Verify the call result is used as a "creationflags" value SOMEWHERE.
+        creationflags_pass = False
+        for n in _ast.walk(tree):
+            if isinstance(n, _ast.Dict):
+                for k, v in zip(n.keys, n.values):
+                    if (
+                        isinstance(v, _ast.Call)
+                        and isinstance(v.func, _ast.Name)
+                        and v.func.id == "windows_detach_flags_without_breakaway"
+                    ):
+                        creationflags_pass = True
+                        break
+        assert creationflags_pass, (
+            "tools/environments/local.py must pass the windows_detach_flags_without_breakaway() "
+            "result as the 'creationflags' value of a dict (e.g. "
+            "{'creationflags': windows_detach_flags_without_breakaway()}). "
+            "A bare call without using the result is not a fix."
+        )
+
+
 # ---------------------------------------------------------------------------
 # cli.py git path normalization
 # ---------------------------------------------------------------------------

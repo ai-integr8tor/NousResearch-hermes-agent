@@ -13,7 +13,10 @@ import time
 from pathlib import Path
 
 from tools.environments.base import BaseEnvironment, _pipe_stdin
-from hermes_cli._subprocess_compat import windows_hide_flags
+from hermes_cli._subprocess_compat import (
+    windows_detach_flags_without_breakaway,
+    windows_detach_popen_kwargs,
+)
 
 _IS_WINDOWS = platform.system() == "Windows"
 
@@ -675,21 +678,80 @@ class LocalEnvironment(BaseEnvironment):
 
         _popen_cwd = self.cwd
 
-        _popen_kwargs = {"creationflags": windows_hide_flags()} if _IS_WINDOWS else {}
-
-        proc = subprocess.Popen(
-            args,
-            text=True,
-            env=run_env,
-            encoding="utf-8",
-            errors="replace",
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,
-            preexec_fn=None if _IS_WINDOWS else os.setsid,
-            cwd=_popen_cwd,
-            **_popen_kwargs,
-        )
+        # Use the platform-aware detach helper: on Windows it sets all
+        # 4 detach flags (CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS |
+        # CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB) so the spawned
+        # process breaks out of the parent Hermes job object. On
+        # POSIX, it sets start_new_session=True (equivalent to the
+        # os.setsid preexec_fn we used to set explicitly — which is
+        # now redundant and removed). If the parent job refuses
+        # breakaway (Windows Terminal with restrictive job settings,
+        # containers, kiosk-mode shells), retry without it. Mirrors
+        # the canonical fallback in hermes_cli/gateway.py:716-742.
+        try:
+            _popen_kwargs = windows_detach_popen_kwargs()
+            proc = subprocess.Popen(
+                args,
+                text=True,
+                env=run_env,
+                encoding="utf-8",
+                errors="replace",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,
+                cwd=_popen_cwd,
+                **_popen_kwargs,
+            )
+        except OSError as exc:
+            # CREATE_BREAKAWAY_FROM_JOB rejected by the parent job
+            # object, OR fork() failed with EAGAIN (process table full).
+            # Retry without the breakaway bit. On POSIX, the
+            # start_new_session=True path is rarely the OSError source
+            # (setsid() in the child is hard to fail), but the fork()
+            # EAGAIN case still applies — so the fallback kwargs are
+            # the POSIX start_new_session=True bundle.
+            fallback_kwargs: dict = (
+                {"creationflags": windows_detach_flags_without_breakaway()}
+                if _IS_WINDOWS
+                else {"start_new_session": True}
+            )
+            try:
+                proc = subprocess.Popen(
+                    args,
+                    text=True,
+                    env=run_env,
+                    encoding="utf-8",
+                    errors="replace",
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,
+                    cwd=_popen_cwd,
+                    **fallback_kwargs,
+                )
+            except OSError as inner_exc:
+                # Both attempts failed. Log a brief warning and re-raise
+                # so the caller (the terminal tool invoker) sees the
+                # error and can report it to the agent. Silent pass
+                # would hide a real spawn failure from the user.
+                #
+                # SECURITY: log ONLY the argv head and the exception
+                # messages, NOT the full ``args`` list. Terminal commands
+                # routinely carry inline secrets (``AWS_SECRET_ACCESS_KEY=…
+                # aws …``, ``curl -H "Authorization: Bearer …"``, token-
+                # bearing git URLs). A WARNING line ships to log
+                # aggregation and persists. The canonical pattern at
+                # hermes_cli/gateway.py:716-742 doesn't log anything on
+                # this path; this warning exists only so the scheduler
+                # log records the spawn failure. The argv head (typically
+                # ``"bash"``) is the least-informative, least-leaky
+                # identifier we can log and still tells the operator
+                # which backend failed.
+                logger.warning(
+                    "LocalEnvironment could not spawn %r: %s (after %s). "
+                    "The terminal command will be reported as failed.",
+                    args[0] if args else "<empty>", exc, inner_exc,
+                )
+                raise
         if not _IS_WINDOWS:
             try:
                 proc._hermes_pgid = os.getpgid(proc.pid)
