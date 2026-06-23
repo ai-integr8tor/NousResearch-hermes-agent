@@ -13,6 +13,7 @@ import {
   Command,
   Hash,
   Loader2,
+  Network,
   Sparkles,
   Terminal,
   Zap,
@@ -47,7 +48,7 @@ import {
 } from '@/store/updates'
 import type { StatusResponse } from '@/types/hermes'
 
-import { CRON_ROUTE } from '../../routes'
+import { CRON_ROUTE, SETTINGS_ROUTE } from '../../routes'
 import type { StatusbarItem, StatusbarSelectModifiers } from '../statusbar-controls'
 
 interface StatusbarItemsOptions {
@@ -291,8 +292,68 @@ export function useStatusbarItems({
     copy
   ])
 
+  // Connection-identity pill (VS Code's load-bearing "where am I?" cue). Shown
+  // only for remote connections; hidden in local mode (the unmarked default).
+  // SSH remotes read "SSH: user@host"; token/oauth remotes read "Remote: host"
+  // — closing the same gap for the existing remote modes. Clicking opens the
+  // gateway connection settings so the pill doubles as the switch/disconnect
+  // entry point.
+  const connectionItem = useMemo<StatusbarItem | null>(() => {
+    if (connection?.mode !== 'remote') {
+      return null
+    }
+    // Prefer the host main.cjs put on the descriptor; fall back to parsing the
+    // backend URL (never the 127.0.0.1 tunnel — that's only the SSH baseUrl,
+    // and SSH descriptors always carry remoteHost).
+    let host = connection.remoteHost ?? ''
+    if (!host && connection.baseUrl) {
+      try {
+        host = new URL(connection.baseUrl).host
+      } catch {
+        host = ''
+      }
+    }
+    if (!host) {
+      return null
+    }
+
+    const isSsh = connection.remoteKind === 'ssh'
+    const label = isSsh ? copy.connectionSsh(host) : copy.connectionRemote(host)
+    const baseTooltip = isSsh ? copy.connectionSshTooltip(host) : copy.connectionRemoteTooltip(host)
+    // Append the per-profile scope when this is a profile-scoped connection, so
+    // the pill discloses WHICH profile the host backs (not just the host).
+    const profile = connection.profile
+    const title = profile ? `${baseTooltip} · ${profile}` : baseTooltip
+
+    return {
+      // VS Code-style remote indicator: a solid colored block (not a muted
+      // pill) so "you are running on a remote host" is unmistakable, pinned to
+      // the FAR LEFT of the status bar. SSH gets the primary accent; a plain URL
+      // remote gets a calmer tint so the two are visually distinct.
+      className: cn(
+        'px-2 font-medium',
+        isSsh
+          ? 'bg-primary text-primary-foreground hover:bg-primary/90 hover:text-primary-foreground'
+          : 'bg-accent text-accent-foreground hover:bg-accent/90 hover:text-accent-foreground'
+      ),
+      icon: <Network className="size-3" />,
+      id: 'connection',
+      label,
+      title,
+      // Deep-link straight to the Gateway connection panel (the settings index
+      // reads ?tab=), so the pill lands the user where they manage/switch it.
+      // NB: default (button) variant — NOT 'link', which renders an <a href> and
+      // would swallow the in-app `to:` navigation.
+      to: `${SETTINGS_ROUTE}?tab=gateway`
+    }
+  }, [connection?.mode, connection?.remoteHost, connection?.remoteKind, connection?.baseUrl, connection?.profile, copy])
+
   const coreLeftStatusbarItems = useMemo<readonly StatusbarItem[]>(
     () => [
+      // Remote-connection indicator pinned to the far left (VS Code parity) —
+      // first thing in the bar so "where am I running" is the dominant cue.
+      // Absent in local mode.
+      ...(connectionItem ? [connectionItem] : []),
       {
         className: `w-7 justify-center px-0${commandCenterOpen ? ' bg-accent/55 text-foreground' : ''}`,
         icon: <Command className="size-3.5" />,
@@ -359,6 +420,7 @@ export function useStatusbarItems({
       bgFailed,
       bgRunning,
       commandCenterOpen,
+      connectionItem,
       copy,
       gatewayMenuContent,
       gatewayClassName,

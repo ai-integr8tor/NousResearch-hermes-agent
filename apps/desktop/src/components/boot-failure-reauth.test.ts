@@ -14,6 +14,11 @@ function config(overrides: Partial<DesktopConnectionConfig> = {}): DesktopConnec
     remoteTokenPreview: null,
     remoteTokenSet: false,
     remoteUrl: 'https://box:9119',
+    sshHost: '',
+    sshUser: '',
+    sshPort: null,
+    sshKeyPath: '',
+    sshRemoteHermesPath: '',
     ...overrides
   }
 }

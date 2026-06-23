@@ -631,7 +631,36 @@ export const ja = defineLocale({
       signOutFailed: 'サインアウトに失敗しました',
       testFailed: 'リモートゲートウェイのテストに失敗しました',
       applyFailed: 'ゲートウェイ設定を適用できませんでした',
-      saveFailed: 'ゲートウェイ設定を保存できませんでした'
+      saveFailed: 'ゲートウェイ設定を保存できませんでした',
+      sshTitle: 'SSH で接続',
+      sshDesc:
+        'SSH 経由でリモートの Hermes バックエンドに接続します。ダッシュボードポートの公開もトークンのコピーも不要です。リモート側で Hermes を起動し、このアプリにトンネルします。',
+      sshHostTitle: 'ホスト',
+      sshHostDesc: 'SSH の接続先。例: user@mac-mini.local、または ~/.ssh/config の Host エイリアス。',
+      sshUserTitle: 'ユーザー',
+      sshUserDesc: 'SSH ユーザー名。空欄の場合は ~/.ssh/config または現在のユーザーを使用します。',
+      sshUserPlaceholder: '~/.ssh/config から',
+      sshPortTitle: 'ポート',
+      sshPortDesc: 'SSH ポート。空欄の場合は 22（または ~/.ssh/config の設定）。',
+      sshKeyTitle: '鍵ファイル',
+      sshKeyDesc: '秘密鍵のパス（任意）。空欄の場合は ssh-agent または ~/.ssh/config を使用します。',
+      sshHermesPathTitle: 'Hermes パス（任意）',
+      sshHermesPathDesc: 'リモート上の hermes の場所を上書きします。空欄の場合は自動検出します。',
+      sshHermesPathPlaceholder: '自動検出',
+      sshTestConnection: 'SSH をテスト',
+      sshConnect: '接続',
+      sshReachable: (host, platform) => `接続可能: ${host}（${platform}）— Hermes を検出`,
+      sshIncompleteHost: '接続する前に SSH ホストを入力してください。',
+      sshErrUnreachable: 'SSH でそのホストに到達できませんでした。ホスト、ポート、ネットワークを確認してください。',
+      sshErrAuth:
+        'SSH 認証に失敗しました。鍵を ssh-agent に読み込む（ssh-add）か、~/.ssh/config に IdentityFile を設定してください。Hermes は非対話的に ssh を実行します。',
+      sshErrHostKey:
+        '前回の接続以降、ホスト鍵が変更されています。想定どおりか確認し、ssh-keygen -R <host> を実行してから再接続してください。',
+      sshErrNotInstalled:
+        'リモートホストに Hermes がインストールされていません。リモートでインストールする（curl -fsSL https://hermes-agent.nousresearch.com/install.sh | sh）か、Hermes パスを設定してください。',
+      sshErrPlatform: 'サポートされていないリモートプラットフォームです。Hermes Desktop の SSH モードは Linux と macOS のリモートホストのみ対応しています。',
+      sshErrTimeout: 'SSH 接続がタイムアウトしました。ホストが到達不能、またはスリープ中の可能性があります。',
+      sshErrUnknown: 'SSH 接続に失敗しました。'
     },
     keys: {
       loading: 'API キーと認証情報を読み込み中...',
@@ -1722,6 +1751,10 @@ export const ja = defineLocale({
       backendVersion: version => `バックエンド v${version}`,
       clientLabel: version => `クライアント v${version}`,
       backendLabel: version => `バックエンド v${version}`,
+      connectionSsh: host => `SSH: ${host}`,
+      connectionRemote: host => `リモート: ${host}`,
+      connectionSshTooltip: host => `SSH 経由で ${host} に接続中 · クリックして管理`,
+      connectionRemoteTooltip: host => `リモートバックエンド ${host} に接続中 · クリックして管理`,
       commit: sha => `コミット ${sha}`,
       branch: branch => `ブランチ ${branch}`,
       closeCommandCenter: 'コマンドセンターを閉じる',

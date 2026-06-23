@@ -396,6 +396,31 @@ export interface Translations {
       testFailed: string
       applyFailed: string
       saveFailed: string
+      sshTitle: string
+      sshDesc: string
+      sshHostTitle: string
+      sshHostDesc: string
+      sshUserTitle: string
+      sshUserDesc: string
+      sshUserPlaceholder: string
+      sshPortTitle: string
+      sshPortDesc: string
+      sshKeyTitle: string
+      sshKeyDesc: string
+      sshHermesPathTitle: string
+      sshHermesPathDesc: string
+      sshHermesPathPlaceholder: string
+      sshTestConnection: string
+      sshConnect: string
+      sshReachable: (host: string, platform: string) => string
+      sshIncompleteHost: string
+      sshErrUnreachable: string
+      sshErrAuth: string
+      sshErrHostKey: string
+      sshErrNotInstalled: string
+      sshErrPlatform: string
+      sshErrTimeout: string
+      sshErrUnknown: string
     }
     keys: {
       loading: string
@@ -1230,6 +1255,10 @@ export interface Translations {
       backendVersion: (version: string) => string
       clientLabel: (version: string) => string
       backendLabel: (version: string) => string
+      connectionSsh: (host: string) => string
+      connectionRemote: (host: string) => string
+      connectionSshTooltip: (host: string) => string
+      connectionRemoteTooltip: (host: string) => string
       commit: (sha: string) => string
       branch: (branch: string) => string
       closeCommandCenter: string

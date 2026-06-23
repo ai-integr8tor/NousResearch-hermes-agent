@@ -21,7 +21,14 @@ function connectionCacheKey(connection: HermesConnection | null) {
   if (!connection) {
     return 'local:'
   }
-  return `${connection.mode || 'local'}:${connection.profile || ''}:${connection.baseUrl || ''}`
+  // The remote host is part of the cache identity, NOT just the baseUrl. Local
+  // forwarded ports are reusable across different remotes, so two SSH hosts
+  // that happen to map to the same 127.0.0.1:<localPort> would otherwise
+  // collide — serving one host's cached fs reads for the other. remoteHost is
+  // the user@host (SSH) or the real backend host (token/oauth); fall back to
+  // baseUrl for safety.
+  const host = connection.remoteHost || connection.baseUrl || ''
+  return `${connection.mode || 'local'}:${connection.profile || ''}:${host}:${connection.baseUrl || ''}`
 }
 
 export function desktopFsCacheKey() {

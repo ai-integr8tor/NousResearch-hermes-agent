@@ -5,6 +5,7 @@ import { $connection } from '@/store/session'
 import {
   desktopDefaultCwd,
   desktopGitRoot,
+  desktopFsCacheKey,
   readDesktopDir,
   readDesktopFileDataUrl,
   readDesktopFileText,
@@ -112,5 +113,26 @@ describe('desktop filesystem facade', () => {
 
     expect(remoteSelect).not.toHaveBeenCalled()
     expect(selectPaths).not.toHaveBeenCalled()
+  })
+
+  it('cache key distinguishes two SSH hosts that share the same local forwarded port', () => {
+    // Both remotes resolve to the same loopback tunnel baseUrl (the local
+    // forwarded port is reusable across remotes). Without the remoteHost in the
+    // identity these collide and one host's cached fs reads serve the other.
+    $connection.set({ mode: 'remote', baseUrl: 'http://127.0.0.1:50001', remoteHost: 'jonny@mac-mini' } as never)
+    const keyA = desktopFsCacheKey()
+    $connection.set({ mode: 'remote', baseUrl: 'http://127.0.0.1:50001', remoteHost: 'jonny@ubuntu-box' } as never)
+    const keyB = desktopFsCacheKey()
+
+    expect(keyA).not.toBe(keyB)
+    expect(keyA).toContain('mac-mini')
+    expect(keyB).toContain('ubuntu-box')
+  })
+
+  it('cache key falls back to baseUrl when no remoteHost is present', () => {
+    $connection.set({ mode: 'remote', baseUrl: 'https://box.tail1234.ts.net' } as never)
+    expect(desktopFsCacheKey()).toContain('box.tail1234.ts.net')
+    $connection.set(null)
+    expect(desktopFsCacheKey()).toBe('local:')
   })
 })

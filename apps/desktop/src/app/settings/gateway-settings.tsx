@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import type { DesktopAuthProvider, DesktopConnectionProbeResult } from '@/global'
 import { useI18n } from '@/i18n'
-import { AlertCircle, Check, FileText, Globe, Loader2, LogIn, Monitor } from '@/lib/icons'
+import { AlertCircle, Check, FileText, Globe, Loader2, LogIn, Monitor, Network } from '@/lib/icons'
 import { cn } from '@/lib/utils'
 import { notify, notifyError } from '@/store/notifications'
 import { $profiles, refreshActiveProfile } from '@/store/profile'
@@ -13,9 +13,10 @@ import { $profiles, refreshActiveProfile } from '@/store/profile'
 import { CONTROL_TEXT } from './constants'
 import { EmptyState, ListRow, LoadingState, Pill, SettingsContent } from './primitives'
 
-type Mode = 'local' | 'remote'
+type Mode = 'local' | 'remote' | 'ssh'
 type AuthMode = 'oauth' | 'token'
 type ProbeStatus = 'idle' | 'probing' | 'done' | 'error'
+type SshTestStatus = 'idle' | 'testing' | 'ok' | 'error'
 
 interface GatewaySettingsState {
   envOverride: boolean
@@ -25,6 +26,11 @@ interface GatewaySettingsState {
   remoteTokenPreview: string | null
   remoteTokenSet: boolean
   remoteUrl: string
+  sshHost: string
+  sshUser: string
+  sshPort: number | null
+  sshKeyPath: string
+  sshRemoteHermesPath: string
 }
 
 const EMPTY_STATE: GatewaySettingsState = {
@@ -34,7 +40,12 @@ const EMPTY_STATE: GatewaySettingsState = {
   remoteOauthConnected: false,
   remoteTokenPreview: null,
   remoteTokenSet: false,
-  remoteUrl: ''
+  remoteUrl: '',
+  sshHost: '',
+  sshUser: '',
+  sshPort: null,
+  sshKeyPath: '',
+  sshRemoteHermesPath: ''
 }
 
 function ModeCard({
@@ -104,6 +115,12 @@ export function GatewaySettings() {
   const [state, setState] = useState<GatewaySettingsState>(EMPTY_STATE)
   const [remoteToken, setRemoteToken] = useState('')
   const [lastTest, setLastTest] = useState<null | string>(null)
+
+  // SSH-mode local UI state: the connection test result, ~/.ssh/config host
+  // suggestions, and the `ssh -G` resolution of the entered host.
+  const [sshTestStatus, setSshTestStatus] = useState<SshTestStatus>('idle')
+  const [sshTestMessage, setSshTestMessage] = useState<null | string>(null)
+  const [sshHostSuggestions, setSshHostSuggestions] = useState<string[]>([])
 
   // Connection scope: null = the global/default connection (the original
   // behavior); a profile name = that profile's per-profile remote override, so
@@ -265,6 +282,23 @@ export function GatewaySettings() {
   // per-profile scopes are the named, non-default profiles.
   const namedProfiles = useMemo(() => profiles.filter(profile => profile.name !== 'default'), [profiles])
 
+  // Load ~/.ssh/config host suggestions once SSH mode is active (read-only).
+  useEffect(() => {
+    if (state.mode !== 'ssh') return
+    const desktop = window.hermesDesktop
+    if (!desktop?.sshConfigHosts) return
+    let cancelled = false
+    desktop
+      .sshConfigHosts()
+      .then(result => {
+        if (!cancelled) setSshHostSuggestions(result.hosts || [])
+      })
+      .catch(() => {
+        if (!cancelled) setSshHostSuggestions([])
+      })
+    return () => void (cancelled = true)
+  }, [state.mode])
+
   const oauthConnected = state.remoteOauthConnected
 
   const canUseRemote = useMemo(() => {
@@ -407,13 +441,115 @@ export function GatewaySettings() {
         remoteUrl: trimmedUrl
       })
 
-      const message = g.connectedTo(result.baseUrl, result.version ?? undefined)
+      const message = g.connectedTo(result.baseUrl ?? trimmedUrl, result.version ?? undefined)
       setLastTest(message)
       notify({ kind: 'success', title: g.reachableTitle, message })
     } catch (err) {
       notifyError(err, g.testFailed)
     } finally {
       setTesting(false)
+    }
+  }
+
+  // --- SSH mode -------------------------------------------------------------
+
+  const canUseSsh = Boolean(state.sshHost.trim())
+
+  const sshPayload = () => ({
+    mode: 'ssh' as const,
+    profile: scope ?? undefined,
+    sshHost: state.sshHost.trim(),
+    sshUser: state.sshUser.trim() || undefined,
+    sshPort: state.sshPort ?? undefined,
+    sshKeyPath: state.sshKeyPath.trim() || undefined,
+    sshRemoteHermesPath: state.sshRemoteHermesPath.trim() || undefined
+  })
+
+  // Map an SSH test error kind to actionable copy.
+  const sshErrorMessage = (kind: string | null | undefined, raw: string | null | undefined): string => {
+    switch (kind) {
+      case 'auth-failed':
+        return g.sshErrAuth
+      case 'unreachable':
+        return g.sshErrUnreachable
+      case 'host-key-changed':
+        return g.sshErrHostKey
+      case 'hermes-not-found':
+        return g.sshErrNotInstalled
+      case 'unsupported-platform':
+        return g.sshErrPlatform
+      case 'timeout':
+        return g.sshErrTimeout
+      default:
+        return raw || g.sshErrUnknown
+    }
+  }
+
+  const sshTest = async () => {
+    if (!canUseSsh) {
+      notify({ kind: 'warning', title: g.incompleteTitle, message: g.sshIncompleteHost })
+      return
+    }
+    setSshTestStatus('testing')
+    setSshTestMessage(null)
+    try {
+      const result = await window.hermesDesktop.testConnectionConfig(sshPayload())
+      if (result.reachable) {
+        const message = g.sshReachable(result.host ?? state.sshHost, result.remotePlatform ?? '?')
+        setSshTestStatus('ok')
+        setSshTestMessage(message)
+        notify({ kind: 'success', title: g.reachableTitle, message })
+      } else {
+        const message = sshErrorMessage(result.sshError, result.error)
+        setSshTestStatus('error')
+        setSshTestMessage(message)
+        notify({ kind: 'warning', title: g.testFailed, message })
+      }
+    } catch (err) {
+      setSshTestStatus('error')
+      setSshTestMessage(err instanceof Error ? err.message : String(err))
+      notifyError(err, g.testFailed)
+    }
+  }
+
+  // Resolve the entered host via `ssh -G` and fill in any blank user/port the
+  // alias expands to (so the saved config matches what ssh will actually use).
+  const sshResolve = async () => {
+    const host = state.sshHost.trim()
+    if (!host || !window.hermesDesktop?.sshResolveHost) return
+    try {
+      const resolved = await window.hermesDesktop.sshResolveHost(host)
+      setState(current => ({
+        ...current,
+        sshUser: current.sshUser.trim() || resolved.user || '',
+        sshPort: current.sshPort ?? (resolved.port && resolved.port !== 22 ? resolved.port : null),
+        sshKeyPath: current.sshKeyPath.trim() || resolved.identityFile || ''
+      }))
+    } catch {
+      // best-effort enrichment; leave the fields as entered
+    }
+  }
+
+  const sshSave = async (apply: boolean) => {
+    if (!canUseSsh) {
+      notify({ kind: 'warning', title: g.incompleteTitle, message: g.sshIncompleteHost })
+      return
+    }
+    setSaving(true)
+    try {
+      const next = apply
+        ? await window.hermesDesktop.applyConnectionConfig(sshPayload())
+        : await window.hermesDesktop.saveConnectionConfig(sshPayload())
+      setState(next)
+      notify({
+        kind: 'success',
+        title: apply ? g.restartingTitle : g.savedTitle,
+        message: apply ? g.restartingMessage : g.savedMessage
+      })
+    } catch (err) {
+      notifyError(err, apply ? g.applyFailed : g.saveFailed)
+    } finally {
+      setSaving(false)
     }
   }
 
@@ -477,7 +613,7 @@ export function GatewaySettings() {
         </div>
       ) : null}
 
-      <div className="grid gap-3 sm:grid-cols-2">
+      <div className="grid gap-3 sm:grid-cols-3">
         <ModeCard
           active={state.mode === 'local'}
           description={g.localDesc}
@@ -494,22 +630,32 @@ export function GatewaySettings() {
           onSelect={() => setState(current => ({ ...current, mode: 'remote' }))}
           title={g.remoteTitle}
         />
+        <ModeCard
+          active={state.mode === 'ssh'}
+          description={g.sshDesc}
+          disabled={state.envOverride}
+          icon={Network}
+          onSelect={() => setState(current => ({ ...current, mode: 'ssh' }))}
+          title={g.sshTitle}
+        />
       </div>
 
       <div className="mt-5 grid gap-1">
-        <ListRow
-          action={
-            <Input
-              className={cn('h-8', CONTROL_TEXT)}
-              disabled={state.envOverride}
-              onChange={event => setState(current => ({ ...current, remoteUrl: event.target.value }))}
-              placeholder="https://gateway.example.com/hermes"
-              value={state.remoteUrl}
-            />
-          }
-          description={g.remoteUrlDesc}
-          title={g.remoteUrlTitle}
-        />
+        {state.mode === 'remote' ? (
+          <ListRow
+            action={
+              <Input
+                className={cn('h-8', CONTROL_TEXT)}
+                disabled={state.envOverride}
+                onChange={event => setState(current => ({ ...current, remoteUrl: event.target.value }))}
+                placeholder="https://gateway.example.com/hermes"
+                value={state.remoteUrl}
+              />
+            }
+            description={g.remoteUrlDesc}
+            title={g.remoteUrlTitle}
+          />
+        ) : null}
 
         {state.mode === 'remote' && probeStatus === 'probing' ? (
           <div className="flex items-center gap-2 py-3 text-[length:var(--conversation-caption-font-size)] text-(--ui-text-tertiary)">
@@ -579,28 +725,159 @@ export function GatewaySettings() {
             title={g.tokenTitle}
           />
         ) : null}
+
+        {/* SSH mode: connect via the box's SSH access; no token to copy. */}
+        {state.mode === 'ssh' ? (
+          <>
+            <ListRow
+              action={
+                <Input
+                  className={cn('h-8', CONTROL_TEXT)}
+                  disabled={state.envOverride}
+                  list="hermes-ssh-host-suggestions"
+                  onBlur={() => void sshResolve()}
+                  onChange={event => setState(current => ({ ...current, sshHost: event.target.value }))}
+                  placeholder="user@mac-mini.local  or  mac-mini"
+                  value={state.sshHost}
+                />
+              }
+              description={g.sshHostDesc}
+              title={g.sshHostTitle}
+            />
+            {sshHostSuggestions.length > 0 ? (
+              <datalist id="hermes-ssh-host-suggestions">
+                {sshHostSuggestions.map(host => (
+                  <option key={host} value={host} />
+                ))}
+              </datalist>
+            ) : null}
+            <ListRow
+              action={
+                <Input
+                  className={cn('h-8', CONTROL_TEXT)}
+                  disabled={state.envOverride}
+                  onChange={event => setState(current => ({ ...current, sshUser: event.target.value }))}
+                  placeholder={g.sshUserPlaceholder}
+                  value={state.sshUser}
+                />
+              }
+              description={g.sshUserDesc}
+              title={g.sshUserTitle}
+            />
+            <ListRow
+              action={
+                <Input
+                  className={cn('h-8', CONTROL_TEXT)}
+                  disabled={state.envOverride}
+                  onChange={event =>
+                    setState(current => ({
+                      ...current,
+                      sshPort: event.target.value.trim() ? Number.parseInt(event.target.value, 10) || null : null
+                    }))
+                  }
+                  placeholder="22"
+                  value={state.sshPort != null ? String(state.sshPort) : ''}
+                />
+              }
+              description={g.sshPortDesc}
+              title={g.sshPortTitle}
+            />
+            <ListRow
+              action={
+                <Input
+                  className={cn('h-8', CONTROL_TEXT)}
+                  disabled={state.envOverride}
+                  onChange={event => setState(current => ({ ...current, sshKeyPath: event.target.value }))}
+                  placeholder="~/.ssh/id_ed25519"
+                  value={state.sshKeyPath}
+                />
+              }
+              description={g.sshKeyDesc}
+              title={g.sshKeyTitle}
+            />
+            <ListRow
+              action={
+                <Input
+                  className={cn('h-8', CONTROL_TEXT)}
+                  disabled={state.envOverride}
+                  onChange={event => setState(current => ({ ...current, sshRemoteHermesPath: event.target.value }))}
+                  placeholder={g.sshHermesPathPlaceholder}
+                  value={state.sshRemoteHermesPath}
+                />
+              }
+              description={g.sshHermesPathDesc}
+              title={g.sshHermesPathTitle}
+            />
+            {sshTestStatus !== 'idle' && sshTestMessage ? (
+              <div
+                className={cn(
+                  'flex items-start gap-2 py-3 text-[length:var(--conversation-caption-font-size)]',
+                  sshTestStatus === 'ok' ? 'text-primary' : 'text-(--ui-text-tertiary)'
+                )}
+              >
+                {sshTestStatus === 'testing' ? (
+                  <Loader2 className="mt-0.5 size-4 shrink-0 animate-spin" />
+                ) : sshTestStatus === 'ok' ? (
+                  <Check className="mt-0.5 size-4 shrink-0" />
+                ) : (
+                  <AlertCircle className="mt-0.5 size-4 shrink-0" />
+                )}
+                <span>{sshTestMessage}</span>
+              </div>
+            ) : null}
+          </>
+        ) : null}
       </div>
 
       {lastTest ? <div className="mt-4 text-xs text-primary">{lastTest}</div> : null}
 
       <div className="mt-6 flex flex-wrap items-center justify-end gap-4">
-        <Button
-          className="mr-auto"
-          disabled={state.envOverride || testing || !canUseRemote}
-          onClick={() => void testRemote()}
-          size="sm"
-          variant="text"
-        >
-          {testing ? <Loader2 className="animate-spin" /> : null}
-          {g.testRemote}
-        </Button>
-        <Button disabled={state.envOverride || saving} onClick={() => void save(false)} size="sm" variant="textStrong">
-          {g.saveForRestart}
-        </Button>
-        <Button disabled={state.envOverride || saving} onClick={() => void save(true)} size="sm">
-          {saving ? <Loader2 className="animate-spin" /> : null}
-          {g.saveAndReconnect}
-        </Button>
+        {state.mode === 'ssh' ? (
+          <>
+            <Button
+              className="mr-auto"
+              disabled={state.envOverride || sshTestStatus === 'testing' || !canUseSsh}
+              onClick={() => void sshTest()}
+              size="sm"
+              variant="text"
+            >
+              {sshTestStatus === 'testing' ? <Loader2 className="animate-spin" /> : null}
+              {g.sshTestConnection}
+            </Button>
+            <Button
+              disabled={state.envOverride || saving}
+              onClick={() => void sshSave(false)}
+              size="sm"
+              variant="textStrong"
+            >
+              {g.saveForRestart}
+            </Button>
+            <Button disabled={state.envOverride || saving || !canUseSsh} onClick={() => void sshSave(true)} size="sm">
+              {saving ? <Loader2 className="animate-spin" /> : null}
+              {g.sshConnect}
+            </Button>
+          </>
+        ) : (
+          <>
+            <Button
+              className="mr-auto"
+              disabled={state.envOverride || testing || !canUseRemote}
+              onClick={() => void testRemote()}
+              size="sm"
+              variant="text"
+            >
+              {testing ? <Loader2 className="animate-spin" /> : null}
+              {g.testRemote}
+            </Button>
+            <Button disabled={state.envOverride || saving} onClick={() => void save(false)} size="sm" variant="textStrong">
+              {g.saveForRestart}
+            </Button>
+            <Button disabled={state.envOverride || saving} onClick={() => void save(true)} size="sm">
+              {saving ? <Loader2 className="animate-spin" /> : null}
+              {g.saveAndReconnect}
+            </Button>
+          </>
+        )}
       </div>
 
       <div className="mt-6 grid gap-1">

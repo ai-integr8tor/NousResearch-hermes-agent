@@ -504,7 +504,36 @@ export const en: Translations = {
       signOutFailed: 'Sign-out failed',
       testFailed: 'Remote gateway test failed',
       applyFailed: 'Could not apply gateway settings',
-      saveFailed: 'Could not save gateway settings'
+      saveFailed: 'Could not save gateway settings',
+      sshTitle: 'Connect via SSH',
+      sshDesc:
+        'Reach a remote Hermes backend over SSH — no exposed dashboard port, no token to copy. Hermes is bootstrapped on the remote and tunneled to this app.',
+      sshHostTitle: 'Host',
+      sshHostDesc: 'The SSH target, e.g. user@mac-mini.local or a Host alias from ~/.ssh/config.',
+      sshUserTitle: 'User',
+      sshUserDesc: 'SSH username. Leave blank to use ~/.ssh/config or your current user.',
+      sshUserPlaceholder: 'from ~/.ssh/config',
+      sshPortTitle: 'Port',
+      sshPortDesc: 'SSH port. Leave blank for 22 (or the port set in ~/.ssh/config).',
+      sshKeyTitle: 'Identity file',
+      sshKeyDesc: 'Optional private key path. Leave blank to use your ssh-agent or ~/.ssh/config.',
+      sshHermesPathTitle: 'Hermes path (optional)',
+      sshHermesPathDesc: 'Override where hermes is found on the remote. Leave blank to auto-detect.',
+      sshHermesPathPlaceholder: 'auto-detect',
+      sshTestConnection: 'Test SSH',
+      sshConnect: 'Connect',
+      sshReachable: (host, platform) => `Reachable: ${host} (${platform}) — Hermes found`,
+      sshIncompleteHost: 'Enter an SSH host before connecting.',
+      sshErrUnreachable: 'Could not reach that host over SSH. Check the host, port, and your network.',
+      sshErrAuth:
+        'SSH authentication failed. Load your key into the ssh-agent (ssh-add) or set an IdentityFile in ~/.ssh/config — Hermes runs ssh non-interactively.',
+      sshErrHostKey:
+        'The host key has CHANGED since you last connected. Verify this is expected, then run ssh-keygen -R <host> and reconnect.',
+      sshErrNotInstalled:
+        'Hermes is not installed on the remote host. Install it there (curl -fsSL https://hermes-agent.nousresearch.com/install.sh | sh) or set the Hermes path.',
+      sshErrPlatform: 'Unsupported remote platform. Hermes Desktop SSH mode supports Linux and macOS remote hosts only.',
+      sshErrTimeout: 'The SSH connection timed out. The host may be unreachable or asleep.',
+      sshErrUnknown: 'SSH connection failed.'
     },
     keys: {
       loading: 'Loading API keys and credentials...',
@@ -1593,6 +1622,10 @@ export const en: Translations = {
       backendVersion: version => `Backend v${version}`,
       clientLabel: version => `client v${version}`,
       backendLabel: version => `backend v${version}`,
+      connectionSsh: host => `SSH: ${host}`,
+      connectionRemote: host => `Remote: ${host}`,
+      connectionSshTooltip: host => `Connected over SSH to ${host} · click to manage`,
+      connectionRemoteTooltip: host => `Connected to remote backend ${host} · click to manage`,
       commit: sha => `commit ${sha}`,
       branch: branch => `branch ${branch}`,
       closeCommandCenter: 'Close Command Center',

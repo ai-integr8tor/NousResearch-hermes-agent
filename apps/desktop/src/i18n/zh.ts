@@ -698,7 +698,36 @@ export const zh: Translations = {
       signOutFailed: '退出登录失败',
       testFailed: '远程网关测试失败',
       applyFailed: '无法应用网关设置',
-      saveFailed: '无法保存网关设置'
+      saveFailed: '无法保存网关设置',
+      sshTitle: '通过 SSH 连接',
+      sshDesc:
+        '通过 SSH 连接到远程 Hermes 后端——无需暴露面板端口，也无需复制令牌。Hermes 会在远程主机上启动并通过隧道连接到本应用。',
+      sshHostTitle: '主机',
+      sshHostDesc: 'SSH 目标，例如 user@mac-mini.local，或 ~/.ssh/config 中的 Host 别名。',
+      sshUserTitle: '用户',
+      sshUserDesc: 'SSH 用户名。留空则使用 ~/.ssh/config 或当前用户。',
+      sshUserPlaceholder: '来自 ~/.ssh/config',
+      sshPortTitle: '端口',
+      sshPortDesc: 'SSH 端口。留空则为 22（或 ~/.ssh/config 中设置的端口）。',
+      sshKeyTitle: '密钥文件',
+      sshKeyDesc: '可选的私钥路径。留空则使用 ssh-agent 或 ~/.ssh/config。',
+      sshHermesPathTitle: 'Hermes 路径（可选）',
+      sshHermesPathDesc: '覆盖远程主机上 hermes 的位置。留空则自动检测。',
+      sshHermesPathPlaceholder: '自动检测',
+      sshTestConnection: '测试 SSH',
+      sshConnect: '连接',
+      sshReachable: (host, platform) => `可连接：${host}（${platform}）——已找到 Hermes`,
+      sshIncompleteHost: '连接前请输入 SSH 主机。',
+      sshErrUnreachable: '无法通过 SSH 连接到该主机。请检查主机、端口和网络。',
+      sshErrAuth:
+        'SSH 认证失败。请将密钥加载到 ssh-agent（ssh-add），或在 ~/.ssh/config 中设置 IdentityFile——Hermes 以非交互方式运行 ssh。',
+      sshErrHostKey:
+        '自上次连接以来主机密钥已更改。请确认这是预期的，然后运行 ssh-keygen -R <host> 并重新连接。',
+      sshErrNotInstalled:
+        '远程主机上未安装 Hermes。请在远程安装（curl -fsSL https://hermes-agent.nousresearch.com/install.sh | sh）或设置 Hermes 路径。',
+      sshErrPlatform: '不支持的远程平台。Hermes Desktop 的 SSH 模式仅支持 Linux 和 macOS 远程主机。',
+      sshErrTimeout: 'SSH 连接超时。主机可能无法访问或处于休眠状态。',
+      sshErrUnknown: 'SSH 连接失败。'
     },
     keys: {
       loading: '正在加载 API 密钥和凭据...',
@@ -1770,6 +1799,10 @@ export const zh: Translations = {
       backendVersion: version => `后端 v${version}`,
       clientLabel: version => `客户端 v${version}`,
       backendLabel: version => `后端 v${version}`,
+      connectionSsh: host => `SSH: ${host}`,
+      connectionRemote: host => `远程: ${host}`,
+      connectionSshTooltip: host => `已通过 SSH 连接到 ${host} · 点击管理`,
+      connectionRemoteTooltip: host => `已连接到远程后端 ${host} · 点击管理`,
       commit: sha => `提交 ${sha}`,
       branch: branch => `分支 ${branch}`,
       closeCommandCenter: '关闭命令中心',

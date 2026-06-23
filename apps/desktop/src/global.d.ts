@@ -31,6 +31,8 @@ declare global {
       saveConnectionConfig: (payload: DesktopConnectionConfigInput) => Promise<DesktopConnectionConfig>
       applyConnectionConfig: (payload: DesktopConnectionConfigInput) => Promise<DesktopConnectionConfig>
       testConnectionConfig: (payload: DesktopConnectionConfigInput) => Promise<DesktopConnectionTestResult>
+      sshConfigHosts: () => Promise<DesktopSshHostsResult>
+      sshResolveHost: (host: string) => Promise<DesktopSshResolveResult>
       probeConnectionConfig: (remoteUrl: string) => Promise<DesktopConnectionProbeResult>
       oauthLoginConnectionConfig: (remoteUrl: string) => Promise<DesktopOauthLoginResult>
       oauthLogoutConnectionConfig: (remoteUrl?: string) => Promise<DesktopOauthLogoutResult>
@@ -283,6 +285,13 @@ export interface HermesConnection {
   isFullscreen: boolean
   mode?: 'local' | 'remote'
   authMode?: 'oauth' | 'token'
+  // Human-facing host for the statusbar connection pill. For SSH remotes this
+  // is the user@host the tunnel reaches; for token/oauth remotes it's the host
+  // parsed from the real backend URL. Absent in local mode.
+  remoteHost?: string
+  // Distinguishes an SSH-tunnelled remote ('ssh') from a direct URL remote
+  // ('url') so the pill can label it SSH: vs Remote:. Absent in local mode.
+  remoteKind?: 'ssh' | 'url'
   nativeOverlayWidth: number
   source?: 'env' | 'local' | 'settings'
   token: string
@@ -313,31 +322,66 @@ export interface DesktopActiveProfile {
 
 export interface DesktopConnectionConfig {
   envOverride: boolean
-  mode: 'local' | 'remote'
+  mode: 'local' | 'remote' | 'ssh'
   // The profile this config describes, or null for the global/default
   // connection. Per-profile entries let a profile point at its own backend.
   profile: null | string
+  // Remote-auth fields are always present (the sanitizer fills defaults even in
+  // local/ssh mode) so consumers can read them without optional-narrowing.
   remoteAuthMode: 'oauth' | 'token'
   remoteOauthConnected: boolean
   remoteTokenPreview: string | null
   remoteTokenSet: boolean
   remoteUrl: string
+  // SSH mode fields. Always present on the contract (empty strings / null in
+  // local/remote mode, populated when mode === 'ssh') so the renderer never
+  // optional-narrows. No token is surfaced — the dashboard session token is an
+  // internal artifact reconciled at bootstrap.
+  sshHost: string
+  sshUser: string
+  sshPort: number | null
+  sshKeyPath: string
+  sshRemoteHermesPath: string
 }
 
 export interface DesktopConnectionConfigInput {
-  mode: 'local' | 'remote'
+  mode: 'local' | 'remote' | 'ssh'
   // When set, the save/apply/test targets this profile's per-profile remote
   // override instead of the global connection.
   profile?: null | string
   remoteAuthMode?: 'oauth' | 'token'
   remoteToken?: string
   remoteUrl?: string
+  // SSH mode input fields.
+  sshHost?: string
+  sshUser?: string
+  sshPort?: number | null
+  sshKeyPath?: string
+  sshRemoteHermesPath?: string
 }
 
 export interface DesktopConnectionTestResult {
-  baseUrl: string
-  ok: boolean
-  version: string | null
+  baseUrl?: string
+  ok?: boolean
+  version?: string | null
+  // SSH-mode test result fields.
+  reachable?: boolean
+  sshError?: 'unreachable' | 'auth-failed' | 'host-key-changed' | 'hermes-not-found' | 'unsupported-platform' | 'timeout' | 'unknown' | null
+  error?: string | null
+  remotePlatform?: string
+  remoteHermesPath?: string
+  host?: string
+}
+
+export interface DesktopSshResolveResult {
+  hostname: string | null
+  user: string | null
+  port: number | null
+  identityFile: string | null
+}
+
+export interface DesktopSshHostsResult {
+  hosts: string[]
 }
 
 export interface DesktopAuthProvider {
