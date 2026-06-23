@@ -538,7 +538,7 @@
    * because the host's ConfirmDialog hardcodes `onClick → unmount`, which
    * prevents keeping the dialog open across a validation failure. See
    * issue #50547 followups. Completion summaries triggered from the
-   * side-drawer use a documented carve-out (`withCompletionPrompt` in
+   * side-drawer use a documented carve-out (`withCompletionSummary` in
    * TaskDetail) until that lands.
    */
   function KanbanDialogs(props) {
@@ -3157,7 +3157,7 @@
       return applyPatch(patch);
 
       function applyPatch(patch) {
-        const finalPatch = withCompletionPrompt(patch);
+        const finalPatch = withCompletionSummary(patch);
         if (!finalPatch) return Promise.resolve();
         setPatchErr(null);
         return SDK.fetchJSON(withBoard(`${API}/tasks/${encodeURIComponent(props.taskId)}`, boardSlug), {
@@ -3171,7 +3171,7 @@
 
     // Local completion-summary prompt used only by doPatch above.
     // Documented carve-out — see the doPatch comment.
-    function withCompletionPrompt(patch) {
+    function withCompletionSummary(patch) {
       if (!patch || patch.status !== "done") return patch;
       const value = window.prompt(
         tx(t, "completionSummary",
