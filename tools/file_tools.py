@@ -742,30 +742,34 @@ def _get_file_ops(task_id: str = "default") -> ShellFileOperations:
     a registered env override keep their isolation.
     """
     from tools.terminal_tool import (
-        _active_environments, _env_lock, _create_environment,
-        _get_env_config, _last_activity, _start_cleanup_thread,
+        _create_environment,
+        _get_env_config,
+        _start_cleanup_thread,
         _creation_locks,
         _creation_locks_lock,
         _resolve_container_task_id,
+        _get_active_environment_if_compatible,
+        _store_active_environment,
+        _terminal_env_signature,
+        resolve_task_overrides,
     )
-    import time
 
     raw_task_id = task_id or "default"
     task_id = _resolve_container_task_id(raw_task_id)
+    config = _get_env_config()
+    overrides = resolve_task_overrides(raw_task_id)
+    env_signature = _terminal_env_signature(config, task_id=task_id, overrides=overrides)
 
-    # Fast path: check cache -- but also verify the underlying environment
-    # is still alive (it may have been killed by the cleanup thread).
+    # Fast path: check file-ops cache only if the underlying environment still
+    # exists and still matches the current runtime signature.
     with _file_ops_lock:
         cached = _file_ops_cache.get(task_id)
     if cached is not None:
-        with _env_lock:
-            if task_id in _active_environments:
-                _last_activity[task_id] = time.time()
-                return cached
-            else:
-                # Environment was cleaned up -- invalidate stale cache entry
-                with _file_ops_lock:
-                    _file_ops_cache.pop(task_id, None)
+        terminal_env = _get_active_environment_if_compatible(task_id, env_signature)
+        if terminal_env is not None:
+            return cached
+        with _file_ops_lock:
+            _file_ops_cache.pop(task_id, None)
 
     # Need to ensure the environment exists before building file_ops.
     # Acquire per-task lock so only one thread creates the sandbox.
@@ -775,20 +779,11 @@ def _get_file_ops(task_id: str = "default") -> ShellFileOperations:
         task_lock = _creation_locks[task_id]
 
     with task_lock:
-        # Double-check: another thread may have created it while we waited
-        with _env_lock:
-            if task_id in _active_environments:
-                _last_activity[task_id] = time.time()
-                terminal_env = _active_environments[task_id]
-            else:
-                terminal_env = None
+        # Double-check: another thread may have created it while we waited.
+        terminal_env = _get_active_environment_if_compatible(task_id, env_signature)
 
         if terminal_env is None:
-            from tools.terminal_tool import resolve_task_overrides
-
-            config = _get_env_config()
             env_type = config["env_type"]
-            overrides = resolve_task_overrides(raw_task_id)
 
             if env_type == "docker":
                 image = overrides.get("docker_image") or config["docker_image"]
@@ -845,9 +840,7 @@ def _get_file_ops(task_id: str = "default") -> ShellFileOperations:
                 host_cwd=config.get("host_cwd"),
             )
 
-            with _env_lock:
-                _active_environments[task_id] = terminal_env
-                _last_activity[task_id] = time.time()
+            _store_active_environment(task_id, terminal_env, env_signature)
 
             _start_cleanup_thread()
             logger.info("%s environment ready for task %s", env_type, task_id[:8])

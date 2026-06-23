@@ -605,19 +605,31 @@ def _get_or_create_env(task_id: str):
     Returns ``(env, env_type)`` tuple.
     """
     from tools.terminal_tool import (
-        _active_environments, _env_lock, _create_environment,
-        _get_env_config, _last_activity, _start_cleanup_thread,
-        _creation_locks, _creation_locks_lock, _task_env_overrides,
+        _create_environment,
+        _get_env_config,
+        _start_cleanup_thread,
+        _creation_locks,
+        _creation_locks_lock,
+        _task_env_overrides,
         _resolve_container_task_id,
+        _get_active_environment_if_compatible,
+        _store_active_environment,
+        _terminal_env_signature,
     )
 
     effective_task_id = _resolve_container_task_id(task_id)
+    config = _get_env_config()
+    overrides = _task_env_overrides.get(effective_task_id, {})
+    env_signature = _terminal_env_signature(
+        config,
+        task_id=effective_task_id,
+        overrides=overrides,
+    )
 
-    # Fast path: environment already exists
-    with _env_lock:
-        if effective_task_id in _active_environments:
-            _last_activity[effective_task_id] = time.time()
-            return _active_environments[effective_task_id], _get_env_config()["env_type"]
+    # Fast path: environment already exists and still matches current runtime.
+    env = _get_active_environment_if_compatible(effective_task_id, env_signature)
+    if env is not None:
+        return env, config["env_type"]
 
     # Slow path: create environment (same pattern as file_tools._get_file_ops)
     with _creation_locks_lock:
@@ -626,14 +638,11 @@ def _get_or_create_env(task_id: str):
         task_lock = _creation_locks[effective_task_id]
 
     with task_lock:
-        with _env_lock:
-            if effective_task_id in _active_environments:
-                _last_activity[effective_task_id] = time.time()
-                return _active_environments[effective_task_id], _get_env_config()["env_type"]
+        env = _get_active_environment_if_compatible(effective_task_id, env_signature)
+        if env is not None:
+            return env, config["env_type"]
 
-        config = _get_env_config()
         env_type = config["env_type"]
-        overrides = _task_env_overrides.get(effective_task_id, {})
 
         if env_type == "docker":
             image = overrides.get("docker_image") or config["docker_image"]
@@ -689,9 +698,7 @@ def _get_or_create_env(task_id: str):
             host_cwd=config.get("host_cwd"),
         )
 
-        with _env_lock:
-            _active_environments[effective_task_id] = env
-            _last_activity[effective_task_id] = time.time()
+        _store_active_environment(effective_task_id, env, env_signature)
 
         _start_cleanup_thread()
         logger.info("%s environment ready for execute_code task %s",
