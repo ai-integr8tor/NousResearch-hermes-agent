@@ -618,6 +618,140 @@ def _maybe_skip_cron_duplicate_send(platform_name: str, chat_id: str, thread_id:
     }
 
 
+# Media extension sets for live-adapter dispatch (mirrors cron.scheduler's
+# _send_media_via_adapter so in-process and cron deliveries route identically).
+_LIVE_VIDEO_EXTS = frozenset({'.mp4', '.mov', '.avi', '.mkv', '.webm', '.3gp'})
+_LIVE_IMAGE_EXTS = frozenset({'.jpg', '.jpeg', '.png', '.webp', '.gif'})
+
+
+async def _await_on_adapter_loop(runner, coro):
+    """Await ``coro`` on the loop the live adapter's I/O is bound to.
+
+    A connected adapter's network primitives (e.g. an ``aiohttp.ClientSession``)
+    are created on, and bound to, the gateway event loop. But the
+    ``send_message`` tool drives sends through ``model_tools._run_async``, which
+    — when already inside the gateway loop — runs the send coroutine on a
+    *fresh worker loop on a separate thread*. Awaiting ``adapter.send`` (or a
+    typed media method) directly there enters the gateway-loop-bound session's
+    timeout context from the wrong loop, where ``asyncio.current_task()`` is
+    ``None`` → aiohttp raises ``RuntimeError: Timeout context manager should be
+    used inside a task``.
+
+    When the runner exposes a *running* ``_gateway_loop`` that is NOT the loop
+    we are currently on, marshal the coroutine onto it via
+    ``asyncio.run_coroutine_threadsafe`` (leak-safe ``safe_schedule_threadsafe``)
+    and bridge the resulting ``concurrent.futures.Future`` back to the current
+    loop with ``asyncio.wrap_future`` — so the await is non-blocking and the
+    adapter I/O runs in a task on its own loop. This mirrors how
+    ``cron.scheduler._deliver_result`` marshals live-adapter sends onto the
+    gateway loop from its worker-thread tick.
+
+    When there is no distinct running gateway loop (the standalone/test path, or
+    the rare case where the tool already runs on the gateway loop), the
+    coroutine is awaited directly — byte-identical to the prior behavior.
+    """
+    gateway_loop = getattr(runner, "_gateway_loop", None)
+    try:
+        current_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        current_loop = None
+
+    if (
+        gateway_loop is not None
+        and gateway_loop is not current_loop
+        and getattr(gateway_loop, "is_running", lambda: False)()
+    ):
+        from agent.async_utils import safe_schedule_threadsafe
+
+        future = safe_schedule_threadsafe(coro, gateway_loop)
+        if future is not None:
+            return await asyncio.wrap_future(future)
+        # Scheduling failed (loop closed mid-flight) — coro was closed by the
+        # helper; fall through to None so callers treat it as a no-op result.
+        return None
+
+    return await coro
+
+
+async def _deliver_media_via_live_adapter(adapter, platform, chat_id, media_files, *, metadata=None, runner=None):
+    """Upload canonical ``(path, is_voice)`` media tuples via a LIVE adapter.
+
+    This is the in-process mirror of ``cron.scheduler._send_media_via_adapter``:
+    it dispatches each file to the adapter's typed ``BasePlatformAdapter`` media
+    methods (``send_voice`` / ``send_image_file`` / ``send_video`` /
+    ``send_document``) by extension, which is the path cron uses (and which is
+    already proven against the canonical tuple format produced by
+    ``extract_media`` + ``filter_media_delivery_paths``).
+
+    Routing through these base methods keeps it generic — any file-capable
+    plugin adapter (Mattermost, google_chat, line, …) that overrides them gets
+    real delivery without a per-platform branch. Returns an error dict on the
+    first failure, or ``None`` if every file uploaded.
+
+    Capability gate: the ``BasePlatformAdapter`` defaults for these media
+    methods post a *text placeholder* (e.g. ``📎 File: <local-path>``) via
+    ``self.send``. For an adapter that does NOT override a given method, calling
+    it would leak a local filesystem path into the channel — an unintended
+    behavior change for plugins unrelated to file delivery (irc, ntfy, simplex,
+    …). So a method is only invoked when the adapter genuinely overrides it
+    (``type(adapter).<m> is not BasePlatformAdapter.<m>``); otherwise the file
+    is skipped on this in-process path, preserving the prior behavior (where
+    ``_send_via_adapter`` sent text only and never posted a placeholder).
+    """
+    from pathlib import Path
+    from gateway.platforms.base import BasePlatformAdapter, should_send_media_as_audio
+
+    def _overrides(method_name: str) -> bool:
+        """True iff ``adapter`` genuinely overrides the named base media method
+        (i.e. is file-capable for it), rather than inheriting the placeholder-
+        posting default from ``BasePlatformAdapter``."""
+        return getattr(type(adapter), method_name, None) is not getattr(
+            BasePlatformAdapter, method_name, None
+        )
+
+    media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
+    last_result = None
+    for media_path, is_voice in media_files:
+        ext = Path(media_path).suffix.lower()
+        route_platform = getattr(adapter, "platform", None) or platform
+        try:
+            # Each typed media method touches the adapter's loop-bound network
+            # session, so it must run in the adapter's loop/task context (not
+            # the worker loop the send_message tool may be driving us on).
+            if should_send_media_as_audio(route_platform, ext, is_voice=is_voice):
+                if not _overrides("send_voice"):
+                    continue
+                result = await _await_on_adapter_loop(
+                    runner, adapter.send_voice(chat_id=chat_id, audio_path=media_path, metadata=metadata)
+                )
+            elif ext in _LIVE_VIDEO_EXTS:
+                if not _overrides("send_video"):
+                    continue
+                result = await _await_on_adapter_loop(
+                    runner, adapter.send_video(chat_id=chat_id, video_path=media_path, metadata=metadata)
+                )
+            elif ext in _LIVE_IMAGE_EXTS:
+                if not _overrides("send_image_file"):
+                    continue
+                result = await _await_on_adapter_loop(
+                    runner, adapter.send_image_file(chat_id=chat_id, image_path=media_path, metadata=metadata)
+                )
+            else:
+                if not _overrides("send_document"):
+                    continue
+                result = await _await_on_adapter_loop(
+                    runner, adapter.send_document(chat_id=chat_id, file_path=media_path, metadata=metadata)
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            return {"error": f"Adapter media send failed for {media_path}: {e}"}
+        if result is not None and not getattr(result, "success", True):
+            return {"error": f"Adapter media send failed for {media_path}: {getattr(result, 'error', 'unknown')}"}
+        last_result = result
+    return last_result
+
+
 async def _send_via_adapter(
     platform,
     pconfig,
@@ -653,22 +787,50 @@ async def _send_via_adapter(
         except Exception:
             adapter = None
         if adapter is not None:
-            try:
-                metadata = {}
-                if thread_id:
-                    metadata["thread_id"] = thread_id
-                if platform_name == "ntfy" and chat_id:
-                    metadata["publish_topic"] = chat_id
-                if not metadata:
-                    metadata = None
-                result = await adapter.send(chat_id=chat_id, content=chunk, metadata=metadata)
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                return {"error": f"Plugin platform send failed: {e}"}
-            if result.success:
-                return {"success": True, "message_id": result.message_id}
-            return {"error": f"Adapter send failed: {result.error}"}
+            metadata = {}
+            if thread_id:
+                metadata["thread_id"] = thread_id
+            if platform_name == "ntfy" and chat_id:
+                metadata["publish_topic"] = chat_id
+            if not metadata:
+                metadata = None
+            # 1. Text body (if any) via the live adapter.send fast path. Marshal
+            #    onto the adapter's own loop so its loop-bound network session's
+            #    timeout context is entered inside a task on the right loop (the
+            #    send_message tool may be driving us on a worker loop — see
+            #    _await_on_adapter_loop).
+            message_id = None
+            if chunk and chunk.strip():
+                try:
+                    result = await _await_on_adapter_loop(
+                        runner, adapter.send(chat_id=chat_id, content=chunk, metadata=metadata)
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    return {"error": f"Plugin platform send failed: {e}"}
+                # _await_on_adapter_loop returns None if the gateway loop closed
+                # mid-send (scheduling failed). Guard symmetrically to the media
+                # branch below so we don't AttributeError on result.success.
+                if result is None:
+                    return {"error": "Adapter send failed: gateway loop unavailable"}
+                if not result.success:
+                    return {"error": f"Adapter send failed: {result.error}"}
+                message_id = result.message_id
+            # 2. Media (if any) via the adapter's typed media methods — the same
+            #    live path cron uses, which handles canonical (path, is_voice)
+            #    tuples correctly. This is what makes attachments actually deliver.
+            #    Pass the runner so each typed media call is likewise marshaled
+            #    onto the adapter's loop.
+            if media_files:
+                media_err = await _deliver_media_via_live_adapter(
+                    adapter, platform, chat_id, media_files, metadata=metadata, runner=runner
+                )
+                if isinstance(media_err, dict) and media_err.get("error"):
+                    return media_err
+                if message_id is None and media_err is not None:
+                    message_id = getattr(media_err, "message_id", None)
+            return {"success": True, "message_id": message_id}
 
     entry = None
     try:
@@ -896,11 +1058,45 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
             last_result = result
         return last_result
 
+    # --- Plugin platforms with file support (e.g. Mattermost) ---
+    # Plugin platforms register a ``standalone_sender_fn`` (proof of file
+    # support). When attachments are present, route every chunk through
+    # ``_send_via_adapter``, which delivers media via the LIVE adapter's typed
+    # media methods when the gateway is in-process (the cron live path) and via
+    # the standalone sender out-of-process — instead of falling into the "media
+    # omitted" path below. This is generic — any plugin whose PlatformEntry
+    # exposes a standalone sender gets media delivery without a per-platform
+    # branch here.
+    if media_files:
+        plugin_entry = None
+        try:
+            from gateway.platform_registry import platform_registry
+            plugin_entry = platform_registry.get(platform.value)
+        except Exception:
+            plugin_entry = None
+        if plugin_entry is not None and plugin_entry.standalone_sender_fn is not None:
+            last_result = None
+            for i, chunk in enumerate(chunks):
+                is_last = (i == len(chunks) - 1)
+                result = await _send_via_adapter(
+                    platform,
+                    pconfig,
+                    chat_id,
+                    chunk,
+                    thread_id=thread_id,
+                    media_files=media_files if is_last else None,
+                    force_document=force_document,
+                )
+                if isinstance(result, dict) and result.get("error"):
+                    return result
+                last_result = result
+            return last_result
+
     # --- Non-media platforms ---
     if media_files and not message.strip():
         return {
             "error": (
-                f"send_message MEDIA delivery is currently only supported for telegram, discord, matrix, weixin, signal, yuanbao and feishu; "
+                f"send_message MEDIA delivery is currently only supported for telegram, discord, matrix, weixin, signal, yuanbao and feishu, and file-capable plugin platforms; "
                 f"target {platform.value} had only media attachments"
             )
         }
@@ -908,7 +1104,7 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     if media_files:
         warning = (
             f"MEDIA attachments were omitted for {platform.value}; "
-            "native send_message media delivery is currently only supported for telegram, discord, matrix, weixin, signal, yuanbao and feishu"
+            "native send_message media delivery is currently only supported for telegram, discord, matrix, weixin, signal, yuanbao and feishu, and file-capable plugin platforms"
         )
 
     last_result = None
