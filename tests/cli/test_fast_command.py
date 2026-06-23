@@ -354,6 +354,57 @@ class TestAnthropicFastMode(unittest.TestCase):
         assert _is_anthropic_fast_model("gpt-5.4") is False
         assert _is_anthropic_fast_model("") is False
 
+
+class TestIsAnthropicOpusTier:
+    """Unit tests for the ``_is_anthropic_opus_tier`` helper that gates the
+    Nous recommended-default filter. Covers Nous (dash) and OpenRouter /
+    native Anthropic (dot) slug variants and the non-Opus Claude families
+    (Sonnet, Haiku) that must NOT be filtered out."""
+
+    def test_matches_opus_in_every_supported_slug_form(self):
+        from hermes_cli.models import _is_anthropic_opus_tier
+
+        # Nous / dash form
+        assert _is_anthropic_opus_tier("claude-opus-4-8") is True
+        assert _is_anthropic_opus_tier("claude-opus-4-7") is True
+        assert _is_anthropic_opus_tier("claude-opus-4-6") is True
+        assert _is_anthropic_opus_tier("claude-opus-3-5") is True
+
+        # OpenRouter / dot form
+        assert _is_anthropic_opus_tier("claude-opus-4.8") is True
+        assert _is_anthropic_opus_tier("claude-opus-4.7") is True
+        assert _is_anthropic_opus_tier("claude-opus-4.6") is True
+
+        # Vendor prefix + colon-suffixed variants
+        assert _is_anthropic_opus_tier("anthropic/claude-opus-4.8") is True
+        assert _is_anthropic_opus_tier("anthropic/claude-opus-4-8") is True
+        assert _is_anthropic_opus_tier("anthropic/claude-opus-4.8:thinking") is True
+
+    def test_does_not_match_non_opus_claude_families(self):
+        from hermes_cli.models import _is_anthropic_opus_tier
+
+        # Sonnet, Haiku — cheap tiers that must remain as default candidates.
+        assert _is_anthropic_opus_tier("claude-sonnet-4-6") is False
+        assert _is_anthropic_opus_tier("claude-sonnet-4.6") is False
+        assert _is_anthropic_opus_tier("claude-haiku-4-5") is False
+        assert _is_anthropic_opus_tier("claude-haiku-4.5") is False
+        assert _is_anthropic_opus_tier("anthropic/claude-sonnet-4-6") is False
+
+    def test_does_not_match_non_anthropic_models(self):
+        from hermes_cli.models import _is_anthropic_opus_tier
+
+        assert _is_anthropic_opus_tier("openai/gpt-5.5") is False
+        assert _is_anthropic_opus_tier("google/gemini-3-pro-preview") is False
+        assert _is_anthropic_opus_tier("minimax/minimax-m3") is False
+        assert _is_anthropic_opus_tier("") is False
+        assert _is_anthropic_opus_tier(None) is False
+
+    def test_is_case_insensitive(self):
+        from hermes_cli.models import _is_anthropic_opus_tier
+
+        assert _is_anthropic_opus_tier("CLAUDE-OPUS-4-8") is True
+        assert _is_anthropic_opus_tier("Anthropic/Claude-Opus-4.8") is True
+
     def test_fast_command_exposed_for_anthropic_model(self):
         cli_mod = _import_cli()
         stub = SimpleNamespace(

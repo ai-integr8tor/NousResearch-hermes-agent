@@ -2061,6 +2061,31 @@ def _is_anthropic_fast_model(model_id: Optional[str]) -> bool:
     return "opus-4-6" in base or "opus-4.6" in base
 
 
+def _is_anthropic_opus_tier(model_id: Optional[str]) -> bool:
+    """Return True if ``model_id`` is an Anthropic Opus-tier model.
+
+    Opus is the most expensive Anthropic tier (~$15/$75 per MTok on Opus 4.x)
+    and is therefore an unsafe default for a freshly-authenticated provider
+    picker — paid users landing on Opus from a one-click onboarding have
+    no opportunity to opt out before their config pins it as the main model.
+    Sonnet and Haiku are deliberately NOT classified as Opus here; Sonnet is
+    the Anthropic default the rest of the codebase already treats as
+    reasonable, and Haiku is cheap enough that it is not a billing hazard.
+
+    Matches both dash (``claude-opus-4-8``) and dot (``claude-opus-4.8``)
+    slug variants because the same family id appears in both forms across
+    providers (Nous Portal uses dashes; OpenRouter / native Anthropic use
+    dots). Anything that doesn't start with ``claude-opus-`` is not Opus.
+    """
+    raw = _strip_vendor_prefix(str(model_id or ""))
+    base = raw.split(":")[0].lower()
+    if not base.startswith("claude-opus-"):
+        return False
+    # Both slug forms: claude-opus-4-8 (Nous) and claude-opus-4.8 (OpenRouter/Anthropic).
+    # Anything beyond the family prefix is still Opus for our purposes.
+    return "opus-4-" in base or "opus-4." in base or "opus-3-" in base or "opus-3." in base
+
+
 def resolve_fast_mode_overrides(model_id: Optional[str]) -> dict[str, Any] | None:
     """Return request_overrides for fast/priority mode, or None if unsupported.
 
