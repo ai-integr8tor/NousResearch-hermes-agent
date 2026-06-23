@@ -38,6 +38,7 @@ const { createLinkTitleWindow } = require('./link-title-window.cjs')
 const { probeGatewayWebSocket } = require('./gateway-ws-probe.cjs')
 const { adoptServedDashboardToken } = require('./dashboard-token.cjs')
 const { waitForDashboardPort } = require('./backend-ready.cjs')
+const { resolveRebuiltMacApp } = require('./mac-rebuilt-app.cjs')
 const { serializeJsonBody, setJsonRequestHeaders } = require('./oauth-net-request.cjs')
 const { fetchMarketplaceThemes, searchMarketplaceThemes } = require('./vscode-marketplace.cjs')
 const { buildDesktopBackendEnv, normalizeHermesHomeRoot } = require('./backend-env.cjs')
@@ -2264,10 +2265,7 @@ async function applyUpdatesPosixInApp() {
     }
   }
 
-  const rebuiltApp = [
-    path.join(updateRoot, 'apps', 'desktop', 'release', 'mac-arm64', 'Hermes.app'),
-    path.join(updateRoot, 'apps', 'desktop', 'release', 'mac', 'Hermes.app')
-  ].find(directoryExists)
+  const rebuiltApp = resolveRebuiltMacApp(updateRoot)
   const targetApp = runningAppBundle()
 
   // No bundle to swap (dev run, Linux AppImage, or unresolved paths): the
