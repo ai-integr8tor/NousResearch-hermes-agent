@@ -326,9 +326,11 @@ seed_one "SOUL.md" "docker/SOUL.md"
 # .env holds API keys and secrets — restrict to owner-only access. Applied
 # unconditionally (not only on first-seed) so a host-mounted .env that was
 # created with a permissive umask gets tightened on every container start.
+# #43473: HERMES_ENV_MODE overrides the default 0600 for host-mounted setups
+# where the host user needs group-read access (e.g. docker-compose ${VAR}).
 if [ -f "$HERMES_HOME/.env" ]; then
     chown hermes:hermes "$HERMES_HOME/.env" 2>/dev/null || true
-    chmod 600 "$HERMES_HOME/.env" 2>/dev/null || true
+    chmod "${HERMES_ENV_MODE:-600}" "$HERMES_HOME/.env" 2>/dev/null || true
 fi
 
 # --- Migrate persisted config schema ---
