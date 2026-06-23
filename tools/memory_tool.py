@@ -306,12 +306,16 @@ class MemoryStore:
 
         with self._file_lock(self._path_for(target)):
             # Re-read from disk under lock to pick up writes from other sessions.
-            # If external drift was detected, the file was backed up to .bak.<ts>
-            # — refuse the mutation so we don't clobber the un-roundtrippable
-            # content the patch tool / shell append / sister session wrote.
+            # For add operations, we can safely proceed even with drift because
+            # we're only appending — we won't clobber any un-roundtrippable
+            # content. The drift guard is still enforced for replace/remove
+            # which flush full state. (fixes #42874, #42875)
             bak = self._reload_target(target)
             if bak:
-                return _drift_error(self._path_for(target), bak)
+                # Log the drift but don't refuse the add — just note it
+                logger.warning(
+                    "Memory drift detected during add (continuing anyway): %s", bak
+                )
 
             entries = self._entries_for(target)
             limit = self._char_limit(target)
