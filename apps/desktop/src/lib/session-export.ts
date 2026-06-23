@@ -8,6 +8,7 @@ interface ExportSessionParams {
   profile?: string | null
   title?: string | null
   session?: SessionInfo
+  profile?: string | null
 }
 
 function sanitizeFilenamePart(value: string) {
