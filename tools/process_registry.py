@@ -42,7 +42,7 @@ import uuid
 
 _IS_WINDOWS = platform.system() == "Windows"
 from tools.environments.local import _find_shell, _resolve_safe_cwd, _sanitize_subprocess_env
-from hermes_cli._subprocess_compat import windows_hide_flags
+from hermes_cli._subprocess_compat import windows_detach_popen_kwargs, windows_hide_flags
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -738,7 +738,33 @@ class ProcessRegistry:
         # stdout is a pipe, hiding output from process(action="poll")).
         bg_env = _sanitize_subprocess_env(os.environ, env_vars)
         bg_env["PYTHONUNBUFFERED"] = "1"
-        _popen_kwargs = {"creationflags": windows_hide_flags()} if _IS_WINDOWS else {}
+        # Detach the child from the parent's job object and process group
+        # so the child survives parent-side cleanup (the agent's tool turn
+        # ending, a gateway shutdown, or job-object teardown on the
+        # Windows side).  ``windows_detach_popen_kwargs`` returns the
+        # right kwargs for both platforms in one call:
+        #   - Windows: creationflags=CREATE_NEW_PROCESS_GROUP |
+        #              DETACHED_PROCESS | CREATE_NO_WINDOW |
+        #              CREATE_BREAKAWAY_FROM_JOB
+        #   - POSIX:   start_new_session=True (maps to os.setsid)
+        # The other local-spawn call sites (hermes_cli/gateway.py,
+        # gateway/run.py, gateway/slash_commands.py) already use this
+        # helper — see PR #40909
+        # (``fix(gateway,windows): reliability — JOB breakaway + status
+        # --deep probes + test-leak fix``), which closed the
+        # Desktop-GUI-update SIGTERM case for the gateway watcher but
+        # missed this one (agent ``terminal(background=true)``) call
+        # site.  This PR closes the same gap for the agent's tool path.
+        # Broader Windows-reliability context:
+        # NousResearch/hermes-agent#40899.  ``windows_hide_flags`` only
+        # sets CREATE_NO_WINDOW which keeps the child in the parent's
+        # job object — the child then dies when the parent's job is
+        # torn down.  Regression tests:
+        # test_process_spawn_local_detached.py::test_spawn_local_child_breaks_away_from_parent_job
+        #   (load-bearing: deterministic, sub-second via IsProcessInJob)
+        # test_process_spawn_local_detached.py::test_spawn_local_child_survives_60s
+        #   (symptom-level: 60s end-to-end, may pass on plain shells)
+        _popen_kwargs = windows_detach_popen_kwargs()
 
         proc = subprocess.Popen(
             [user_shell, "-lic", f"set +m; {command}"],
@@ -750,7 +776,6 @@ class ProcessRegistry:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
-            preexec_fn=None if _IS_WINDOWS else os.setsid,
             **_popen_kwargs,
         )
 
