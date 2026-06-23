@@ -835,6 +835,10 @@ class MatrixAdapter(BasePlatformAdapter):
         except ValueError:
             self._room_identity_ttl_seconds = 60.0
         self._room_identity_cache_max = 256
+        # Pending room-state-change notes, keyed by room id then change kind
+        # (so repeated changes of the same kind coalesce to the latest). Drained
+        # into the next message's channel_context.
+        self._pending_room_notes: Dict[str, Dict[str, str]] = {}
         # Set of room IDs we've joined
         self._joined_rooms: Set[str] = set()
         # Event deduplication (bounded deque keeps newest entries)
@@ -1410,6 +1414,20 @@ class MatrixAdapter(BasePlatformAdapter):
         client.add_event_handler(EventType.ROOM_MESSAGE, self._on_room_message)
         client.add_event_handler(EventType.REACTION, self._on_reaction)
         client.add_event_handler(IntEvt.INVITE, self._on_invite)
+
+        # Room-state changes keep the cached room identity fresh, and the ones
+        # worth telling the agent about leave a note for the next turn.
+        for _state_type_name in (
+            "ROOM_TOPIC", "ROOM_NAME", "ROOM_CANONICAL_ALIAS", "ROOM_MEMBER",
+            "ROOM_TOMBSTONE", "ROOM_ENCRYPTION", "ROOM_JOIN_RULES",
+            "ROOM_HISTORY_VISIBILITY",
+        ):
+            _state_type = getattr(EventType, _state_type_name, None)
+            if _state_type is not None:
+                client.add_event_handler(_state_type, self._on_room_state)
+        _direct_type = getattr(EventType, "DIRECT", None)
+        if _direct_type is not None:
+            client.add_event_handler(_direct_type, self._on_direct_account_data)
 
         # Initial sync to catch up, then start background sync.
         self._startup_ts = time.time()
@@ -2661,6 +2679,7 @@ class MatrixAdapter(BasePlatformAdapter):
             raw_message=source_content,
             message_id=event_id,
             reply_to_message_id=reply_to,
+            channel_context=self._take_pending_room_notes(room_id),
         )
 
         if msg_type == MessageType.TEXT and self._text_batch_delay_seconds > 0:
@@ -2868,6 +2887,7 @@ class MatrixAdapter(BasePlatformAdapter):
             message_id=event_id,
             media_urls=media_urls,
             media_types=media_types,
+            channel_context=self._take_pending_room_notes(room_id),
         )
 
         await self.handle_message(msg_event)
@@ -3281,6 +3301,12 @@ class MatrixAdapter(BasePlatformAdapter):
             if event.media_urls:
                 existing.media_urls.extend(event.media_urls)
                 existing.media_types.extend(event.media_types)
+            if event.channel_context:
+                existing.channel_context = (
+                    f"{existing.channel_context}\n{event.channel_context}"
+                    if existing.channel_context
+                    else event.channel_context
+                )
 
         prior_task = self._pending_text_batch_tasks.get(key)
         if prior_task and not prior_task.done():
@@ -3808,6 +3834,121 @@ class MatrixAdapter(BasePlatformAdapter):
         self._dm_rooms = {rid: (rid in dm_room_ids) for rid in self._joined_rooms}
         self._room_identities.clear()
         self._room_identity_cached_at.clear()
+
+    # ------------------------------------------------------------------
+    # Room state-change handling
+    # ------------------------------------------------------------------
+
+    async def _on_room_state(self, event: Any) -> None:
+        """Keep room identity fresh on state changes, noting the salient ones.
+
+        Every handled state change invalidates the cached identity so the next
+        turn re-resolves name/topic/members. Changes worth telling the agent
+        about (topic, name, replacement, privacy posture) additionally leave a
+        coalesced note for the next message; membership and alias changes are
+        silent (the refreshed identity already reflects them).
+        """
+        room_id = str(getattr(event, "room_id", ""))
+        if not room_id:
+            return
+
+        self._room_identities.pop(room_id, None)
+        self._room_identity_cached_at.pop(room_id, None)
+
+        # Don't narrate our own changes, and don't replay historical state from
+        # the initial sync as if it just happened.
+        if self._is_self_sender(str(getattr(event, "sender", ""))):
+            return
+        event_ts = _matrix_event_timestamp_seconds(event)
+        if event_ts and event_ts < self._startup_ts - _STARTUP_GRACE_SECONDS:
+            return
+
+        change = self._room_state_change_note(event)
+        if change:
+            kind, text = change
+            self._stash_room_note(room_id, kind, text)
+
+    async def _on_direct_account_data(self, event: Any) -> None:
+        """Re-read m.direct so DM-vs-room classification stays current."""
+        await self._refresh_dm_cache()
+
+    def _room_state_change_note(self, event: Any) -> Optional[tuple[str, str]]:
+        """Return a ``(kind, text)`` note for a surfaced state change, else None.
+
+        Membership and canonical-alias changes return None — they're passive.
+        """
+        etype = str(getattr(event, "type", ""))
+        content = self._event_content_dict(event)
+
+        if etype == "m.room.topic":
+            topic = str(content.get("topic") or "").strip()
+            return (
+                "topic",
+                f'The room topic changed to: "{topic}"' if topic
+                else "The room topic was cleared.",
+            )
+        if etype == "m.room.name":
+            name = str(content.get("name") or "").strip()
+            return (
+                "name",
+                f'The room was renamed to: "{name}"' if name
+                else "The room name was cleared.",
+            )
+        if etype == "m.room.tombstone":
+            return (
+                "tombstone",
+                "This room has been replaced; the conversation has moved to a "
+                "successor room.",
+            )
+        if etype == "m.room.encryption":
+            return ("encryption", "This room is now end-to-end encrypted.")
+        if etype == "m.room.join_rules":
+            rule = str(content.get("join_rule") or "").strip()
+            if not rule:
+                return None
+            return ("join_rules", f"The room join rule changed to: {rule}.")
+        if etype == "m.room.history_visibility":
+            vis = str(content.get("history_visibility") or "").strip()
+            if not vis:
+                return None
+            return (
+                "history_visibility",
+                f"The room history visibility changed to: {vis}.",
+            )
+        return None
+
+    @staticmethod
+    def _event_content_dict(event: Any) -> dict:
+        """Best-effort content dict from a state event (typed or raw)."""
+        content = getattr(event, "content", None)
+        if content is None and isinstance(event, dict):
+            content = event.get("content")
+        if isinstance(content, dict):
+            return content
+        if hasattr(content, "serialize"):
+            try:
+                serialized = content.serialize()
+            except Exception:
+                serialized = None
+            if isinstance(serialized, dict):
+                return serialized
+        return {}
+
+    def _stash_room_note(self, room_id: str, kind: str, text: str) -> None:
+        notes = self._pending_room_notes.setdefault(room_id, {})
+        notes[kind] = text
+        while len(self._pending_room_notes) > self._room_identity_cache_max:
+            oldest = next(iter(self._pending_room_notes))
+            if oldest == room_id:
+                break
+            self._pending_room_notes.pop(oldest, None)
+
+    def _take_pending_room_notes(self, room_id: str) -> Optional[str]:
+        """Drain and render the pending state-change notes for a room."""
+        notes = self._pending_room_notes.pop(room_id, None)
+        if not notes:
+            return None
+        return "\n".join(f"[{text}]" for text in notes.values())
 
     # ------------------------------------------------------------------
     # Mention detection helpers
