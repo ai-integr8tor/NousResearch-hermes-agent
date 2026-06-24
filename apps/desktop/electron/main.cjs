@@ -58,6 +58,10 @@ const { worktreesForIpc } = require('./git-worktrees.cjs')
 const { OFFICIAL_REPO_HTTPS_URL, isOfficialSshRemote } = require('./update-remote.cjs')
 const { runRebuildWithRetry } = require('./update-rebuild.cjs')
 const {
+  profileDeleteTargetFromRequest,
+  profileRenameFromRequest
+} = require('./profile-request-routing.cjs')
+const {
   buildPosixCleanupScript,
   buildWindowsCleanupScript,
   modeRemovesAgent,
@@ -5047,35 +5051,8 @@ function stopAllPoolBackends() {
   }
 }
 
-function profileNameFromDeleteRequest(request) {
-  if (!request || String(request.method || 'GET').toUpperCase() !== 'DELETE') {
-    return null
-  }
-
-  const match = String(request.path || '').match(/^\/api\/profiles\/([^/?#]+)(?:[?#].*)?$/)
-  if (!match) {
-    return null
-  }
-
-  let raw = ''
-  try {
-    raw = decodeURIComponent(match[1])
-  } catch {
-    return null
-  }
-
-  const name = raw.trim()
-  if (!name) {
-    return null
-  }
-  if (name.toLowerCase() === 'default') {
-    return 'default'
-  }
-  return name.toLowerCase()
-}
-
 async function prepareProfileDeleteRequest(request) {
-  const profile = profileNameFromDeleteRequest(request)
+  const profile = profileDeleteTargetFromRequest(request)
   if (!profile || profile === 'default' || !PROFILE_NAME_RE.test(profile)) {
     return
   }
@@ -5087,6 +5064,33 @@ async function prepareProfileDeleteRequest(request) {
   }
 
   await teardownPoolBackendAndWait(profile)
+}
+
+async function prepareProfileRenameRequest(request) {
+  const rename = profileRenameFromRequest(request)
+  if (!rename || !PROFILE_NAME_RE.test(rename.oldName) || !PROFILE_NAME_RE.test(rename.newName)) {
+    return null
+  }
+
+  if (rename.oldName === primaryProfileKey()) {
+    // Do not point the request at the new profile yet: starting that backend
+    // before the PATCH completes would create the destination directory and
+    // make the server-side rename fail with "already exists".
+    request.profile = 'default'
+    await teardownPrimaryBackendAndWait()
+    return () => {
+      writeActiveDesktopProfile(rename.newName)
+    }
+  }
+
+  await teardownPoolBackendAndWait(rename.oldName)
+  return null
+}
+
+async function prepareProfileMutationRequest(request) {
+  const afterSuccess = await prepareProfileRenameRequest(request)
+  await prepareProfileDeleteRequest(request)
+  return afterSuccess
 }
 
 async function startHermes() {
@@ -6080,7 +6084,7 @@ ipcMain.handle('hermes:api', async (_event, request) => {
     return rerouted
   }
 
-  await prepareProfileDeleteRequest(request)
+  const afterProfileMutationSuccess = await prepareProfileMutationRequest(request)
 
   const profile = request?.profile
   const connection = await ensureBackend(profile)
@@ -6094,18 +6098,25 @@ ipcMain.handle('hermes:api', async (_event, request) => {
   // the OAuth partition — route through Electron's net stack bound to that
   // session so the cookie attaches automatically. Token/local modes keep using
   // the static session-token header.
+  let response
   if (connection.authMode === 'oauth') {
-    return fetchJsonViaOauthSession(url, {
+    response = await fetchJsonViaOauthSession(url, {
+      method: request?.method,
+      body: request?.body,
+      timeoutMs
+    })
+  } else {
+    response = await fetchJson(url, connection.token, {
       method: request?.method,
       body: request?.body,
       timeoutMs
     })
   }
-  return fetchJson(url, connection.token, {
-    method: request?.method,
-    body: request?.body,
-    timeoutMs
-  })
+
+  if (typeof afterProfileMutationSuccess === 'function') {
+    afterProfileMutationSuccess()
+  }
+  return response
 })
 
 ipcMain.handle('hermes:notify', (_event, payload) => {
