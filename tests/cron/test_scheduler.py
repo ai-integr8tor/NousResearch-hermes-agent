@@ -1781,6 +1781,39 @@ class TestRunJobConfigEnvVarExpansion:
             "config.yaml ${VAR} in fallback_providers was not expanded."
         )
 
+    def test_nested_model_fallback_providers_are_passed_to_agent(self, tmp_path, monkeypatch):
+        """Cron uses the shared fallback chain parser, including model-scoped entries."""
+        (tmp_path / "config.yaml").write_text(
+            "model:\n"
+            "  provider: primary\n"
+            "  default: primary-model\n"
+            "  fallback_providers:\n"
+            "    - provider: openrouter\n"
+            "      model: fallback-model\n",
+            encoding="utf-8",
+        )
+
+        job = {"id": "nested-fb-job", "name": "nested fallback test", "prompt": "hi"}
+        fake_db = MagicMock()
+
+        with patch("cron.scheduler._hermes_home", tmp_path), \
+             patch("cron.scheduler._resolve_origin", return_value=None), \
+             patch("dotenv.load_dotenv"), \
+             patch("hermes_state.SessionDB", return_value=fake_db), \
+             patch("hermes_cli.runtime_provider.resolve_runtime_provider",
+                   return_value=self._RUNTIME), \
+             patch("run_agent.AIAgent") as mock_agent_cls:
+            mock_agent = MagicMock()
+            mock_agent.run_conversation.return_value = {"final_response": "ok"}
+            mock_agent_cls.return_value = mock_agent
+            success, _, _, error = run_job(job)
+
+        assert success is True
+        assert error is None
+        assert mock_agent_cls.call_args.kwargs["fallback_model"] == [
+            {"provider": "openrouter", "model": "fallback-model"}
+        ]
+
     def test_unexpanded_ref_passthrough_when_var_unset(self, tmp_path, monkeypatch):
         """When the env var is not set, the literal ${VAR} is kept verbatim (not crashed)."""
         (tmp_path / "config.yaml").write_text("model: ${_HERMES_TEST_CRON_UNSET_VAR}\n")
