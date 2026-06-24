@@ -21,6 +21,7 @@ import {
 } from '@/store/composer-status'
 import { $previewStatusBySession, dismissPreviewArtifact } from '@/store/preview-status'
 import { $threadScrolledUp } from '@/store/thread-scroll'
+import { $workingSessionIds } from '@/store/session'
 import { openSessionInNewWindow } from '@/store/windows'
 
 import { PreviewStatusRow } from './preview-row'
@@ -56,6 +57,14 @@ export function ComposerStatusStack({ queue, sessionId }: ComposerStatusStackPro
   const itemsBySession = useStore($statusItemsBySession)
   const previewsBySession = useStore($previewStatusBySession)
   const scrolledUp = useStore($threadScrolledUp)
+  const workingSessionIds = useStore($workingSessionIds)
+
+  // Whether THIS session's turn is actively running. A todo marked
+  // `in_progress` only deserves a live spinner while the agent is working — if
+  // the turn ends (or the agent stops to ask the user something) mid-plan, the
+  // spinner must settle instead of grinding forever (the "task pane hangs at
+  // the end" report). Off-session / no-session → not working.
+  const sessionWorking = !!sessionId && workingSessionIds.includes(sessionId)
 
   const groups = useMemo(
     () => groupStatusItems(sessionId ? (itemsBySession[sessionId] ?? []) : []),
@@ -121,6 +130,7 @@ export function ComposerStatusStack({ queue, sessionId }: ComposerStatusStackPro
             onDismiss={sessionId ? id => dismissBackgroundProcess(sessionId, id) : undefined}
             onOpen={() => openSubagent(item)}
             onStop={sessionId ? id => stopBackgroundProcess(sessionId, id) : undefined}
+            sessionWorking={sessionWorking}
           />
         ))}
       </StatusSection>
