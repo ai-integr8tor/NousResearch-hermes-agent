@@ -471,6 +471,8 @@ def _format_job(job: Dict[str, Any]) -> Dict[str, Any]:
         result["enabled_toolsets"] = job["enabled_toolsets"]
     if job.get("workdir"):
         result["workdir"] = job["workdir"]
+    if job.get("session"):
+        result["session"] = job["session"]
     return result
 
 
@@ -538,6 +540,7 @@ def cronjob(
     context_from: Optional[Union[str, List[str]]] = None,
     enabled_toolsets: Optional[List[str]] = None,
     workdir: Optional[str] = None,
+    session: Optional[str] = None,
     no_agent: Optional[bool] = None,
     task_id: str = None,
 ) -> str:
@@ -604,25 +607,26 @@ def cronjob(
                 context_from=context_from,
                 enabled_toolsets=enabled_toolsets or None,
                 workdir=_normalize_optional_job_value(workdir),
+                session=_normalize_optional_job_value(session),
                 no_agent=_no_agent,
             )
             _notify_provider_jobs_changed_safe()
-            return json.dumps(
-                {
-                    "success": True,
-                    "job_id": job["id"],
-                    "name": job["name"],
-                    "skill": job.get("skill"),
-                    "skills": job.get("skills", []),
-                    "schedule": job["schedule_display"],
-                    "repeat": _repeat_display(job),
-                    "deliver": job.get("deliver", "local"),
-                    "next_run_at": job["next_run_at"],
-                    "job": _format_job(job),
-                    "message": f"Cron job '{job['name']}' created.",
-                },
-                indent=2,
-            )
+            payload = {
+                "success": True,
+                "job_id": job["id"],
+                "name": job["name"],
+                "skill": job.get("skill"),
+                "skills": job.get("skills", []),
+                "schedule": job["schedule_display"],
+                "repeat": _repeat_display(job),
+                "deliver": job.get("deliver", "local"),
+                "next_run_at": job["next_run_at"],
+                "job": _format_job(job),
+                "message": f"Cron job '{job['name']}' created.",
+            }
+            if job.get("session"):
+                payload["session"] = job["session"]
+            return json.dumps(payload, indent=2)
 
         if normalized == "list":
             jobs = [_format_job(job) for job in list_jobs(include_disabled=include_disabled)]
@@ -757,6 +761,10 @@ def cronjob(
                 # Empty string clears the field (restores old behaviour);
                 # otherwise pass raw — update_job() validates / normalizes.
                 updates["workdir"] = _normalize_optional_job_value(workdir) or None
+            if session is not None:
+                # Empty string clears reusable-session mode and restores the
+                # legacy fresh-session-per-run behaviour.
+                updates["session"] = _normalize_optional_job_value(session) or None
             if no_agent is not None:
                 # Toggling no_agent on/off at update time. If flipping to True,
                 # we need a script to already exist on the job (or be part of
@@ -807,7 +815,8 @@ Use action='update', 'pause', 'resume', 'remove', or 'run' to manage an existing
 
 To stop a job the user no longer wants: first action='list' to find the job_id, then action='remove' with that job_id. Never guess job IDs — always list first.
 
-Jobs run in a fresh session with no current-chat context, so prompts must be self-contained.
+By default jobs run in a fresh session with no current-chat context, so prompts must be self-contained.
+Set session to a stable id when the job should reuse and append to an existing SessionDB conversation across runs.
 If skills are provided on create, the future cron run loads those skills in order, then follows the prompt as the task instruction.
 On update, passing skills=[] clears attached skills.
 
@@ -911,6 +920,10 @@ Important safety rule: cron-run sessions should not recursively schedule more cr
                 "type": "string",
                 "description": "Optional absolute path to run the job from. When set, AGENTS.md / CLAUDE.md / .cursorrules from that directory are injected into the system prompt, and the terminal/file/code_exec tools use it as their working directory — useful for running a job inside a specific project repo. Must be an absolute path that exists. When unset (default), preserves the original behaviour: no project context files, tools use the scheduler's cwd. On update, pass an empty string to clear. Jobs with workdir run sequentially (not parallel) to keep per-job directories isolated."
             },
+            "session": {
+                "type": "string",
+                "description": "Optional reusable SessionDB id for create/update. When set, each run loads that session's prior messages and appends the new cron turn to the same conversation instead of creating a timestamped cron session every run. Use 1-64 characters: letters, digits, '_' or '-', starting with a letter or digit. On update, pass an empty string to clear."
+            },
         },
         "required": ["action"]
     }
@@ -965,6 +978,7 @@ registry.register(
         context_from=args.get("context_from"),
         enabled_toolsets=args.get("enabled_toolsets"),
         workdir=args.get("workdir"),
+        session=args.get("session"),
         no_agent=args.get("no_agent"),
         task_id=kw.get("task_id"),
     ))(),

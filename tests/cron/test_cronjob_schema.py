@@ -39,3 +39,12 @@ def test_cronjob_schema_required_array_unchanged():
     from tools.cronjob_tools import CRONJOB_SCHEMA
 
     assert CRONJOB_SCHEMA["parameters"]["required"] == ["action"]
+
+
+def test_cronjob_schema_advertises_reusable_session():
+    from tools.cronjob_tools import CRONJOB_SCHEMA
+
+    session = CRONJOB_SCHEMA["parameters"]["properties"]["session"]
+    assert session["type"] == "string"
+    assert "reusable SessionDB id" in session["description"]
+    assert "empty string to clear" in session["description"]

@@ -236,7 +236,13 @@ _LEGACY_HOME_TARGET_ENV_VARS = {
     "QQBOT_HOME_CHANNEL": "QQ_HOME_CHANNEL",
 }
 
-from cron.jobs import get_due_jobs, mark_job_run, save_job_output, advance_next_run
+from cron.jobs import (
+    advance_next_run,
+    get_due_jobs,
+    mark_job_run,
+    normalize_session_id,
+    save_job_output,
+)
 
 # Sentinel: when a cron agent has nothing new to report, it can start its
 # response with this marker to suppress delivery.  Output is still saved
@@ -1594,6 +1600,68 @@ def _scan_assembled_cron_prompt(
     return assembled
 
 
+def _prepare_cron_session(
+    job: dict,
+    session_db,
+) -> tuple[str, Optional[List[dict]], bool]:
+    """Return session id, replay history, and whether cron owns lifecycle.
+
+    Jobs without ``session`` keep the legacy timestamped cron session. Jobs
+    with ``session`` reuse that exact SessionDB id and replay its prior
+    messages into the agent turn. Cron only reopens/ends/titles sessions it
+    creates or sessions already marked as source="cron"; user-created CLI or
+    gateway sessions keep their existing lifecycle state.
+    """
+    job_id = str(job.get("id") or "unknown")
+    configured_session = normalize_session_id(job.get("session"))
+    if not configured_session:
+        return (
+            f"cron_{job_id}_{_hermes_now().strftime('%Y%m%d_%H%M%S')}",
+            None,
+            True,
+        )
+
+    history: Optional[List[dict]] = None
+    cron_owned = True
+    row = None
+    if session_db:
+        try:
+            row = session_db.get_session(configured_session)
+        except Exception as exc:
+            logger.debug(
+                "Job '%s': failed to inspect reusable cron session %r: %s",
+                job_id,
+                configured_session,
+                exc,
+            )
+
+        if row:
+            cron_owned = str(row.get("source") or "").lower() == "cron"
+            try:
+                history = session_db.get_messages_as_conversation(configured_session)
+            except Exception as exc:
+                logger.warning(
+                    "Job '%s': failed to load reusable session %r history; "
+                    "running without prior context: %s",
+                    job_id,
+                    configured_session,
+                    exc,
+                )
+
+            if cron_owned and row.get("ended_at") is not None:
+                try:
+                    session_db.reopen_session(configured_session)
+                except Exception as exc:
+                    logger.debug(
+                        "Job '%s': failed to reopen reusable cron session %r: %s",
+                        job_id,
+                        configured_session,
+                        exc,
+                    )
+
+    return configured_session, history, cron_owned
+
+
 def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
     """
     Execute a single cron job.
@@ -1775,7 +1843,10 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         logger.info("Job '%s': script produced no output, skipping AI call.", job_name)
         return True, "", SILENT_MARKER, None
     origin = _resolve_origin(job)
-    _cron_session_id = f"cron_{job_id}_{_hermes_now().strftime('%Y%m%d_%H%M%S')}"
+    _cron_session_id, _cron_history, _manage_cron_session_lifecycle = _prepare_cron_session(
+        job,
+        _session_db,
+    )
 
     logger.info("Running job '%s' (ID: %s)", job_name, job_id)
     logger.info("Prompt: %s", prompt[:100])
@@ -2107,7 +2178,15 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         # env passthrough registrations) when the cron run hops into the worker
         # thread used for inactivity timeout monitoring.
         _cron_context = contextvars.copy_context()
-        _cron_future = _cron_pool.submit(_cron_context.run, agent.run_conversation, prompt)
+        _run_conversation_kwargs = {}
+        if _cron_history is not None:
+            _run_conversation_kwargs["conversation_history"] = _cron_history
+        _cron_future = _cron_pool.submit(
+            _cron_context.run,
+            agent.run_conversation,
+            prompt,
+            **_run_conversation_kwargs,
+        )
         _inactivity_timeout = False
         try:
             if _cron_inactivity_limit is None:
@@ -2265,22 +2344,25 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         for _var_name in _cron_delivery_vars:
             _VAR_MAP[_var_name].set("")
         if _session_db:
-            # Title the cron session from the job (name → short prompt → id) so
-            # sidebars/history show a meaningful label instead of the injected
-            # "[IMPORTANT: …]" hint that is the session's first message. Set here
-            # (not at create time) so the agent's own INSERT keeps model /
-            # system_prompt; this only UPDATEs the title column. The run-time
-            # suffix keeps it unique against the sessions.title index across runs.
-            try:
-                _title_base = " ".join(job_name.split())[:60].strip() or f"cron {job_id}"
-                _cron_title = f"{_title_base} · {_hermes_now().strftime('%b %d %H:%M')}"
-                _session_db.set_session_title(_cron_session_id, _cron_title)
-            except (Exception, KeyboardInterrupt) as e:
-                logger.debug("Job '%s': failed to set cron session title: %s", job_id, e)
-            try:
-                _session_db.end_session(_cron_session_id, "cron_complete")
-            except (Exception, KeyboardInterrupt) as e:
-                logger.debug("Job '%s': failed to end session: %s", job_id, e)
+            if _manage_cron_session_lifecycle:
+                # Title cron-owned sessions from the job (name → short prompt → id)
+                # so sidebars/history show a meaningful label instead of the
+                # injected "[IMPORTANT: …]" hint that is the session's first
+                # message. User-created sessions named via job["session"] keep
+                # their existing title and lifecycle state.
+                try:
+                    _title_base = " ".join(job_name.split())[:60].strip() or f"cron {job_id}"
+                    if job.get("session"):
+                        _cron_title = _title_base
+                    else:
+                        _cron_title = f"{_title_base} · {_hermes_now().strftime('%b %d %H:%M')}"
+                    _session_db.set_session_title(_cron_session_id, _cron_title)
+                except (Exception, KeyboardInterrupt) as e:
+                    logger.debug("Job '%s': failed to set cron session title: %s", job_id, e)
+                try:
+                    _session_db.end_session(_cron_session_id, "cron_complete")
+                except (Exception, KeyboardInterrupt) as e:
+                    logger.debug("Job '%s': failed to end session: %s", job_id, e)
             try:
                 _session_db.close()
             except (Exception, KeyboardInterrupt) as e:
