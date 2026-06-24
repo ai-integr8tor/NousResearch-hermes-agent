@@ -1313,7 +1313,8 @@ def check_dangerous_command(command: str, env_type: str,
     elif choice == "always":
         approve_session(session_key, pattern_key)
         approve_permanent(pattern_key)
-        save_permanent_allowlist(_permanent_approved)
+        with _lock:
+            save_permanent_allowlist(_permanent_approved.copy())
 
     return {"approved": True, "message": None}
 
@@ -1683,7 +1684,8 @@ def check_all_command_guards(command: str, env_type: str,
                 elif choice == "always":
                     approve_session(session_key, key)
                     approve_permanent(key)
-                    save_permanent_allowlist(_permanent_approved)
+                    with _lock:
+                        save_permanent_allowlist(_permanent_approved.copy())
                 # choice == "once": no persistence — command allowed this
                 # single time only, matching the CLI's behavior.
 
@@ -1761,7 +1763,8 @@ def check_all_command_guards(command: str, env_type: str,
             # dangerous patterns: permanent allowed
             approve_session(session_key, key)
             approve_permanent(key)
-            save_permanent_allowlist(_permanent_approved)
+            with _lock:
+                save_permanent_allowlist(_permanent_approved.copy())
 
     return {"approved": True, "message": None,
             "user_approved": True, "description": combined_desc}
@@ -1940,7 +1943,8 @@ def check_execute_code_guard(code: str, env_type: str) -> dict:
     elif choice == "always":
         approve_session(session_key, pattern_key)
         approve_permanent(pattern_key)
-        save_permanent_allowlist(_permanent_approved)
+        with _lock:
+            save_permanent_allowlist(_permanent_approved.copy())
     # choice == "once": no persistence — approval lasts this single call only.
 
     return {"approved": True, "message": None,
