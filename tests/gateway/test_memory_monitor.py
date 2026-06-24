@@ -120,3 +120,48 @@ def test_unavailable_rss_warns_and_does_not_start(caplog, monkeypatch):
     assert started is False
     assert mm.is_running() is False
     assert any("Memory monitoring unavailable" in r.getMessage() for r in caplog.records)
+
+
+def test_proactive_gc_triggers_above_threshold(caplog, monkeypatch):
+    """gc.collect() fires when RSS exceeds threshold and cooldown elapsed."""
+    mm._last_gc_time = 0.0
+    mm.set_gc_threshold(threshold_mb=100, cooldown_seconds=0)
+    monkeypatch.setattr(mm, "_get_rss_mb", lambda: 200)
+
+    caplog.set_level(logging.INFO, logger="gateway.memory_monitor")
+    mm._maybe_proactive_gc()
+
+    gc_lines = [r for r in caplog.records if "Proactive GC triggered" in r.getMessage()]
+    assert gc_lines, [r.getMessage() for r in caplog.records]
+
+
+def test_proactive_gc_skips_below_threshold(caplog, monkeypatch):
+    """gc.collect() does NOT fire when RSS is below threshold."""
+    mm._last_gc_time = 0.0
+    mm.set_gc_threshold(threshold_mb=500, cooldown_seconds=0)
+    monkeypatch.setattr(mm, "_get_rss_mb", lambda: 100)
+
+    caplog.set_level(logging.INFO, logger="gateway.memory_monitor")
+    mm._maybe_proactive_gc()
+
+    gc_lines = [r for r in caplog.records if "Proactive GC" in r.getMessage()]
+    assert not gc_lines, [r.getMessage() for r in caplog.records]
+
+
+def test_proactive_gc_respects_cooldown(caplog, monkeypatch):
+    """gc.collect() does NOT fire again within the cooldown window."""
+    mm._last_gc_time = time.monotonic()
+    mm.set_gc_threshold(threshold_mb=100, cooldown_seconds=600)
+    monkeypatch.setattr(mm, "_get_rss_mb", lambda: 200)
+
+    caplog.set_level(logging.INFO, logger="gateway.memory_monitor")
+    mm._maybe_proactive_gc()
+
+    gc_lines = [r for r in caplog.records if "Proactive GC triggered" in r.getMessage()]
+    assert not gc_lines, "GC should not fire within cooldown"
+
+
+def test_set_gc_threshold_updates_globals():
+    mm.set_gc_threshold(threshold_mb=256, cooldown_seconds=300)
+    assert mm._gc_threshold_mb == 256
+    assert mm._gc_cooldown_seconds == 300.0

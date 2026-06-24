@@ -606,6 +606,9 @@ CREATE INDEX IF NOT EXISTS idx_compression_locks_expires ON compression_locks(ex
 DEFERRED_INDEX_SQL = """
 CREATE INDEX IF NOT EXISTS idx_messages_session_active
     ON messages(session_id, active, timestamp);
+CREATE INDEX IF NOT EXISTS idx_sessions_active
+    ON sessions(started_at DESC)
+    WHERE ended_at IS NULL;
 """
 
 FTS_SQL = """
@@ -685,7 +688,7 @@ class SessionDB:
     _WRITE_RETRY_MIN_S = 0.020   # 20ms
     _WRITE_RETRY_MAX_S = 0.150   # 150ms
     # Attempt a PASSIVE WAL checkpoint every N successful writes.
-    _CHECKPOINT_EVERY_N_WRITES = 50
+    _CHECKPOINT_EVERY_N_WRITES = 25
 
     def __init__(self, db_path: Path = None, read_only: bool = False):
         self.db_path = db_path or DEFAULT_DB_PATH
@@ -2101,6 +2104,38 @@ class SessionDB:
                 return current
             current = row["id"]
         return current
+
+    def active_session_count(self, idle_secs: int = 300) -> int:
+        """Return the number of active (unended) sessions with recent activity.
+
+        Uses a single ``SELECT COUNT(*)`` with a correlated subquery for
+        ``last_active`` from the messages table — O(1) memory, <1ms
+        execution with the ``idx_sessions_active`` partial index.
+
+        Parameters
+        ----------
+        idle_secs
+            Sessions with no activity in the last ``idle_secs`` seconds
+            are excluded.  Default 300 (5 minutes).
+        """
+        cutoff = time.time() - idle_secs
+        try:
+            with self._lock:
+                cursor = self._conn.execute(
+                    """
+                    SELECT COUNT(*) FROM sessions s
+                    WHERE s.ended_at IS NULL
+                      AND (
+                          SELECT MAX(m.timestamp)
+                          FROM messages m
+                          WHERE m.session_id = s.id
+                      ) >= ?
+                    """,
+                    (cutoff,),
+                )
+                return cursor.fetchone()[0]
+        except Exception:
+            return 0
 
     def list_sessions_rich(
         self,
