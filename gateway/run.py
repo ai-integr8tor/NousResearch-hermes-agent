@@ -2761,6 +2761,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Track background tasks to prevent garbage collection mid-execution
         self._background_tasks: set = set()
 
+    @staticmethod
+    def _context_id_for_source(source) -> Optional[str]:
+        """Derive memory context_id from message source.
+
+        Group/forum/channel chats get per-chat scoped memory; DMs get global
+        memory (None).  MemoryStore sanitizes the returned value before use.
+        """
+        if source.chat_type in ("group", "forum", "channel") and source.chat_id:
+            return str(source.chat_id)
+        return None
 
     def _wire_teams_pipeline_runtime(self) -> None:
         """Bind the Teams meeting pipeline runtime to Graph webhook ingress.
@@ -11287,6 +11297,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     except Exception as e:
                         logger.warning("Background task vision enrichment failed: %s", e)
 
+            # Per-channel memory scoping for background tasks
+            _bg_context_id = self._context_id_for_source(source)
+
             def run_sync():
                 agent = AIAgent(
                     model=turn_route["model"],
@@ -11314,6 +11327,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     chat_name=source.chat_name,
                     chat_type=source.chat_type,
                     thread_id=source.thread_id,
+                    context_id=_bg_context_id,
                     session_db=self._session_db,
                     fallback_model=self._fallback_model,
                 )
@@ -15556,6 +15570,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             logger.debug("Reusing cached agent for session %s", session_key)
 
             if agent is None:
+                # Per-channel memory scoping: group/channel chats get scoped memory,
+                # DMs get global memory.
+                _context_id = self._context_id_for_source(source)
+
                 # Config changed or first message — create fresh agent
                 agent = AIAgent(
                     model=turn_route["model"],
@@ -15586,6 +15604,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     chat_type=source.chat_type,
                     thread_id=source.thread_id,
                     gateway_session_key=session_key,
+                    context_id=_context_id,
                     session_db=self._session_db,
                     fallback_model=self._fallback_model,
                 )
