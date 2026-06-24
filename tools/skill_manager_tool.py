@@ -1016,6 +1016,14 @@ def skill_manage(
 
     Returns JSON string with results.
     """
+    # Validate name before anything else — including the write gate — so an
+    # empty/None/invalid name produces a clear, actionable error instead of
+    # falling through to a confusing "skill not found" that causes agents
+    # (especially background review) to loop on retries.  See #46216.
+    err = _validate_name(name)
+    if err:
+        return tool_error(err, success=False)
+
     # Approval gate: when on, stages the write for review (skills are too large
     # to review inline, so they always stage regardless of origin); when off
     # (default) passes straight through. The gate is bypassed when this call is

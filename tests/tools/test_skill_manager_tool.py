@@ -600,6 +600,53 @@ class TestSkillManageDispatcher:
         assert result["success"] is False
         assert "does not exist" in result["error"]
 
+    # -- early name validation (issue #46216) -------------------------------
+
+    @pytest.mark.parametrize("action", ["create", "edit", "patch", "delete", "write_file", "remove_file"])
+    def test_empty_name_rejected_before_action(self, tmp_path, action):
+        """skill_manage must reject an empty name for every action before
+        reaching the action handler, so the agent sees a clear 'name is
+        required' error instead of a confusing 'skill not found'."""
+        kwargs = {"action": action, "name": ""}
+        if action == "patch":
+            kwargs["old_string"] = "x"
+            kwargs["new_string"] = "y"
+        if action == "write_file":
+            kwargs["file_path"] = "references/x.md"
+            kwargs["file_content"] = "content"
+        if action in ("create", "edit"):
+            kwargs["content"] = VALID_SKILL_CONTENT
+        with _skill_dir(tmp_path):
+            raw = skill_manage(**kwargs)
+        result = json.loads(raw)
+        assert result["success"] is False
+        assert "name" in result["error"].lower()
+        assert "not found" not in result["error"].lower()
+
+    @pytest.mark.parametrize("action", ["create", "edit", "patch", "delete"])
+    def test_none_name_rejected_before_action(self, tmp_path, action):
+        """None name must also be caught early (LLMs sometimes omit the arg)."""
+        kwargs = {"action": action, "name": None}
+        if action == "patch":
+            kwargs["old_string"] = "x"
+            kwargs["new_string"] = "y"
+        if action in ("create", "edit"):
+            kwargs["content"] = VALID_SKILL_CONTENT
+        with _skill_dir(tmp_path):
+            raw = skill_manage(**kwargs)
+        result = json.loads(raw)
+        assert result["success"] is False
+        assert "name" in result["error"].lower()
+
+    def test_invalid_name_rejected_before_action(self, tmp_path):
+        """Invalid names (e.g. uppercase) should be caught at the top of
+        skill_manage, not buried inside a handler."""
+        with _skill_dir(tmp_path):
+            raw = skill_manage(action="patch", name="UPPERCASE", old_string="x", new_string="y")
+        result = json.loads(raw)
+        assert result["success"] is False
+        assert "Invalid skill name" in result["error"]
+
 
 class TestSecurityScanGate:
     """_security_scan_skill is gated by skills.guard_agent_created config flag."""
