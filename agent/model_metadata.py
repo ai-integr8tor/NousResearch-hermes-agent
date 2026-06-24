@@ -1351,6 +1351,12 @@ def _query_local_context_length(model: str, base_url: str, api_key: str = "") ->
                                 ctx = cfg.get("context_length")
                                 if ctx and isinstance(ctx, (int, float)):
                                     return int(ctx)
+                            # Fallback: when model is not loaded (loaded_instances empty),
+                            # use max_context_length from the same response to avoid
+                            # silently returning None. Closes #47678.
+                            max_ctx = m.get("max_context_length")
+                            if max_ctx and isinstance(max_ctx, (int, float)):
+                                return int(max_ctx)
                             break
 
             # LM Studio / vLLM / llama.cpp: try /v1/models/{model}
