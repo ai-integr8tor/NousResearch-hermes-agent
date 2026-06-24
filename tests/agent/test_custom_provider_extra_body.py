@@ -91,3 +91,33 @@ def test_custom_provider_extra_body_ignores_other_custom_models():
     )
 
     assert agent.request_overrides == {}
+
+
+def test_named_custom_provider_extra_body_merges_for_fallback_slug():
+    agent = SimpleNamespace(
+        provider="local-llm",
+        model="qwen3.6-27b-q4km",
+        base_url="http://127.0.0.1:9130/v1",
+        request_overrides={},
+    )
+
+    _merge_custom_provider_extra_body(
+        agent,
+        [
+            {
+                "name": "local-llm",
+                "provider_key": "local-llm",
+                "base_url": "http://127.0.0.1:9130/v1",
+                "model": "qwen3.6-27b-q4km",
+                "extra_body": {
+                    "chat_template_kwargs": {"enable_thinking": False},
+                },
+            }
+        ],
+    )
+
+    assert agent.request_overrides == {
+        "extra_body": {
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+    }

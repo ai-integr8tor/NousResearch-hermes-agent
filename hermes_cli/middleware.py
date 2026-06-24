@@ -176,17 +176,39 @@ def run_llm_execution_middleware(
     **context: Any,
 ) -> Any:
     """Run provider execution through registered LLM execution middleware."""
+    original_request = context.pop("original_request", request)
     callbacks = _get_middleware_callbacks(LLM_EXECUTION_MIDDLEWARE)
-    if not callbacks:
-        return next_call(request)
-    return _run_execution_chain(
-        LLM_EXECUTION_MIDDLEWARE,
-        callbacks,
-        next_call,
-        request=request,
-        original_request=context.pop("original_request", request),
-        **context,
-    )
+
+    def _execute(payload: Dict[str, Any]) -> Any:
+        if not callbacks:
+            return next_call(payload)
+        return _run_execution_chain(
+            LLM_EXECUTION_MIDDLEWARE,
+            callbacks,
+            next_call,
+            request=payload,
+            original_request=original_request,
+            **context,
+        )
+
+    try:
+        response = _execute(request)
+    except Exception as exc:
+        try:
+            from agent.raw_interactions import capture_llm_error
+
+            capture_llm_error(original_request, exc, **context)
+        except Exception:
+            pass
+        raise
+
+    try:
+        from agent.raw_interactions import capture_llm_success
+
+        capture_llm_success(original_request, response, **context)
+    except Exception:
+        pass
+    return response
 
 
 def run_tool_execution_middleware(

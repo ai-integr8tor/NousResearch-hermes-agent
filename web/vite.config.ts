@@ -58,6 +58,7 @@ function hermesDevToken(): Plugin {
 }
 
 export default defineConfig({
+  base: process.env.HERMES_DASHBOARD_BASE ?? "/",
   plugins: [react(), tailwindcss(), hermesDevToken()],
   resolve: {
     alias: {

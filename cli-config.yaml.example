@@ -530,6 +530,23 @@ memory:
   flush_min_turns: 6        # Min user turns to trigger flush on exit/reset (0 = disabled)
 
 # =============================================================================
+# Raw Interaction Capture
+# =============================================================================
+# Optional research/QA capture for later scoring and replay. When enabled,
+# Hermes appends every raw provider LLM request and response/error to JSONL
+# under ~/.hermes/interactions/raw by default. Records include stable metadata,
+# empty scores/annotations objects for later labeling, and replay.request with
+# the exact provider payload Hermes sent. This intentionally stores full prompt,
+# tool, response, and error content; protect the directory like secrets.
+# Env overrides: HERMES_CAPTURE_INTERACTIONS=1, HERMES_CAPTURE_DIR=/path,
+# HERMES_CAPTURE_GZIP=1.
+#
+interaction_capture:
+  enabled: false
+  dir: ""       # empty = ~/.hermes/interactions/raw
+  gzip: false   # true = append daily .jsonl.gz files
+
+# =============================================================================
 # Session Reset Policy (Messaging Platforms)
 # =============================================================================
 # Controls when messaging sessions (Telegram, Discord, WhatsApp, Slack) are

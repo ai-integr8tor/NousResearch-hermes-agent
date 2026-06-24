@@ -884,6 +884,31 @@ DEFAULT_CONFIG = {
     "model": "",
     "providers": {},
     "fallback_providers": [],
+    "capability_policy": {
+        "enabled": False,
+        "default_min_score": 0.40,
+        "notify_on_degraded_mode": True,
+        "tasks": {
+            "cron.default": {
+                "score_key": "autonomous_ops",
+                "min_score": 0.40,
+                "local_allowed": True,
+                "on_insufficient": "defer",
+            },
+            "cron.email_monitor": {
+                "score_key": "autonomous_ops",
+                "min_score": 0.40,
+                "local_allowed": True,
+                "on_insufficient": "notify",
+            },
+            "cron.code_modification": {
+                "score_key": "coding",
+                "min_score": 0.70,
+                "local_allowed": False,
+                "on_insufficient": "notify",
+            },
+        },
+    },
     "credential_pool_strategies": {},
     "toolsets": ["hermes-cli"],
     # Global active chat session cap across CLI, TUI/dashboard, and messaging.
@@ -4445,7 +4470,7 @@ def check_config_version() -> Tuple[int, int]:
 # Fields that are valid at root level of config.yaml
 _KNOWN_ROOT_KEYS = {
     "_config_version", "model", "providers", "fallback_model",
-    "fallback_providers", "credential_pool_strategies", "toolsets",
+    "fallback_providers", "capability_policy", "credential_pool_strategies", "toolsets",
     "agent", "terminal", "display", "compression", "delegation",
     "auxiliary", "custom_providers", "context", "memory", "gateway",
     "sessions", "streaming", "updates", "mcp_servers",

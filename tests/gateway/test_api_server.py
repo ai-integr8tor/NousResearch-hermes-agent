@@ -505,6 +505,7 @@ def _create_app(adapter: APIServerAdapter) -> web.Application:
     app.router.add_get("/v1/capabilities", adapter._handle_capabilities)
     app.router.add_get("/v1/skills", adapter._handle_skills)
     app.router.add_get("/v1/toolsets", adapter._handle_toolsets)
+    app.router.add_post("/api/gateway/restart", adapter._handle_gateway_restart)
     app.router.add_post("/v1/chat/completions", adapter._handle_chat_completions)
     app.router.add_post("/v1/responses", adapter._handle_responses)
     app.router.add_get("/v1/responses/{response_id}", adapter._handle_get_response)
@@ -769,10 +770,12 @@ class TestCapabilitiesEndpoint:
             assert data["features"]["chat_completions"] is True
             assert data["features"]["run_status"] is True
             assert data["features"]["run_events_sse"] is True
+            assert data["features"]["gateway_restart"] is True
             assert data["features"]["session_continuity_header"] == "X-Hermes-Session-Id"
             assert data["endpoints"]["run_status"]["path"] == "/v1/runs/{run_id}"
             assert data["endpoints"]["skills"] == {"method": "GET", "path": "/v1/skills"}
             assert data["endpoints"]["toolsets"] == {"method": "GET", "path": "/v1/toolsets"}
+            assert data["endpoints"]["gateway_restart"] == {"method": "POST", "path": "/api/gateway/restart"}
 
     @pytest.mark.asyncio
     async def test_capabilities_requires_auth_when_key_configured(self, auth_adapter):
@@ -936,6 +939,77 @@ class TestToolsetsEndpoint:
                     headers={"Authorization": "Bearer sk-secret"},
                 )
                 assert authed.status == 200
+
+
+# ---------------------------------------------------------------------------
+# /api/gateway/restart endpoint
+# ---------------------------------------------------------------------------
+
+
+class TestGatewayRestartEndpoint:
+    @pytest.mark.asyncio
+    async def test_gateway_restart_requests_supervised_restart(self, adapter):
+        runner = MagicMock()
+        runner.request_restart.return_value = True
+        adapter.gateway_runner = runner
+        app = _create_app(adapter)
+
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post("/api/gateway/restart")
+            assert resp.status == 202
+            data = await resp.json()
+
+        assert data == {
+            "object": "hermes.gateway.restart",
+            "accepted": True,
+            "state": "restarting",
+        }
+        runner.request_restart.assert_called_once_with(detached=False, via_service=True)
+
+    @pytest.mark.asyncio
+    async def test_gateway_restart_requires_auth_when_key_configured(self, auth_adapter):
+        runner = MagicMock()
+        runner.request_restart.return_value = True
+        auth_adapter.gateway_runner = runner
+        app = _create_app(auth_adapter)
+
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post("/api/gateway/restart")
+            assert resp.status == 401
+
+            authed = await cli.post(
+                "/api/gateway/restart",
+                headers={"Authorization": "Bearer sk-secret"},
+            )
+            assert authed.status == 202
+
+        runner.request_restart.assert_called_once_with(detached=False, via_service=True)
+
+    @pytest.mark.asyncio
+    async def test_gateway_restart_returns_503_without_runner(self, adapter):
+        app = _create_app(adapter)
+
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post("/api/gateway/restart")
+            assert resp.status == 503
+            data = await resp.json()
+
+        assert data["error"]["code"] == "gateway_runner_unavailable"
+
+    @pytest.mark.asyncio
+    async def test_gateway_restart_returns_409_when_already_requested(self, adapter):
+        runner = MagicMock()
+        runner.request_restart.return_value = False
+        adapter.gateway_runner = runner
+        app = _create_app(adapter)
+
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post("/api/gateway/restart")
+            assert resp.status == 409
+            data = await resp.json()
+
+        assert data["accepted"] is False
+        assert data["state"] == "already_requested"
 
 
 # ---------------------------------------------------------------------------

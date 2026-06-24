@@ -2358,7 +2358,12 @@ def _record_completed_action(name: str, message: str, exit_code: int = 1) -> Non
     _ACTION_RESULTS[name] = {"exit_code": exit_code, "pid": None}
 
 
-def _spawn_hermes_action(subcommand: List[str], name: str) -> subprocess.Popen:
+def _spawn_hermes_action(
+    subcommand: List[str],
+    name: str,
+    *,
+    sudo_if_needed: bool = False,
+) -> subprocess.Popen:
     """Spawn ``hermes <subcommand>`` detached and record the Popen handle.
 
     Uses the running interpreter's ``hermes_cli.main`` module so the action
@@ -2373,6 +2378,12 @@ def _spawn_hermes_action(subcommand: List[str], name: str) -> subprocess.Popen:
     )
 
     cmd = [sys.executable, "-m", "hermes_cli.main", *subcommand]
+    if sudo_if_needed and os.geteuid() != 0:
+        # Dashboard actions run detached/non-interactively, so use `-n`: if the
+        # host has not granted passwordless sudo for this user the command fails
+        # immediately and the action log explains why, instead of hanging on a
+        # password prompt the browser cannot answer.
+        cmd = ["sudo", "-n", *cmd]
 
     popen_kwargs: Dict[str, Any] = {
         "cwd": str(PROJECT_ROOT),
@@ -2471,13 +2482,21 @@ def _spawn_gateway_restart(profile: Optional[str] = None) -> Tuple[subprocess.Po
     Returns ``(proc, reused)``.
     """
     subcommand = _gateway_subcommand(profile, "restart")
+    sudo_if_needed = False
+    try:
+        from hermes_cli.gateway import get_systemd_unit_path
+        if profile is None and get_systemd_unit_path(system=True).exists():
+            subcommand = ["gateway", "restart", "--system"]
+            sudo_if_needed = os.geteuid() != 0
+    except Exception:
+        pass
     existing = _ACTION_PROCS.get("gateway-restart")
     if existing is not None and existing.poll() is None:
         existing_command = _ACTION_COMMANDS.get("gateway-restart")
         if existing_command is None or existing_command == tuple(subcommand):
             return existing, True
         raise RuntimeError("gateway restart already in progress for another profile")
-    return _spawn_hermes_action(subcommand, "gateway-restart"), False
+    return _spawn_hermes_action(subcommand, "gateway-restart", sudo_if_needed=sudo_if_needed), False
 
 
 def _restart_gateway_after_webhook_enable(profile: Optional[str] = None) -> dict[str, Any]:

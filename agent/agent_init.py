@@ -106,9 +106,7 @@ def _custom_provider_extra_body_for_agent(
     base_url: str,
     custom_providers: List[Dict[str, Any]],
 ) -> Optional[Dict[str, Any]]:
-    if (provider or "").strip().lower() != "custom":
-        return None
-
+    provider_norm = (provider or "").strip().lower()
     target_url = _normalized_custom_base_url(base_url)
     if not target_url:
         return None
@@ -119,6 +117,16 @@ def _custom_provider_extra_body_for_agent(
             continue
         if _normalized_custom_base_url(entry.get("base_url")) != target_url:
             continue
+
+        entry_names = {
+            "custom",
+            str(entry.get("name") or "").strip().lower(),
+            str(entry.get("provider_key") or "").strip().lower(),
+        }
+        entry_names.update({f"custom:{name}" for name in list(entry_names) if name and name != "custom"})
+        if provider_norm not in entry_names:
+            continue
+
         extra_body = entry.get("extra_body")
         if not isinstance(extra_body, dict) or not extra_body:
             continue

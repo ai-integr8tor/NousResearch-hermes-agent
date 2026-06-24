@@ -1203,9 +1203,39 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
         # the stale value from the previous model.  See #22387.
         agent._config_context_length = None
         agent.model = fb_model
-        agent.provider = fb_provider
+        try:
+            from hermes_cli.runtime_provider import _get_named_custom_provider
+            _fb_agent_provider = "custom" if _get_named_custom_provider(fb_provider) else fb_provider
+        except Exception:
+            _fb_agent_provider = fb_provider
+        agent.provider = _fb_agent_provider
         agent.base_url = fb_base_url
         agent.api_mode = fb_api_mode
+        # Fallback entries may target named custom providers (for example the
+        # local qwen driver).  Re-apply per-provider request extras after the
+        # provider/model/base_url swap so the next request carries required
+        # backend quirks such as chat_template_kwargs.enable_thinking=false.
+        try:
+            fallback_extra_body = fb.get("extra_body")
+            if isinstance(fallback_extra_body, dict) and fallback_extra_body:
+                overrides = dict(getattr(agent, "request_overrides", {}) or {})
+                merged_extra_body = dict(fallback_extra_body)
+                existing_extra_body = overrides.get("extra_body")
+                if isinstance(existing_extra_body, dict):
+                    merged_extra_body.update(existing_extra_body)
+                overrides["extra_body"] = merged_extra_body
+                agent.request_overrides = overrides
+            else:
+                from agent.agent_init import _merge_custom_provider_extra_body
+                _merge_custom_provider_extra_body(
+                    agent,
+                    getattr(agent, "_custom_providers", None) or [],
+                )
+        except Exception as _extra_body_exc:
+            logger.debug(
+                "Fallback request override merge failed for %s/%s: %s",
+                fb_provider, fb_model, _extra_body_exc,
+            )
         if hasattr(agent, "_transport_cache"):
             agent._transport_cache.clear()
         agent._fallback_activated = True
@@ -1328,6 +1358,20 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
             "Fallback activated: %s → %s (%s)",
             old_model, fb_model, fb_provider,
         )
+        try:
+            from agent.degraded_mode_notify import format_fallback_message, notify_degraded_mode
+            notify_degraded_mode(
+                kind="fallback",
+                key=f"fallback:{old_model}:{fb_provider}:{fb_model}:{getattr(reason, 'value', reason)}",
+                message=format_fallback_message(
+                    old_model=old_model,
+                    new_model=fb_model,
+                    provider=fb_provider,
+                    reason=reason,
+                ),
+            )
+        except Exception as _notify_exc:
+            logger.debug("Fallback notification hook failed: %s", _notify_exc)
         return True
     except Exception as e:
         logger.error("Failed to activate fallback %s: %s", fb_model, e)
