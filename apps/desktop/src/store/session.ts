@@ -30,6 +30,7 @@ function workspaceCwdKey(connection: HermesConnection | null = $connection.get()
 
   const base = encodeURIComponent(connection.baseUrl || 'remote')
   const profile = encodeURIComponent(connection.profile || 'default')
+
   return `${WORKSPACE_CWD_KEY}.remote.${base}.${profile}`
 }
 
@@ -75,6 +76,7 @@ export async function ensureDefaultWorkspaceCwd(): Promise<void> {
 
   if ($connection.get()?.mode === 'remote') {
     seedLiveCwd(remembered)
+
     return
   }
 
@@ -116,6 +118,76 @@ function updateAtom<T>(store: AppAtom<T>, next: Updater<T>) {
 export const sessionPinId = (session: Pick<SessionInfo, '_lineage_root_id' | 'id'>): string =>
   session._lineage_root_id ?? session.id
 
+type SessionIdentity = Pick<SessionInfo, '_lineage_root_id' | 'id'> | string | null | undefined
+
+const locallyHiddenSessionIds = new Set<string>()
+const locallyHiddenSessionTimers = new Map<string, ReturnType<typeof setTimeout>>()
+
+function sessionIdentityIds(identity: SessionIdentity): string[] {
+  if (!identity) {
+    return []
+  }
+
+  if (typeof identity === 'string') {
+    return identity ? [identity] : []
+  }
+
+  return [identity.id, identity._lineage_root_id].filter(Boolean) as string[]
+}
+
+export function setSessionLocallyHidden(identity: SessionIdentity, hidden: boolean) {
+  for (const id of sessionIdentityIds(identity)) {
+    const timer = locallyHiddenSessionTimers.get(id)
+
+    if (timer) {
+      clearTimeout(timer)
+      locallyHiddenSessionTimers.delete(id)
+    }
+
+    if (hidden) {
+      locallyHiddenSessionIds.add(id)
+    } else {
+      locallyHiddenSessionIds.delete(id)
+    }
+  }
+}
+
+export function setSessionLocallyHiddenFor(identity: SessionIdentity, durationMs: number) {
+  for (const id of sessionIdentityIds(identity)) {
+    const timer = locallyHiddenSessionTimers.get(id)
+
+    if (timer) {
+      clearTimeout(timer)
+    }
+
+    locallyHiddenSessionIds.add(id)
+    locallyHiddenSessionTimers.set(
+      id,
+      setTimeout(() => {
+        locallyHiddenSessionTimers.delete(id)
+        locallyHiddenSessionIds.delete(id)
+      }, durationMs)
+    )
+  }
+}
+
+function sessionIsLocallyHidden(session: Pick<SessionInfo, '_lineage_root_id' | 'id'>): boolean {
+  return (
+    locallyHiddenSessionIds.has(session.id) ||
+    Boolean(session._lineage_root_id && locallyHiddenSessionIds.has(session._lineage_root_id))
+  )
+}
+
+export function filterHiddenSessions<T extends Pick<SessionInfo, '_lineage_root_id' | 'id'>>(sessions: T[]): T[] {
+  if (locallyHiddenSessionIds.size === 0) {
+    return sessions
+  }
+
+  const visible = sessions.filter(session => !sessionIsLocallyHidden(session))
+
+  return visible.length === sessions.length ? sessions : visible
+}
+
 /** Merge a fresh server session page into the in-memory list, keeping any
  *  row the server omitted that we still want visible — both still-"working"
  *  sessions and pinned sessions.
@@ -136,37 +208,37 @@ export const sessionPinId = (session: Pick<SessionInfo, '_lineage_root_id' | 'id
  *  `keepIds` carries both the working set and the pinned set. Pins are stored
  *  on the durable lineage-root id (see {@link sessionPinId}), while the loaded
  *  row surfaces under its live compression tip, so we match a survivor by
- *  either its live `id` or its `_lineage_root_id`. Optimistic deletes/archives
- *  drop the row from `previous` (and unpin it), so a removed session can't be
- *  resurrected here. */
+ *  either its live `id` or its `_lineage_root_id`. Locally hidden rows are
+ *  filtered before merging so a stale refresh cannot resurrect an optimistic
+ *  delete. */
 export function mergeSessionPage(
   previous: SessionInfo[],
   incoming: SessionInfo[],
   keepIds: Iterable<string>
 ): SessionInfo[] {
+  const visibleIncoming = filterHiddenSessions(incoming)
+  const visiblePrevious = filterHiddenSessions(previous)
   const keep = keepIds instanceof Set ? keepIds : new Set(keepIds)
 
   if (keep.size === 0) {
-    return incoming
+    return visibleIncoming
   }
 
-  const incomingIds = new Set(incoming.map(session => session.id))
+  const incomingIds = new Set(visibleIncoming.map(session => session.id))
   // Deduplicate by compression lineage: when auto-compression rotates the tip
   // id (old #4 → new #5), the incoming page carries the new tip but the
   // previous list still holds the old one.  Without lineage-level dedup both
   // rows survive as separate sidebar entries (fixes #43483).
-  const incomingLineageKeys = new Set(
-    incoming.map(session => session._lineage_root_id ?? session.id)
-  )
+  const incomingLineageKeys = new Set(visibleIncoming.map(session => session._lineage_root_id ?? session.id))
 
-  const survivors = previous.filter(
+  const survivors = visiblePrevious.filter(
     session =>
       !incomingIds.has(session.id) &&
       !incomingLineageKeys.has(session._lineage_root_id ?? session.id) &&
       (keep.has(session.id) || (session._lineage_root_id != null && keep.has(session._lineage_root_id)))
   )
 
-  return survivors.length ? [...survivors, ...incoming] : incoming
+  return survivors.length ? [...survivors, ...visibleIncoming] : visibleIncoming
 }
 
 export const $connection = atom<HermesConnection | null>(null)
