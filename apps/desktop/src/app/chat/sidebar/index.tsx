@@ -309,6 +309,7 @@ interface ChatSidebarProps extends React.ComponentProps<typeof Sidebar> {
   onNewSessionInWorkspace: (path: null | string) => void
   onManageCronJob: (jobId: string) => void
   onTriggerCronJob: (jobId: string) => void
+  onRefreshMessaging?: () => void | Promise<void>
 }
 
 export function ChatSidebar({
@@ -322,7 +323,8 @@ export function ChatSidebar({
   onArchiveSession,
   onNewSessionInWorkspace,
   onManageCronJob,
-  onTriggerCronJob
+  onTriggerCronJob,
+  onRefreshMessaging
 }: ChatSidebarProps) {
   const { t } = useI18n()
   const s = t.sidebar
@@ -365,6 +367,7 @@ export function ChatSidebar({
   const [newSessionKbdFlash, setNewSessionKbdFlash] = useState(false)
   const [profileLoadMorePending, setProfileLoadMorePending] = useState<Record<string, boolean>>({})
   const [messagingLoadMorePending, setMessagingLoadMorePending] = useState<Record<string, boolean>>({})
+  const [messagingRefreshing, setMessagingRefreshing] = useState(false)
   const messagingOpenIds = useStore($sidebarMessagingOpenIds)
   // Per-platform count of rows currently revealed (starts at NON_SESSION_INITIAL_ROWS).
   const [messagingVisible, setMessagingVisible] = useState<Record<string, number>>({})
@@ -612,6 +615,21 @@ export function ChatSidebar({
       loadMoreForMessaging(platform)
     }
   }
+
+  const handleRefreshMessaging = useCallback(async () => {
+    if (!onRefreshMessaging || messagingRefreshing) {
+      return
+    }
+
+    setMessagingRefreshing(true)
+
+    try {
+      await onRefreshMessaging()
+      setMessagingVisible({})
+    } finally {
+      setMessagingRefreshing(false)
+    }
+  }, [messagingRefreshing, onRefreshMessaging])
 
   // Each messaging platform is its own self-managed section: split the
   // separately-fetched messaging slice by source, newest platform first, rows
@@ -1037,6 +1055,27 @@ export function ChatSidebar({
                           step={Math.min(NON_SESSION_LOAD_STEP, Math.max(0, group.total - shownSessions.length))}
                         />
                       ) : null
+                    }
+                    headerAction={
+                      onRefreshMessaging ? (
+                        <div className="grid size-6 shrink-0 place-items-center">
+                          <Tip label={messagingRefreshing ? s.refreshingMessaging : s.refreshMessaging}>
+                            <Button
+                              aria-label={messagingRefreshing ? s.refreshingMessaging : s.refreshMessaging}
+                              title={messagingRefreshing ? s.refreshingMessaging : s.refreshMessaging}
+                              disabled={messagingRefreshing}
+                              onClick={event => {
+                                event.stopPropagation()
+                                void handleRefreshMessaging()
+                              }}
+                              size="icon-xs"
+                              variant="ghost"
+                            >
+                              <Codicon name="refresh" size="0.75rem" spinning={messagingRefreshing} />
+                            </Button>
+                          </Tip>
+                        </div>
+                      ) : undefined
                     }
                     key={group.sourceId}
                     label={group.label}

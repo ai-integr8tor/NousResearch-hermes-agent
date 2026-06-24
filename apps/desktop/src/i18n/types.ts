@@ -944,6 +944,8 @@ export interface Translations {
     showMoreIn: (count: number, label: string) => string
     loading: string
     loadMore: string
+    refreshMessaging: string
+    refreshingMessaging: string
     loadCount: (step: number) => string
     row: {
       pin: string

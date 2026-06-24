@@ -1219,6 +1219,8 @@ export const en: Translations = {
     showMoreIn: (count, label) => `Show ${count} more in ${label}`,
     loading: 'Loading…',
     loadMore: 'Load more',
+    refreshMessaging: 'Refresh gateway sessions',
+    refreshingMessaging: 'Refreshing gateway sessions',
     loadCount: step => `Load ${step} more`,
     row: {
       pin: 'Pin',

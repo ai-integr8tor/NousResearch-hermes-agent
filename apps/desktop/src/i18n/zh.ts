@@ -1403,6 +1403,8 @@ export const zh: Translations = {
     showMoreIn: (count, label) => `在 ${label} 中再显示 ${count} 个`,
     loading: '加载中…',
     loadMore: '加载更多',
+    refreshMessaging: '刷新网关会话',
+    refreshingMessaging: '正在刷新网关会话',
     loadCount: step => `再加载 ${step} 个`,
     row: {
       pin: '置顶',

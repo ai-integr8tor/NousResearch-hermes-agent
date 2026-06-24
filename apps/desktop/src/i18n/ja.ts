@@ -1348,6 +1348,8 @@ export const ja = defineLocale({
     showMoreIn: (count, label) => `${label} でさらに ${count} 件を表示`,
     loading: '読み込み中…',
     loadMore: 'さらに読み込む',
+    refreshMessaging: 'ゲートウェイセッションを更新',
+    refreshingMessaging: 'ゲートウェイセッションを更新中',
     loadCount: step => `さらに ${step} 件を読み込む`,
     row: {
       pin: 'ピン留め',

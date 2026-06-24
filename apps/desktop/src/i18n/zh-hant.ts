@@ -1299,6 +1299,8 @@ export const zhHant = defineLocale({
     showMoreIn: (count, label) => `在 ${label} 中再顯示 ${count} 個`,
     loading: '載入中…',
     loadMore: '載入更多',
+    refreshMessaging: '重新整理閘道工作階段',
+    refreshingMessaging: '正在重新整理閘道工作階段',
     loadCount: step => `再載入 ${step} 個`,
     row: {
       pin: '釘選',
