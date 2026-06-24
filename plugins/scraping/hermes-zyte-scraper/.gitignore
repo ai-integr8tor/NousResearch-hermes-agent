@@ -1,0 +1,41 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Private research artifacts - DO NOT PUBLISH
+internal/research/
+internal/docs/FULL_DEVELOPMENT_HISTORY.*
+internal/docs/zyte-study.md
+
+# Internal dashboards and logs
+autoresearch_dashboard.md
+
+# Environment and secrets
+.env
+*.env
+sshkey
+*.pem
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Generated files that shouldn't be committed
+*.log
+battle_matrix_results.json
+battle_matrix_results_v2.json
+battle_matrix_latest.json
+cloud_job_results.json
+scrapinghub.yml
+.venv/
+setup.py
+project.egg-info/
+build/
+
+# Internal documentation (history kept as PDF locally)
+internal/docs/

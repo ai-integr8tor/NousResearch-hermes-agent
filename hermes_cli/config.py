@@ -353,124 +353,52 @@ def get_managed_update_command() -> Optional[str]:
     return None
 
 
-def _install_method_project_root(project_root: Optional[Path] = None) -> Path:
-    """Resolve the directory that holds the *running code* (the install tree).
-
-    This is the parent of ``hermes_cli/`` — i.e. the git checkout for source
-    installs, ``/opt/hermes`` inside the published image, the venv's
-    site-packages root for pip installs. It is a property of the running
-    interpreter, NOT of ``$HERMES_HOME``, which is why a code-scoped stamp
-    here is immune to two installs sharing one data directory.
-    """
-    if project_root is not None:
-        return project_root
-    return Path(__file__).parent.parent.resolve()
-
-
 def detect_install_method(project_root: Optional[Path] = None) -> str:
     """Detect how Hermes was installed: 'docker', 'nixos', 'homebrew', 'git', or 'pip'.
 
     Resolution order:
-    1. Code-scoped stamp ``<install tree>/.install_method`` (next to the
-       running code) — the authoritative marker.
-    2. Legacy home-scoped stamp ``$HERMES_HOME/.install_method`` — read for
-       backward compatibility, but a ``docker`` value is IGNORED when we are
-       not actually running inside a container (see below).
-    3. HERMES_MANAGED env / .managed marker (NixOS, Homebrew)
-    4. .git directory presence -> 'git'
-    5. Fallback -> 'pip'
-
-    Why the stamp is code-scoped, not home-scoped (issue: shared ``~/.hermes``)
-    --------------------------------------------------------------------------
-    The install method describes *the binary that is running*, but
-    ``$HERMES_HOME`` is a shared DATA directory — the Docker docs deliberately
-    bind-mount it (``~/.hermes:/opt/data``) so config/sessions/memory persist
-    and can be shared with a host-side Desktop/CLI install. When a
-    containerised gateway and a host install share one ``$HERMES_HOME``, a
-    home-scoped stamp is a single slot describing two different installs:
-    the container stamps ``docker`` on every boot, the host install then reads
-    ``docker`` and ``hermes update`` refuses to run ("doesn't apply inside the
-    Docker container") even though the host binary is a perfectly updatable
-    git/pip install. Scoping the stamp to the install tree gives each install
-    its own truthful marker.
-
-    Self-healing for already-poisoned homes: a legacy ``docker`` value in the
-    home-scoped stamp is only honoured when we are genuinely in a container.
-    On a host install that read a contaminating ``docker`` stamp, we fall
-    through to managed/.git/pip detection instead — so existing shared-home
-    setups recover without the user touching anything.
+    1. Stamped ``~/.hermes/.install_method`` file (written by installers)
+    2. HERMES_MANAGED env / .managed marker (NixOS, Homebrew)
+    3. .git directory presence -> 'git'
+    4. Fallback -> 'pip'
 
     Note: running inside a container is NOT treated as "docker" on its own.
-    The supported installs self-identify via the code-scoped stamp:
+    The two supported install paths both self-identify via the
+    ``.install_method`` stamp (caught by step 1), so neither relies on
+    container detection here:
       - the curl installer (scripts/install.sh, the README/website install
-        command) git-clones the repo and stamps ``git`` next to the code;
-      - the published ``nousresearch/hermes-agent`` image bakes a ``docker``
-        stamp into ``/opt/hermes`` at build time.
-    An unsupported manual install dropped into a container (no stamp) falls
-    through to the ``.git``/pip checks and behaves like any off-path install.
-    See issue #34397.
+        command) git-clones the repo and stamps ``git``;
+      - the published ``nousresearch/hermes-agent`` image stamps ``docker``
+        at boot via ``docker/stage2-hook.sh``.
+    An unsupported manual install dropped into a container (no stamp) was
+    wrongly classified as the published image by bare container detection,
+    so ``hermes update`` bailed with "doesn't apply inside the Docker
+    container". Without that fallback such installs fall through to the
+    ``.git``/pip checks and behave like any off-path install. See issue #34397.
     """
-    root = _install_method_project_root(project_root)
-
-    # 1. Code-scoped stamp — authoritative, immune to shared $HERMES_HOME.
+    stamp = get_hermes_home() / ".install_method"
     try:
-        method = (root / ".install_method").read_text(encoding="utf-8").strip().lower()
+        method = stamp.read_text(encoding="utf-8").strip().lower()
         if method:
             return method
     except OSError:
         pass
-
-    # 2. Legacy home-scoped stamp — back-compat. Ignore a ``docker`` value
-    #    when we are not actually containerised: that is the signature of a
-    #    host install whose shared $HERMES_HOME was stamped by a co-located
-    #    container, and honouring it wrongly blocks ``hermes update``.
-    try:
-        method = (
-            (get_hermes_home() / ".install_method")
-            .read_text(encoding="utf-8")
-            .strip()
-            .lower()
-        )
-        if method and not (method == "docker" and not _running_in_container()):
-            return method
-    except OSError:
-        pass
-
     managed = get_managed_system()
     if managed:
         return managed.lower().replace(" ", "-")
-    if (root / ".git").is_dir():
+    if project_root is None:
+        project_root = Path(__file__).parent.parent.resolve()
+    if (project_root / ".git").is_dir():
         return "git"
     return "pip"
 
 
-def _running_in_container() -> bool:
-    """Thin wrapper around ``hermes_constants.is_container`` (import-safe)."""
+def stamp_install_method(method: str) -> None:
+    """Write the install method to ~/.hermes/.install_method."""
+    stamp = get_hermes_home() / ".install_method"
     try:
-        from hermes_constants import is_container
-
-        return is_container()
-    except Exception:
-        return False
-
-
-def stamp_install_method(method: str, project_root: Optional[Path] = None) -> None:
-    """Write the install method next to the running code (code-scoped stamp).
-
-    The stamp lives in the install tree (``<install tree>/.install_method``),
-    not in ``$HERMES_HOME``, so that two installs sharing one data directory
-    do not overwrite each other's marker. See ``detect_install_method`` for
-    the full rationale.
-
-    Best-effort: if the install tree is read-only (e.g. the immutable
-    ``/opt/hermes`` in the published image, which instead bakes the stamp at
-    build time) the write silently no-ops and detection falls back to its
-    other signals.
-    """
-    root = _install_method_project_root(project_root)
-    try:
-        root.mkdir(parents=True, exist_ok=True)
-        (root / ".install_method").write_text(method + "\n", encoding="utf-8")
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.write_text(method + "\n", encoding="utf-8")
     except OSError:
         pass
 
@@ -2857,7 +2785,7 @@ DEFAULT_CONFIG = {
 
 
     # Config schema version - bump this when adding new required fields
-    "_config_version": 30,
+    "_config_version": 31,
 }
 
 # =============================================================================
@@ -2873,6 +2801,7 @@ ENV_VARS_BY_VERSION: Dict[int, List[str]] = {
         "SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "SLACK_ALLOWED_USERS"],
     10: ["TAVILY_API_KEY"],
     11: ["TERMINAL_MODAL_MODE"],
+    31: ["ZYTE_API_KEY", "SCRAPY_CLOUD_API_KEY", "SCRAPY_CLOUD_PROJECT_ID"],
 }
 
 # Required environment variables with metadata for migration prompts.
@@ -3279,6 +3208,42 @@ OPTIONAL_ENV_VARS = {
         "url": "https://firecrawl.dev/",
         "tools": ["web_search", "web_extract"],
         "password": True,
+        "category": "tool",
+    },
+    "ZYTE_API_KEY": {
+        "description": "Zyte API key for extraction and spider runs (hermes-zyte-scraper plugin)",
+        "prompt": "Zyte API key",
+        "url": "https://app.zyte.com/o/zyte-api/api-access",
+        "tools": [
+            "zyte_extract",
+            "zyte_build_spider",
+            "zyte_deploy",
+            "zyte_schedule",
+            "zyte_list_jobs",
+            "zyte_get_results",
+        ],
+        "password": True,
+        "category": "tool",
+    },
+    "SCRAPY_CLOUD_API_KEY": {
+        "description": "Scrapy Cloud API key for deploy, schedule, and job results",
+        "prompt": "Scrapy Cloud API key",
+        "url": "https://app.zyte.com/o/settings/apikey",
+        "tools": [
+            "zyte_deploy",
+            "zyte_schedule",
+            "zyte_list_jobs",
+            "zyte_get_results",
+        ],
+        "password": True,
+        "category": "tool",
+    },
+    "SCRAPY_CLOUD_PROJECT_ID": {
+        "description": "Numeric Scrapy Cloud project ID (e.g. 867424) for schedule and list jobs",
+        "prompt": "Scrapy Cloud project ID",
+        "url": "https://app.zyte.com/",
+        "tools": ["zyte_schedule", "zyte_list_jobs", "zyte_deploy"],
+        "password": False,
         "category": "tool",
     },
     "FIRECRAWL_API_URL": {
@@ -6611,6 +6576,8 @@ def show_config():
         ("EXA_API_KEY", "Exa"),
         ("PARALLEL_API_KEY", "Parallel"),
         ("FIRECRAWL_API_KEY", "Firecrawl"),
+        ("ZYTE_API_KEY", "Zyte"),
+        ("SCRAPY_CLOUD_API_KEY", "Scrapy Cloud"),
         ("TAVILY_API_KEY", "Tavily"),
         ("BROWSERBASE_API_KEY", "Browserbase"),
         ("BROWSER_USE_API_KEY", "Browser Use"),
@@ -6834,7 +6801,8 @@ def set_config_value(key: str, value: str):
         'FIRECRAWL_GATEWAY_URL', 'TOOL_GATEWAY_DOMAIN', 'TOOL_GATEWAY_SCHEME',
         'TOOL_GATEWAY_USER_TOKEN', 'TAVILY_API_KEY',
         'BROWSERBASE_API_KEY', 'BROWSERBASE_PROJECT_ID', 'BROWSER_USE_API_KEY',
-        'FAL_KEY', 'TELEGRAM_BOT_TOKEN', 'DISCORD_BOT_TOKEN',
+        'FAL_KEY', 'ZYTE_API_KEY', 'SCRAPY_CLOUD_API_KEY', 'SCRAPY_CLOUD_PROJECT_ID',
+        'TELEGRAM_BOT_TOKEN', 'DISCORD_BOT_TOKEN',
         'TERMINAL_SSH_HOST', 'TERMINAL_SSH_USER', 'TERMINAL_SSH_KEY',
         'SUDO_PASSWORD', 'SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN',
         'GITHUB_TOKEN', 'HONCHO_API_KEY',
