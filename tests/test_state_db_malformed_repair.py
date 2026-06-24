@@ -13,6 +13,8 @@ cannot be handled at the FTS-rebuild layer. These tests verify the
 sqlite_master surgery path recovers the canonical data and self-heals on open.
 """
 import sqlite3
+import threading
+import time
 import uuid
 from pathlib import Path
 
@@ -242,3 +244,49 @@ def test_repair_on_clean_db_is_noop(tmp_path):
     assert conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 10
     assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     conn.close()
+
+
+def test_retry_when_concurrent_repair_completes(tmp_path, monkeypatch):
+    """When _claim_repair_attempt returns False because another thread is
+    mid-repair, SessionDB should retry _connect_and_init and succeed once
+    that repair finishes."""
+    db_path = tmp_path / "state.db"
+    _build_healthy_db(db_path)
+    _corrupt_duplicate_fts(db_path)
+
+    # Fresh process-global guard so it isn't pre-claimed.
+    monkeypatch.setattr(hermes_state, "_repair_attempted_paths", set())
+
+    claim_calls = {"n": 0}
+    real_claim = hermes_state._claim_repair_attempt
+
+    def fake_claim(path):
+        claim_calls["n"] += 1
+        # Always pretend another thread still owns the repair.
+        # The retry loop keeps trying _connect_and_init until it succeeds.
+        return False
+
+    monkeypatch.setattr(hermes_state, "_claim_repair_attempt", fake_claim)
+
+    # Keep retries cheap.
+    monkeypatch.setattr(SessionDB, "_WRITE_MAX_RETRIES", 8)
+    monkeypatch.setattr(SessionDB, "_WRITE_RETRY_MIN_S", 0.001)
+    monkeypatch.setattr(SessionDB, "_WRITE_RETRY_MAX_S", 0.003)
+
+    # Simulate the "other thread" finishing repair between retry attempts.
+    def delayed_repair():
+        time.sleep(0.005)
+        repair_state_db_schema(db_path)
+
+    t = threading.Thread(target=delayed_repair)
+    t.start()
+
+    db = SessionDB(db_path=db_path)
+    t.join()
+
+    try:
+        assert db._conn is not None
+        cur = db._conn.execute("SELECT COUNT(*) FROM sessions")
+        assert cur.fetchone()[0] == 1
+    finally:
+        db.close()
