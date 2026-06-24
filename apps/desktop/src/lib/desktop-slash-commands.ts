@@ -31,6 +31,7 @@ export interface DesktopThemeCommandOption {
 export type DesktopActionId =
   | 'branch'
   | 'browser'
+  | 'compress'
   | 'handoff'
   | 'help'
   | 'new'
@@ -111,6 +112,11 @@ const DESKTOP_COMMAND_SPECS: readonly DesktopCommandSpec[] = [
     surface: action('browser'),
     args: true
   },
+  // /compress is an action, not exec: it must use the session.compress RPC
+  // (the TUI's path). The slash worker route times out on large sessions,
+  // and the dispatcher's command.dispatch fallback then reports a bogus
+  // "not a quick/plugin/skill command: compress" (#44456).
+  { name: '/compress', description: 'Compress this conversation context', surface: action('compress') },
 
   // Overlay pickers
   { name: '/model', description: 'Switch the model for this session', surface: picker('model'), hidden: true },
@@ -125,7 +131,6 @@ const DESKTOP_COMMAND_SPECS: readonly DesktopCommandSpec[] = [
   // Backend-executed commands that render useful inline output
   { name: '/agents', description: 'Show active desktop sessions and running tasks', aliases: ['/tasks'], surface: exec() },
   { name: '/background', description: 'Run a prompt in the background', aliases: ['/bg', '/btw'], surface: exec() },
-  { name: '/compress', description: 'Compress this conversation context', surface: exec() },
   { name: '/debug', description: 'Create a debug report', surface: exec() },
   { name: '/goal', description: 'Manage the standing goal for this session', surface: exec() },
   { name: '/personality', description: 'Switch personality for this session', surface: exec(), args: true },
