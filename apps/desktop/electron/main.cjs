@@ -944,33 +944,6 @@ function openExternalUrl(rawUrl) {
   return true
 }
 
-async function openPreviewInBrowser(rawUrl) {
-  const raw = String(rawUrl || '').trim()
-  if (!raw) return false
-
-  let parsed
-  try {
-    parsed = new URL(raw)
-  } catch {
-    return false
-  }
-
-  if (parsed.protocol === 'file:') {
-    let localPath
-    try {
-      localPath = resolveRequestedPathForIpc(parsed.toString(), { purpose: 'Open preview in browser' })
-    } catch {
-      return false
-    }
-
-    await shell.openExternal(pathToFileURL(localPath).toString())
-
-    return true
-  }
-
-  return openExternalUrl(raw)
-}
-
 function ensureWslWindowsFonts() {
   if (!IS_WSL) return
 
@@ -5385,142 +5358,6 @@ function createNewSessionWindow() {
   return spawnSecondaryWindow({ newSession: true })
 }
 
-// The pet overlay: a single transparent, frameless, always-on-top window that
-// hosts ONLY the floating mascot. Shift-clicking the in-window pet "pops it out"
-// here so it can leave the app's bounds and stay visible while Hermes is
-// minimized (Codex-style task-completion glance). It carries no gateway
-// connection of its own — the main renderer is the single source of truth and
-// pushes pet state over IPC (hermes:pet-overlay:state); the overlay just renders
-// it. Control flows back (pop-in, composer submit) via hermes:pet-overlay:control.
-let petOverlayWindow = null
-
-function petOverlayUrl() {
-  if (DEV_SERVER) {
-    return `${DEV_SERVER.endsWith('/') ? DEV_SERVER.slice(0, -1) : DEV_SERVER}/?win=overlay#/`
-  }
-
-  return `${pathToFileURL(resolveRendererIndex()).toString()}?win=overlay#/`
-}
-
-function spawnPetOverlayWindow(bounds) {
-  const win = new BrowserWindow({
-    width: Math.max(80, Math.round(bounds?.width || 220)),
-    height: Math.max(80, Math.round(bounds?.height || 220)),
-    x: Number.isFinite(bounds?.x) ? Math.round(bounds.x) : undefined,
-    y: Number.isFinite(bounds?.y) ? Math.round(bounds.y) : undefined,
-    frame: false,
-    transparent: true,
-    resizable: false,
-    movable: true,
-    minimizable: false,
-    maximizable: false,
-    fullscreenable: false,
-    // Windows/Linux need this so the helper window does not get its own
-    // taskbar/alt-tab entry. On macOS, cmd-tab is app-level and this can make
-    // the whole app look like it vanished when the only newly-created visible
-    // window is a frameless overlay. Use NSPanel + Mission Control hiding below
-    // instead, leaving the main Hermes app as the Dock/cmd-tab anchor.
-    skipTaskbar: !IS_MAC,
-    hasShadow: false,
-    alwaysOnTop: true,
-    // macOS panels are non-activating helper windows and can float over full
-    // screen spaces without becoming the app's main switcher window.
-    type: IS_MAC ? 'panel' : undefined,
-    hiddenInMissionControl: IS_MAC,
-    // Non-activating: the overlay must never become the app's key/main window,
-    // or it (a frameless, taskbar-skipping panel) becomes the app's switcher
-    // anchor and the Hermes icon drops out of cmd/alt-tab — especially when the
-    // main window is minimized. We flip this on only while the composer needs
-    // the keyboard (see hermes:pet-overlay:set-focusable).
-    focusable: false,
-    show: false,
-    // Fully transparent — the renderer paints only the sprite + bubble.
-    backgroundColor: '#00000000',
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.cjs'),
-      contextIsolation: true,
-      sandbox: true,
-      nodeIntegration: false,
-      devTools: true,
-      // Keep the sprite animating + bubble updating while the main window is
-      // minimized/blurred — the whole point of the overlay.
-      backgroundThrottling: false
-    }
-  })
-
-  // Float above other apps and follow the user across desktops so the pet is
-  // always reachable. `floating` + `type: panel` is the macOS NSPanel path; the
-  // more aggressive `screen-saver` level can interfere with normal app/window
-  // switching semantics.
-  win.setAlwaysOnTop(true, IS_MAC ? 'floating' : 'screen-saver')
-  win.setHiddenInMissionControl?.(true)
-  try {
-    // Electron docs: macOS may transform process type on each
-    // setVisibleOnAllWorkspaces() call unless skipTransformProcessType=true,
-    // which briefly hides the Dock/cmd-tab presence. Keep Hermes in the normal
-    // ForegroundApplication class so shift-clicking the pet never drops the app
-    // out of app switchers.
-    win.setVisibleOnAllWorkspaces(
-      true,
-      IS_MAC ? { visibleOnFullScreen: true, skipTransformProcessType: true } : undefined
-    )
-  } catch {
-    // Not supported everywhere — best effort.
-  }
-
-  wireCommonWindowHandlers(win)
-
-  win.once('ready-to-show', () => {
-    if (!win.isDestroyed()) win.showInactive()
-  })
-
-  win.on('closed', () => {
-    if (petOverlayWindow === win) {
-      petOverlayWindow = null
-    }
-
-    // If the overlay went away on its own (e.g. ⌘W), tell the main renderer to
-    // pop the pet back in so it doesn't stay hidden. Harmless echo when we're
-    // the ones who closed it (popInPet already cleared the active flag).
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('hermes:pet-overlay:control', { type: 'pop-in' })
-    }
-  })
-
-  win.loadURL(petOverlayUrl())
-
-  return win
-}
-
-function openPetOverlay(bounds) {
-  if (petOverlayWindow && !petOverlayWindow.isDestroyed()) {
-    if (bounds) {
-      petOverlayWindow.setBounds({
-        x: Math.round(bounds.x),
-        y: Math.round(bounds.y),
-        width: Math.max(80, Math.round(bounds.width)),
-        height: Math.max(80, Math.round(bounds.height))
-      })
-    }
-
-    petOverlayWindow.showInactive()
-
-    return petOverlayWindow
-  }
-
-  petOverlayWindow = spawnPetOverlayWindow(bounds)
-
-  return petOverlayWindow
-}
-
-function closePetOverlay() {
-  if (petOverlayWindow && !petOverlayWindow.isDestroyed()) {
-    petOverlayWindow.close()
-  }
-
-  petOverlayWindow = null
-}
-
 function createWindow() {
   const icon = getAppIconPath()
   mainWindow = new BrowserWindow({
@@ -5577,11 +5414,6 @@ function createWindow() {
   mainWindow.on('enter-full-screen', () => sendWindowStateChanged(true))
   mainWindow.on('will-leave-full-screen', () => sendWindowStateChanged(false))
   mainWindow.on('leave-full-screen', () => sendWindowStateChanged(false))
-
-  // The overlay rides the main window — closing the app's primary window must
-  // tear it down too (otherwise it strands as an orphan that blocks
-  // window-all-closed from quitting on Windows/Linux).
-  mainWindow.on('closed', () => closePetOverlay())
 
   wireCommonWindowHandlers(mainWindow)
 
@@ -5702,116 +5534,6 @@ ipcMain.handle('hermes:window:openNewSession', async () => {
   createNewSessionWindow()
 
   return { ok: true }
-})
-
-// --- Pet overlay (pop-out mascot) -----------------------------------------
-// `request` is `{ bounds, screen }`. A fresh pop-out passes viewport-space
-// bounds (screen=false): convert to screen space by adding the main window's
-// content origin so the pet lands where it sat in-window. A remembered/dragged
-// spot passes screen-space bounds (screen=true) and is used as-is. We return the
-// resolved screen bounds so the renderer can persist exactly where it opened.
-ipcMain.handle('hermes:pet-overlay:open', async (_event, request) => {
-  const bounds = request && request.bounds ? request.bounds : request
-  const isScreen = Boolean(request && request.screen)
-  let screenBounds = bounds
-
-  try {
-    if (bounds && !isScreen && mainWindow && !mainWindow.isDestroyed()) {
-      const content = mainWindow.getContentBounds()
-      screenBounds = {
-        x: content.x + (bounds.x || 0),
-        y: content.y + (bounds.y || 0),
-        width: bounds.width,
-        height: bounds.height
-      }
-    }
-  } catch {
-    // Fall back to raw bounds if the window geometry is unavailable.
-  }
-
-  openPetOverlay(screenBounds)
-
-  return { ok: true, bounds: screenBounds }
-})
-ipcMain.handle('hermes:pet-overlay:close', async () => {
-  closePetOverlay()
-
-  return { ok: true }
-})
-// Drag: the overlay reports a new absolute screen position (it already knows the
-// pointer's screen coords), we just move the window.
-ipcMain.on('hermes:pet-overlay:set-bounds', (_event, bounds) => {
-  if (!petOverlayWindow || petOverlayWindow.isDestroyed() || !bounds) {
-    return
-  }
-
-  petOverlayWindow.setBounds({
-    x: Math.round(bounds.x),
-    y: Math.round(bounds.y),
-    width: Math.max(80, Math.round(bounds.width)),
-    height: Math.max(80, Math.round(bounds.height))
-  })
-})
-// Click-through: the overlay window is a full rectangle but only the pet pixels
-// should be interactive. The renderer toggles this as the cursor enters/leaves
-// the sprite so transparent margins pass clicks to whatever is behind.
-ipcMain.on('hermes:pet-overlay:ignore-mouse', (_event, ignore) => {
-  if (petOverlayWindow && !petOverlayWindow.isDestroyed()) {
-    petOverlayWindow.setIgnoreMouseEvents(Boolean(ignore), { forward: true })
-  }
-})
-// The overlay is a non-activating panel (focusable:false) so it never steals
-// the app's cmd/alt-tab anchor from the main window. But the pop-up composer
-// needs the keyboard, so the renderer asks us to flip it focusable + focus it
-// while the composer is open, then back to non-activating when it closes.
-ipcMain.on('hermes:pet-overlay:set-focusable', (_event, focusable) => {
-  if (!petOverlayWindow || petOverlayWindow.isDestroyed()) {
-    return
-  }
-
-  petOverlayWindow.setFocusable(Boolean(focusable))
-  if (focusable) {
-    petOverlayWindow.focus()
-  }
-})
-// Main renderer → overlay: forward the latest pet state for the overlay to render.
-ipcMain.on('hermes:pet-overlay:state', (_event, payload) => {
-  if (petOverlayWindow && !petOverlayWindow.isDestroyed()) {
-    petOverlayWindow.webContents.send('hermes:pet-overlay:state', payload)
-  }
-})
-// Overlay → main renderer: control messages (pop back in, composer submit).
-ipcMain.on('hermes:pet-overlay:control', (_event, payload) => {
-  if (!mainWindow || mainWindow.isDestroyed()) {
-    return
-  }
-
-  // Double-click toggles the app window: hide it away if it's up front, bring it
-  // back if it's minimized/buried. Pure window control — nothing for the
-  // renderer to do, so don't forward it.
-  if (payload && payload.type === 'toggle-app') {
-    if (mainWindow.isMinimized() || !mainWindow.isVisible()) {
-      mainWindow.show()
-      mainWindow.focus()
-    } else {
-      mainWindow.minimize()
-    }
-
-    return
-  }
-
-  // The mail icon means "take me to the app": raise the main window (it may be
-  // minimized or buried) before the renderer navigates to the latest thread.
-  if (payload && payload.type === 'open-app') {
-    if (mainWindow.isMinimized()) {
-      mainWindow.restore()
-    }
-
-    mainWindow.show()
-    mainWindow.focus()
-  }
-
-  mainWindow.webContents.send('hermes:pet-overlay:control', payload)
 })
 ipcMain.handle('hermes:bootstrap:reset', async () => {
   // Renderer's "Reload and retry" path. Clear the latched failure and
@@ -6273,12 +5995,6 @@ ipcMain.on('hermes:translucency', (_event, payload) => {
 ipcMain.handle('hermes:openExternal', (_event, url) => {
   if (!openExternalUrl(url)) {
     throw new Error('Invalid external URL')
-  }
-})
-
-ipcMain.handle('hermes:openPreviewInBrowser', async (_event, url) => {
-  if (!(await openPreviewInBrowser(url))) {
-    throw new Error('Invalid preview URL')
   }
 })
 
@@ -6869,6 +6585,355 @@ ipcMain.handle('hermes:vscode-theme:fetch', async (_event, id) => fetchMarketpla
 // Search the Marketplace for color-theme extensions (empty query = top installs).
 ipcMain.handle('hermes:vscode-theme:search', async (_event, query) => searchMarketplaceThemes(String(query || ''), 20))
 
+// ===========================================================================
+// Kanban — SQLite-backed kanban board data, sharing DB with Hermes CLI.
+// ===========================================================================
+const KANBAN_DB_PATH = path.join(HERMES_HOME, 'kanban.db')
+
+function newId() {
+  const ts = Date.now().toString(36)
+  const rnd = crypto.randomBytes(8).toString('hex')
+  return `${ts}-${rnd}`
+}
+
+// Priority mapping: UI uses strings (high/medium/low), DB uses INTEGER.
+const PRIORITY_STR_TO_INT = { low: 0, medium: 1, high: 2 }
+const PRIORITY_INT_TO_STR = ['low', 'medium', 'high']
+
+/** @returns {import('node:sqlite').DatabaseSync} */
+let _kanbanDb = null
+function getKanbanDb() {
+  // Reconnect if prior connection was closed
+  if (_kanbanDb) {
+    try { _kanbanDb.prepare('SELECT 1').all(); return _kanbanDb }
+    catch { _kanbanDb = null }
+  }
+  const { DatabaseSync } = require('node:sqlite')
+  _kanbanDb = new DatabaseSync(KANBAN_DB_PATH)
+  _kanbanDb.exec('PRAGMA journal_mode=WAL')
+  _kanbanDb.exec('PRAGMA foreign_keys=ON')
+  ensureKanbanSchema(_kanbanDb)
+  return _kanbanDb
+}
+
+function ensureKanbanSchema(db) {
+  // kanban_boards — shared board table for the desktop kanban UI
+  db.exec(`CREATE TABLE IF NOT EXISTS kanban_boards (
+    id TEXT PRIMARY KEY,
+    slug TEXT UNIQUE NOT NULL,
+    title TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    created_at INTEGER NOT NULL
+  )`)
+
+  // Ensure a default board always exists
+  const existing = db.prepare("SELECT id FROM kanban_boards WHERE slug = ?").get('default')
+  if (!existing) {
+    db.prepare("INSERT INTO kanban_boards (id, slug, title, description, created_at) VALUES (?, ?, ?, ?, ?)").run(
+      newId(), 'default', 'Default Board', '', Date.now()
+    )
+  }
+
+  // Add columns to the CLI's tasks table that the kanban UI needs.
+  // ALTER TABLE ADD COLUMN is idempotent in SQLite (throws if column exists).
+  for (const stmt of [
+    "ALTER TABLE tasks ADD COLUMN board_id TEXT DEFAULT 'default'",
+    "ALTER TABLE tasks ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE tasks ADD COLUMN updated_at INTEGER",
+    "ALTER TABLE tasks ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE tasks ADD COLUMN source TEXT DEFAULT 'manual'",
+    "ALTER TABLE tasks ADD COLUMN session_id TEXT",
+    "ALTER TABLE tasks ADD COLUMN profile_id TEXT",
+    "ALTER TABLE tasks ADD COLUMN message_id TEXT",
+    "ALTER TABLE tasks ADD COLUMN assignee_type TEXT DEFAULT 'unassigned'",
+    "ALTER TABLE tasks ADD COLUMN assignee_label TEXT",
+    "ALTER TABLE tasks ADD COLUMN sync_mode TEXT DEFAULT 'manual'",
+    "ALTER TABLE tasks ADD COLUMN external_task_id TEXT",
+    "ALTER TABLE tasks ADD COLUMN external_task_kind TEXT",
+    "ALTER TABLE tasks ADD COLUMN last_synced_at INTEGER"
+  ]) {
+    try { db.exec(stmt) } catch { /* column already exists */ }
+  }
+
+  // Migrate historical task board_ids from random IDs to slugs.
+  // Desktop earlier returned kanban_boards.id (random) to the renderer,
+  // while CLI/Agent tasks use board_id = 'default' (slug). This migration
+  // aligns all existing task board_ids with their board's slug so tasks
+  // are not filtered out by the renderer's boardId === activeBoardId check.
+  const boardsToMigrate = db.prepare("SELECT id, slug FROM kanban_boards WHERE id != slug").all()
+  for (const board of boardsToMigrate) {
+    db.prepare("UPDATE tasks SET board_id = ? WHERE board_id = ?").run(board.slug, board.id)
+  }
+}
+
+/** Convert a DB row to the UI-friendly KanbanTask shape. */
+function rowToKanbanTask(row) {
+  return {
+    id: row.id,
+    boardId: row.board_id || 'default',
+    title: row.title,
+    description: row.body || '',
+    status: row.status || 'todo',
+    priority: PRIORITY_INT_TO_STR[row.priority] || 'medium',
+    assignee: row.assignee || '',
+    createdBy: row.created_by || '',
+    createdAt: row.created_at,
+    updatedAt: row.updated_at || row.created_at,
+    archived: Boolean(row.archived),
+    order: row.sort_order || 0,
+    source: row.source || 'manual',
+    sessionId: row.session_id || undefined,
+    profileId: row.profile_id || undefined,
+    messageId: row.message_id || undefined,
+    assigneeType: row.assignee_type || 'unassigned',
+    assigneeLabel: row.assignee_label || undefined,
+    syncMode: row.sync_mode || 'manual',
+    externalTaskId: row.external_task_id || undefined,
+    externalTaskKind: row.external_task_kind || undefined,
+    lastSyncedAt: row.last_synced_at || undefined
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Input sanitization
+// ---------------------------------------------------------------------------
+
+const VALID_STATUSES = new Set(['todo', 'ready', 'running', 'review', 'done', 'blocked'])
+const VALID_PRIORITIES = new Set(['low', 'medium', 'high'])
+
+function sanitizeString(value, maxLength) {
+  return String(value || '').trim().slice(0, maxLength)
+}
+
+function sanitizeStatus(value) {
+  return VALID_STATUSES.has(value) ? value : 'todo'
+}
+
+function sanitizePriority(value) {
+  return VALID_PRIORITIES.has(value) ? value : 'medium'
+}
+
+function sanitizeTaskInput(input) {
+  const validSources = new Set(['manual', 'chat', 'agent', 'cron'])
+  const validAssigneeTypes = new Set(['user', 'agent', 'unassigned'])
+  const validSyncModes = new Set(['manual', 'linked', 'mirrored'])
+  return {
+    title: sanitizeString(input.title, 200) || 'Untitled',
+    description: String(input.description || '').slice(0, 5000),
+    status: sanitizeStatus(input.status),
+    priority: sanitizePriority(input.priority),
+    assignee: sanitizeString(input.assignee, 120),
+    labels: Array.isArray(input.labels)
+      ? input.labels.map(label => sanitizeString(label, 40)).filter(Boolean).slice(0, 20)
+      : []
+  }
+}
+
+// ---------------------------------------------------------------------------
+// IPC handlers
+// ---------------------------------------------------------------------------
+
+ipcMain.handle('hermes:kanban:boards', () => {
+  const db = getKanbanDb()
+  return db.prepare('SELECT id, slug, title, description, created_at FROM kanban_boards ORDER BY created_at ASC').all().map(r => ({
+    id: r.slug,
+    title: r.title,
+    description: r.description,
+    createdAt: r.created_at
+  }))
+})
+
+ipcMain.handle('hermes:kanban:createBoard', (_event, { title, description }) => {
+  const db = getKanbanDb()
+  const safeTitle = sanitizeString(title, 200) || 'Untitled Board'
+  const safeDesc = sanitizeString(description, 1000)
+  const slug = safeTitle
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '') || 'board'
+  const id = newId()
+  const now = Date.now()
+  db.prepare('INSERT INTO kanban_boards (id, slug, title, description, created_at) VALUES (?, ?, ?, ?, ?)').run(
+    id, slug, safeTitle, safeDesc, now
+  )
+  return { id: slug, title: safeTitle, description: safeDesc, createdAt: now }
+})
+
+ipcMain.handle('hermes:kanban:deleteBoard', (_event, slug) => {
+  const db = getKanbanDb()
+  db.exec('BEGIN')
+  try {
+    db.prepare("UPDATE tasks SET board_id = 'default' WHERE board_id = ?").run(slug)
+    db.prepare('DELETE FROM kanban_boards WHERE slug = ?').run(slug)
+    db.exec('COMMIT')
+    return { ok: true }
+  } catch (e) {
+    db.exec('ROLLBACK')
+    throw e
+  }
+})
+
+ipcMain.handle('hermes:kanban:tasks', (_event, boardId) => {
+  const db = getKanbanDb()
+  const rows = db.prepare('SELECT * FROM tasks WHERE board_id = ? AND archived = 0 ORDER BY created_at DESC').all(boardId)
+  return rows.map(rowToKanbanTask)
+})
+
+ipcMain.handle('hermes:kanban:allTasks', () => {
+  const db = getKanbanDb()
+  const rows = db.prepare('SELECT * FROM tasks WHERE archived = 0 ORDER BY created_at DESC').all()
+  return rows.map(rowToKanbanTask)
+})
+
+ipcMain.handle('hermes:kanban:createTask', (_event, taskData) => {
+  const db = getKanbanDb()
+  const safe = sanitizeTaskInput(taskData)
+  const id = newId()
+  const now = Date.now()
+  const priority = PRIORITY_STR_TO_INT[safe.priority] !== undefined ? PRIORITY_STR_TO_INT[safe.priority] : 1
+  const assignee = safe.assignee
+  const lastSyncedAt = taskData.lastSyncedAt ||
+    (taskData.syncMode === 'linked' || taskData.syncMode === 'mirrored' ? now : null)
+
+  db.prepare(`INSERT INTO tasks
+    (id, title, body, status, priority, assignee, created_by, board_id, created_at, updated_at, archived, workspace_kind, sort_order,
+     source, session_id, profile_id, message_id, assignee_type, assignee_label, sync_mode,
+     external_task_id, external_task_kind, last_synced_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'scratch', 0,
+     ?, ?, ?, ?, ?, ?, ?,
+     ?, ?, ?)`).run(
+    id,
+    safe.title,
+    safe.description,
+    safe.status,
+    priority,
+    assignee,
+    assignee,
+    taskData.boardId || 'default',
+    now,
+    now,
+    taskData.source || 'manual',
+    taskData.sessionId || null,
+    taskData.profileId || null,
+    taskData.messageId || null,
+    taskData.assigneeType || 'unassigned',
+    taskData.assigneeLabel || null,
+    taskData.syncMode || 'manual',
+    taskData.externalTaskId || null,
+    taskData.externalTaskKind || null,
+    lastSyncedAt
+  )
+
+  const row = db.prepare('SELECT * FROM tasks WHERE id = ?').get(id)
+  return rowToKanbanTask(row)
+})
+
+ipcMain.handle('hermes:kanban:updateTask', (_event, id, updates) => {
+  const db = getKanbanDb()
+  const existing = db.prepare('SELECT * FROM tasks WHERE id = ?').get(id)
+  if (!existing) throw new Error(`Task ${id} not found`)
+
+  const assignments = []
+  const params = []
+
+  if (updates.title !== undefined) { assignments.push('title = ?'); params.push(sanitizeString(updates.title, 200)) }
+  if (updates.description !== undefined) { assignments.push('body = ?'); params.push(String(updates.description).slice(0, 5000)) }
+  if (updates.status !== undefined) { assignments.push('status = ?'); params.push(sanitizeStatus(updates.status)) }
+  if (updates.assignee !== undefined) { assignments.push('assignee = ?'); params.push(sanitizeString(updates.assignee, 120)) }
+  if (updates.priority !== undefined) {
+    const p = PRIORITY_STR_TO_INT[sanitizePriority(updates.priority)]
+    if (p !== undefined) { assignments.push('priority = ?'); params.push(p) }
+  }
+  if (updates.archived !== undefined) { assignments.push('archived = ?'); params.push(updates.archived ? 1 : 0) }
+  if (updates.order !== undefined) { assignments.push('sort_order = ?'); params.push(Number(updates.order) || 0) }
+  if (updates.syncMode !== undefined) { assignments.push('sync_mode = ?'); params.push(updates.syncMode) }
+  if (updates.lastSyncedAt !== undefined) { assignments.push('last_synced_at = ?'); params.push(updates.lastSyncedAt) }
+  if (updates.externalTaskId !== undefined) { assignments.push('external_task_id = ?'); params.push(updates.externalTaskId) }
+  if (updates.externalTaskKind !== undefined) { assignments.push('external_task_kind = ?'); params.push(updates.externalTaskKind) }
+  if (updates.assigneeType !== undefined) { assignments.push('assignee_type = ?'); params.push(updates.assigneeType) }
+  if (updates.assigneeLabel !== undefined) { assignments.push('assignee_label = ?'); params.push(updates.assigneeLabel) }
+
+  if (assignments.length > 0) {
+    assignments.push('updated_at = ?')
+    params.push(Date.now())
+    params.push(id)
+    db.prepare(`UPDATE tasks SET ${assignments.join(', ')} WHERE id = ?`).run(...params)
+  }
+
+  const row = db.prepare('SELECT * FROM tasks WHERE id = ?').get(id)
+  return rowToKanbanTask(row)
+})
+
+ipcMain.handle('hermes:kanban:deleteTask', (_event, id) => {
+  const db = getKanbanDb()
+  db.prepare('DELETE FROM tasks WHERE id = ?').run(id)
+  db.prepare('DELETE FROM task_comments WHERE task_id = ?').run(id)
+  return { ok: true }
+})
+
+ipcMain.handle('hermes:kanban:reorderTasks', (_event, boardId, updates) => {
+  const db = getKanbanDb()
+  if (!Array.isArray(updates)) throw new Error('updates must be an array')
+
+  const stmt = db.prepare(
+    'UPDATE tasks SET status = ?, sort_order = ?, updated_at = ? WHERE id = ?'
+  )
+  const now = Date.now()
+
+  db.exec('BEGIN')
+  try {
+    for (const { id, status, order } of updates) {
+      const safeStatus = sanitizeStatus(status)
+      stmt.run(safeStatus, Number(order) || 0, now, id)
+    }
+    db.exec('COMMIT')
+  } catch (e) {
+    db.exec('ROLLBACK')
+    throw e
+  }
+
+  // Return updated tasks for this board, sorted by order
+  const rows = db.prepare(
+    'SELECT * FROM tasks WHERE board_id = ? AND archived = 0 ORDER BY sort_order ASC, created_at ASC'
+  ).all(boardId)
+  return rows.map(rowToKanbanTask)
+})
+
+ipcMain.handle('hermes:kanban:comments', (_event, taskId) => {
+  const db = getKanbanDb()
+  const rows = db.prepare('SELECT id, task_id, author, body, created_at FROM task_comments WHERE task_id = ? ORDER BY created_at ASC').all(taskId)
+  return rows.map(r => ({
+    id: String(r.id),
+    taskId: r.task_id,
+    author: r.author || '',
+    body: r.body || '',
+    createdAt: r.created_at
+  }))
+})
+
+ipcMain.handle('hermes:kanban:addComment', (_event, { taskId, author, body }) => {
+  const db = getKanbanDb()
+  const now = Date.now()
+  const safeAuthor = sanitizeString(author, 120)
+  const safeBody = String(body || '').slice(0, 5000)
+  const result = db.prepare('INSERT INTO task_comments (task_id, author, body, created_at) VALUES (?, ?, ?, ?)').run(
+    taskId, safeAuthor, safeBody, now
+  )
+  return {
+    id: result.lastInsertRowid.toString(),
+    taskId,
+    author: safeAuthor,
+    body: safeBody,
+    createdAt: now
+  }
+})
+
+ipcMain.handle('hermes:kanban:deleteComment', (_event, id) => {
+  const db = getKanbanDb()
+  db.prepare('DELETE FROM task_comments WHERE id = ?').run(Number(id))
+  return { ok: true }
+})
+
 // ---------------------------------------------------------------------------
 // hermes:// deep links (e.g. hermes://blueprint/morning-brief?time=08:00).
 // A docs/dashboard "Send to App" button opens this URL; we route it into the
@@ -7023,10 +7088,6 @@ function configureSpellChecker() {
 }
 
 app.on('before-quit', () => {
-  // The always-on-top overlay isn't a "real" app window; close it so a stray
-  // pet can't keep the process alive or float over a quit app.
-  closePetOverlay()
-
   // Quitting mid-install should stop the installer, not orphan it.
   if (bootstrapAbortController) {
     try {

@@ -270,29 +270,6 @@ export interface Translations {
       installed: (name: string) => string
       removeTheme: string
       importedBadge: string
-      pet: {
-        title: string
-        intro: string
-        restartHint: string
-        on: string
-        off: string
-        scaleTitle: string
-        scaleDesc: string
-        chooseTitle: string
-        chooseDesc: string
-        searchPlaceholder: string
-        unreachable: string
-        noMatch: (query: string) => string
-        installedTag: string
-        countCapped: (cap: number, total: number) => string
-        count: (n: number) => string
-        uninstall: (name: string) => string
-        adoptFailed: (slug: string) => string
-        uninstallFailed: (slug: string) => string
-        noneAvailable: string
-        turnOnFailed: string
-        turnOffFailed: string
-      }
     }
     fieldLabels: Record<string, string>
     fieldDescriptions: Record<string, string>
@@ -625,20 +602,6 @@ export interface Translations {
     settings: string
     changeTheme: string
     changeColorMode: string
-    pets: {
-      title: string
-      placeholder: string
-      loading: string
-      error: string
-      staleBackend: string
-      empty: string
-      turnOff: string
-      turnOn: string
-      installed: string
-      adoptFailed: string
-      toggleFailed: string
-      noneAvailable: string
-    }
     installTheme: {
       title: string
       placeholder: string
@@ -1345,7 +1308,6 @@ export interface Translations {
     opening: string
     hide: string
     openPreview: string
-    openInBrowser: string
     sourceLineTitle: string
     source: string
     renderedPreview: string
@@ -1576,6 +1538,61 @@ export interface Translations {
       systemNote: (platform: string) => string
       failed: (error: string) => string
       timedOut: string
+    }
+    kanban: {
+      columnTodo: string
+      columnReady: string
+      columnRunning: string
+      columnReview: string
+      columnDone: string
+      columnBlocked: string
+      priorityHigh: string
+      priorityMedium: string
+      priorityLow: string
+      defaultBoard: string
+      newBoard: string
+      boardName: string
+      newTask: string
+      editTask: string
+      title: string
+      description: string
+      status: string
+      priority: string
+      assignee: string
+      taskTitlePlaceholder: string
+      descriptionPlaceholder: string
+      unassigned: string
+      createTask: string
+      saveChanges: string
+      taskDetails: string
+      moveTo: string
+      archiveTask: string
+      comments: (count: number) => string
+      noComments: string
+      addCommentPlaceholder: string
+      send: string
+      dropTasksHere: string
+      deleteTask: string
+      deleteConfirm: (title: string) => string
+      delete: string
+      editTaskTooltip: string
+      deleteTaskTooltip: string
+      taskCreated: string
+      taskUpdated: string
+      taskDeleted: string
+      taskArchived: string
+      loadFailed: string
+      reorderFailed: string
+      createFailed: string
+      updateFailed: string
+      deleteFailed: string
+      archiveFailed: string
+      statusUpdateFailed: string
+      addCommentFailed: string
+      deleteCommentFailed: string
+      createBoardFailed: string
+      taskCount: (count: number) => string
+      cancel: string
     }
   }
 

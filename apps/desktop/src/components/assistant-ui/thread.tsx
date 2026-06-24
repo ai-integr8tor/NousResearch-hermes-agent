@@ -64,7 +64,6 @@ import { ClarifyTool } from '@/components/assistant-ui/clarify-tool'
 import { DirectiveContent, hermesDirectiveFormatter } from '@/components/assistant-ui/directive-text'
 import { MarkdownText, MarkdownTextContent } from '@/components/assistant-ui/markdown-text'
 import { ThreadMessageList } from '@/components/assistant-ui/thread-list'
-import { ThreadTimeline } from '@/components/assistant-ui/thread-timeline'
 import { ToolFallback, ToolGroupSlot } from '@/components/assistant-ui/tool-fallback'
 import { TooltipIconButton } from '@/components/assistant-ui/tooltip-icon-button'
 import { UserMessageText } from '@/components/assistant-ui/user-message-text'
@@ -99,8 +98,10 @@ import { cn } from '@/lib/utils'
 import { playSpeechText, stopVoicePlayback } from '@/lib/voice-playback'
 import { $compactionActive } from '@/store/compaction'
 import type { ComposerAttachment } from '@/store/composer'
-import { notifyError } from '@/store/notifications'
-import { $connection } from '@/store/session'
+import { notify, notifyError } from '@/store/notifications'
+import { $activeSessionId, $connection } from '@/store/session'
+import { $activeGatewayProfile } from '@/store/profile'
+import { $todosBySession } from '@/store/todos'
 import { notifyThreadEditClose, notifyThreadEditOpen } from '@/store/thread-scroll'
 import { $voicePlayback } from '@/store/voice-playback'
 
@@ -213,7 +214,6 @@ export const Thread: FC<{
         sessionKey={sessionKey}
       />
       {loading === 'session' && <CenteredThreadSpinner />}
-      <ThreadTimeline />
     </div>
   )
 }
@@ -673,6 +673,65 @@ const AssistantActionBar: FC<MessageActionProps> = ({ messageId, getMessageText,
   const { t } = useI18n()
   const copy = t.assistant.thread
   const [menuOpen, setMenuOpen] = useState(false)
+  const activeSessionId = useStore($activeSessionId)
+  const activeProfileId = useStore($activeGatewayProfile)
+  const todosBySession = useStore($todosBySession)
+  const todos = activeSessionId ? (todosBySession[activeSessionId] ?? []) : []
+  const pendingTodos = todos.filter(t => t.status === 'pending' || t.status === 'in_progress')
+
+  const handleCreateKanbanTask = useCallback(async () => {
+    const text = getMessageText()
+    if (!text.trim()) return
+    try {
+      const boards = await window.hermesDesktop.kanban.boards()
+      const boardId = (boards[0]?.id) || 'default'
+      await window.hermesDesktop.kanban.createTask({
+        boardId,
+        title: text.slice(0, 120),
+        description: text,
+        source: 'chat',
+        sessionId: activeSessionId ?? undefined,
+        profileId: activeProfileId,
+        messageId,
+        assigneeType: 'user',
+        assigneeLabel: 'You',
+        syncMode: 'manual'
+      })
+      notify({ message: 'Kanban task created' })
+    } catch {
+      notifyError(new Error('Failed to create kanban task'), 'Failed to create kanban task')
+    }
+  }, [getMessageText, activeSessionId, activeProfileId, messageId])
+
+  const handleSendPlanToKanban = useCallback(async () => {
+    const todoItems = pendingTodos
+    if (todoItems.length === 0) return
+    try {
+      const boards = await window.hermesDesktop.kanban.boards()
+      const boardId = (boards[0]?.id) || 'default'
+      let created = 0
+      for (const todo of todoItems) {
+        await window.hermesDesktop.kanban.createTask({
+          boardId,
+          title: todo.content.slice(0, 120),
+          description: todo.content,
+          source: 'agent',
+          status: todo.status === 'in_progress' ? 'running' : 'todo',
+          sessionId: activeSessionId ?? undefined,
+          profileId: activeProfileId,
+          externalTaskId: todo.id,
+          externalTaskKind: 'agent_plan_item',
+          assigneeType: 'agent',
+          assigneeLabel: 'Hermes',
+          syncMode: 'linked'
+        })
+        created++
+      }
+      notify({ message: `${created} Kanban tasks created from plan` })
+    } catch {
+      notifyError(new Error('Failed to send plan to kanban'), 'Failed to send plan to kanban')
+    }
+  }, [pendingTodos, activeSessionId, activeProfileId])
 
   return (
     <div className="relative flex w-full shrink-0 justify-end">
@@ -708,11 +767,109 @@ const AssistantActionBar: FC<MessageActionProps> = ({ messageId, getMessageText,
               <GitBranchIcon />
               {copy.branchNewChat}
             </DropdownMenuItem>
+            <DropdownMenuItem onSelect={handleCreateKanbanTask}>
+              <Codicon name="project" size="0.875rem" />
+              Create Kanban Task
+            </DropdownMenuItem>
+            {pendingTodos.length > 0 && (
+              <DropdownMenuItem onSelect={handleSendPlanToKanban}>
+                <Codicon name="checklist" size="0.875rem" />
+                Send plan to Kanban ({pendingTodos.length})
+              </DropdownMenuItem>
+            )}
             <ReadAloudItem getText={getMessageText} messageId={messageId} />
           </DropdownMenuContent>
         </DropdownMenu>
       </ActionBarPrimitive.Root>
     </div>
+  )
+}
+
+const UserMessageActionMenu: FC<{ messageId: string; messageText: string }> = ({ messageId, messageText }) => {
+  const { t } = useI18n()
+  const [menuOpen, setMenuOpen] = useState(false)
+  const activeSessionId = useStore($activeSessionId)
+  const activeProfileId = useStore($activeGatewayProfile)
+  const todosBySession = useStore($todosBySession)
+  const todos = activeSessionId ? (todosBySession[activeSessionId] ?? []) : []
+  const pendingTodos = todos.filter(t => t.status === 'pending' || t.status === 'in_progress')
+
+  const handleCreateKanbanTask = useCallback(async () => {
+    if (!messageText.trim()) return
+    try {
+      const boards = await window.hermesDesktop.kanban.boards()
+      const boardId = (boards[0]?.id) || 'default'
+      await window.hermesDesktop.kanban.createTask({
+        boardId,
+        title: messageText.slice(0, 120),
+        description: messageText,
+        source: 'chat',
+        sessionId: activeSessionId ?? undefined,
+        profileId: activeProfileId,
+        messageId,
+        assigneeType: 'user',
+        assigneeLabel: 'You',
+        syncMode: 'manual'
+      })
+      notify({ message: 'Kanban task created' })
+    } catch {
+      notifyError(new Error('Failed to create kanban task'), 'Failed to create kanban task')
+    }
+  }, [messageText, activeSessionId, activeProfileId, messageId])
+
+  const handleSendPlanToKanban = useCallback(async () => {
+    if (pendingTodos.length === 0) return
+    try {
+      const boards = await window.hermesDesktop.kanban.boards()
+      const boardId = (boards[0]?.id) || 'default'
+      let created = 0
+      for (const todo of pendingTodos) {
+        await window.hermesDesktop.kanban.createTask({
+          boardId,
+          title: todo.content.slice(0, 120),
+          description: todo.content,
+          source: 'agent',
+          status: todo.status === 'in_progress' ? 'running' : 'todo',
+          sessionId: activeSessionId ?? undefined,
+          profileId: activeProfileId,
+          externalTaskId: todo.id,
+          externalTaskKind: 'agent_plan_item',
+          assigneeType: 'agent',
+          assigneeLabel: 'Hermes',
+          syncMode: 'linked'
+        })
+        created++
+      }
+      notify({ message: `${created} Kanban tasks created from plan` })
+    } catch {
+      notifyError(new Error('Failed to send plan to kanban'), 'Failed to send plan to kanban')
+    }
+  }, [pendingTodos, activeSessionId, activeProfileId])
+
+  return (
+    <DropdownMenu onOpenChange={setMenuOpen} open={menuOpen}>
+      <DropdownMenuTrigger asChild>
+        <button
+          className={cn('pointer-events-auto flex size-5 items-center justify-center rounded text-(--ui-text-tertiary) opacity-70 hover:bg-(--chrome-action-hover) hover:opacity-100', menuOpen && 'opacity-100')}
+          title="More actions"
+          type="button"
+        >
+          <Codicon name="ellipsis" size="0.75rem" />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" onCloseAutoFocus={e => e.preventDefault()} sideOffset={4}>
+        <DropdownMenuItem onSelect={handleCreateKanbanTask}>
+          <Codicon name="project" size="0.875rem" />
+          Create Kanban Task
+        </DropdownMenuItem>
+        {pendingTodos.length > 0 && (
+          <DropdownMenuItem onSelect={handleSendPlanToKanban}>
+            <Codicon name="checklist" size="0.875rem" />
+            Send plan to Kanban ({pendingTodos.length})
+          </DropdownMenuItem>
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
   )
 }
 
@@ -799,15 +956,7 @@ function messageAttachmentRefs(value: unknown): string[] {
   return value.every(ref => typeof ref === 'string') ? value : EMPTY_ATTACHMENT_REFS
 }
 
-function StickyHumanMessageContainer({
-  attachments,
-  children,
-  messageId
-}: {
-  attachments?: ReactNode
-  children: ReactNode
-  messageId?: string
-}) {
+function StickyHumanMessageContainer({ attachments, children }: { attachments?: ReactNode; children: ReactNode }) {
   return (
     // Fragment, not a wrapper: a wrapping element becomes the sticky's
     // containing block (it'd stick within its own height = never). The bubble
@@ -816,7 +965,6 @@ function StickyHumanMessageContainer({
     <>
       <div
         className="group/user-message sticky z-40 -mx-4 flex w-[calc(100%+2rem)] min-w-0 max-w-none flex-col items-stretch gap-0 self-end overflow-visible bg-(--ui-chat-surface-background) px-4 pb-(--conversation-turn-gap) pt-1"
-        data-message-id={messageId}
         data-role="user"
         data-slot="aui_user-message-root"
       >
@@ -1001,7 +1149,6 @@ const UserMessage: FC<{
   return (
     <MessagePrimitive.Root asChild>
       <StickyHumanMessageContainer
-        messageId={messageId}
         attachments={
           // Attachments live BELOW the sticky bubble in normal flow, so they
           // scroll away behind the pinned bubble instead of riding along with
@@ -1062,6 +1209,12 @@ const UserMessage: FC<{
                       <Codicon name="discard" size="0.875rem" />
                     </button>
                   )}
+                </div>
+              )}
+              {/* User message action menu */}
+              {hasBody && (
+                <div className="absolute right-2 top-2 z-10 flex items-center justify-center opacity-0 transition-opacity group-hover/user-message:opacity-100 group-focus-within/user-message:opacity-100">
+                  <UserMessageActionMenu messageId={messageId} messageText={messageText} />
                 </div>
               )}
             </div>
