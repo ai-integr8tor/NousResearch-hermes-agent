@@ -453,6 +453,64 @@ class TestUnifiedCronjobTool:
         stored = get_job(created["job_id"])
         assert stored["deliver"] == "telegram"
 
+    def test_create_blocks_script_that_restarts_gateway(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / "hermes"
+        scripts_dir = hermes_home / "scripts"
+        scripts_dir.mkdir(parents=True)
+        (scripts_dir / "restart_gateway_once.sh").write_text(
+            "#!/usr/bin/env bash\n"
+            "launchctl kickstart -k gui/501/ai.hermes.gateway\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        result = json.loads(
+            cronjob(
+                action="create",
+                schedule="2026-06-24T23:09:55+08:00",
+                script="restart_gateway_once.sh",
+                no_agent=True,
+            )
+        )
+
+        assert result["success"] is False
+        assert "Blocked" in result["error"]
+        assert "restart loops" in result["error"]
+
+    def test_update_blocks_script_that_restarts_gateway(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / "hermes"
+        scripts_dir = hermes_home / "scripts"
+        scripts_dir.mkdir(parents=True)
+        (scripts_dir / "safe.sh").write_text("printf 'ok\\n'\n", encoding="utf-8")
+        (scripts_dir / "restart_gateway_once.sh").write_text(
+            "#!/usr/bin/env bash\n"
+            "launchctl kickstart -k gui/501/ai.hermes.gateway\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        created = json.loads(
+            cronjob(
+                action="create",
+                schedule="every 1h",
+                script="safe.sh",
+                no_agent=True,
+            )
+        )
+        assert created["success"] is True
+
+        result = json.loads(
+            cronjob(
+                action="update",
+                job_id=created["job_id"],
+                script="restart_gateway_once.sh",
+            )
+        )
+
+        assert result["success"] is False
+        assert "Blocked" in result["error"]
+        assert "restart loops" in result["error"]
+
 
 # =========================================================================
 # Per-job model/provider override resolution

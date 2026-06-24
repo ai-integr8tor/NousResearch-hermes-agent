@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
+from gateway.lifecycle_guard import contains_gateway_lifecycle_command
 from hermes_constants import display_hermes_home
 
 logger = logging.getLogger(__name__)
@@ -474,6 +475,40 @@ def _validate_cron_script_path(script: Optional[str]) -> Optional[str]:
     return None
 
 
+def _read_cron_script_for_guard(script: Optional[str]) -> str:
+    """Read a validated cron script for lifecycle/security scans.
+
+    The cron API accepts only paths under ``HERMES_HOME/scripts``.  This helper
+    mirrors that resolution after `_validate_cron_script_path()` has accepted
+    the value.  If the script cannot be read, return an empty string and let the
+    existing path/runtime validation surface the actual failure.
+    """
+    if not script or not script.strip():
+        return ""
+    try:
+        from hermes_constants import get_hermes_home
+
+        script_path = get_hermes_home() / "scripts" / script.strip()
+        return script_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ""
+
+
+def _scan_cron_gateway_lifecycle(prompt: Optional[str], script: Optional[str]) -> str:
+    """Block cron jobs that would restart/stop the running Hermes gateway."""
+    combined = prompt or ""
+    if script:
+        combined = f"{combined}\n{_read_cron_script_for_guard(script)}"
+    if contains_gateway_lifecycle_command(combined):
+        return (
+            "Blocked: cron job contains a gateway lifecycle command "
+            "(restart/stop/kill). This is blocked to prevent restart loops "
+            "(#30719). Run `hermes gateway restart` from a separate shell "
+            "outside the running gateway."
+        )
+    return ""
+
+
 def _format_job(job: Dict[str, Any]) -> Dict[str, Any]:
     prompt = str(job.get("prompt") or "")
     skills = _canonical_skills(job.get("skill"), job.get("skills"))
@@ -613,6 +648,10 @@ def cronjob(
                 script_error = _validate_cron_script_path(script)
                 if script_error:
                     return tool_error(script_error, success=False)
+
+            lifecycle_error = _scan_cron_gateway_lifecycle(prompt, script)
+            if lifecycle_error:
+                return tool_error(lifecycle_error, success=False)
 
             # Validate context_from references existing jobs
             if context_from:
@@ -774,6 +813,12 @@ def cronjob(
                     if script_error:
                         return tool_error(script_error, success=False)
                 updates["script"] = _normalize_optional_job_value(script) if script else None
+
+            lifecycle_prompt = prompt if prompt is not None else job.get("prompt")
+            lifecycle_script = updates.get("script") if "script" in updates else job.get("script")
+            lifecycle_error = _scan_cron_gateway_lifecycle(lifecycle_prompt, lifecycle_script)
+            if lifecycle_error:
+                return tool_error(lifecycle_error, success=False)
             if context_from is not None:
                 # Empty string / empty list clears the field; otherwise validate
                 # each referenced job exists before storing. Normalized to a list
