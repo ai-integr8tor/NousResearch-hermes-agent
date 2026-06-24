@@ -32,48 +32,17 @@ from agent.image_gen_provider import (
     save_b64_image,
     success_response,
 )
+from agent.openai_image_catalog import (
+    API_MODEL,
+    DEFAULT_MODEL,
+    MAX_REFERENCE_IMAGES,
+    MODELS as _MODELS,
+    SIZES as _SIZES,
+    resolve_tier,
+)
 
 logger = logging.getLogger(__name__)
 
-# gpt-image-2's edit endpoint accepts up to 16 reference images. The Codex
-# image_generation tool drives that same model, so the cap applies here too.
-_MAX_REFERENCE_IMAGES = 16
-
-
-# ---------------------------------------------------------------------------
-# Model catalog — mirrors the ``openai`` plugin so the picker UX is identical.
-# ---------------------------------------------------------------------------
-
-API_MODEL = "gpt-image-2"
-
-_MODELS: Dict[str, Dict[str, Any]] = {
-    "gpt-image-2-low": {
-        "display": "GPT Image 2 (Low)",
-        "speed": "~15s",
-        "strengths": "Fast iteration, lowest cost",
-        "quality": "low",
-    },
-    "gpt-image-2-medium": {
-        "display": "GPT Image 2 (Medium)",
-        "speed": "~40s",
-        "strengths": "Balanced — default",
-        "quality": "medium",
-    },
-    "gpt-image-2-high": {
-        "display": "GPT Image 2 (High)",
-        "speed": "~2min",
-        "strengths": "Highest fidelity, strongest prompt adherence",
-        "quality": "high",
-    },
-}
-
-DEFAULT_MODEL = "gpt-image-2-medium"
-
-_SIZES = {
-    "landscape": "1536x1024",
-    "square": "1024x1024",
-    "portrait": "1024x1536",
-}
 
 # Codex Responses surface used for the request. The chat model itself is only
 # the host that calls the ``image_generation`` tool; the actual image work is
@@ -91,43 +60,9 @@ _CODEX_INSTRUCTIONS = (
 # ---------------------------------------------------------------------------
 
 
-def _load_image_gen_config() -> Dict[str, Any]:
-    """Read ``image_gen`` from config.yaml (returns {} on any failure)."""
-    try:
-        from hermes_cli.config import load_config
-
-        cfg = load_config()
-        section = cfg.get("image_gen") if isinstance(cfg, dict) else None
-        return section if isinstance(section, dict) else {}
-    except Exception as exc:
-        logger.debug("Could not load image_gen config: %s", exc)
-        return {}
-
-
 def _resolve_model() -> Tuple[str, Dict[str, Any]]:
     """Decide which tier to use and return ``(model_id, meta)``."""
-    import os
-
-    env_override = os.environ.get("OPENAI_IMAGE_MODEL")
-    if env_override and env_override in _MODELS:
-        return env_override, _MODELS[env_override]
-
-    cfg = _load_image_gen_config()
-    sub = cfg.get("openai-codex") if isinstance(cfg.get("openai-codex"), dict) else {}
-    candidate: Optional[str] = None
-    if isinstance(sub, dict):
-        value = sub.get("model")
-        if isinstance(value, str) and value in _MODELS:
-            candidate = value
-    if candidate is None:
-        top = cfg.get("model")
-        if isinstance(top, str) and top in _MODELS:
-            candidate = top
-
-    if candidate is not None:
-        return candidate, _MODELS[candidate]
-
-    return DEFAULT_MODEL, _MODELS[DEFAULT_MODEL]
+    return resolve_tier("openai-codex")
 
 
 def _read_codex_access_token() -> Optional[str]:
@@ -380,7 +315,7 @@ class OpenAICodexImageGenProvider(ImageGenProvider):
         # The Codex Responses image_generation tool conditions on input_image
         # content parts, so it supports both text-to-image and image-to-image /
         # editing — the same surface as the API-key ``openai`` backend.
-        return {"modalities": ["text", "image"], "max_reference_images": _MAX_REFERENCE_IMAGES}
+        return {"modalities": ["text", "image"], "max_reference_images": MAX_REFERENCE_IMAGES}
 
     def generate(
         self,
@@ -401,7 +336,7 @@ class OpenAICodexImageGenProvider(ImageGenProvider):
             sources.append(image_url.strip())
         for ref in (normalize_reference_images(reference_image_urls) or []):
             sources.append(ref)
-        sources = sources[:_MAX_REFERENCE_IMAGES]
+        sources = sources[:MAX_REFERENCE_IMAGES]
         modality = "image" if sources else "text"
 
         if not prompt:
