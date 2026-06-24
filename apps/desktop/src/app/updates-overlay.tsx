@@ -11,8 +11,8 @@ import type { DesktopUpdateCommit, DesktopUpdateStage, DesktopUpdateStatus } fro
 import { useI18n } from '@/i18n'
 import { buildCommitChangelog, type CommitGroup } from '@/lib/commit-changelog'
 import { AlertCircle, Check, CheckCircle2, Copy, Terminal } from '@/lib/icons'
-import { cn } from '@/lib/utils'
 import { resolveUpdateCopy, type UpdateTarget } from '@/lib/update-copy'
+import { cn } from '@/lib/utils'
 import {
   $backendUpdateApply,
   $backendUpdateChecking,
@@ -155,7 +155,10 @@ function IdleView({
 
   if (!status && checking) {
     return (
-      <CenteredStatus icon={<Loader className="size-12" label={u.checking} type="lemniscate-bloom" />} title={u.checking} />
+      <CenteredStatus
+        icon={<Loader className="size-12" label={u.checking} type="lemniscate-bloom" />}
+        title={u.checking}
+      />
     )
   }
 
@@ -219,33 +222,42 @@ function IdleView({
   const { title, body } = resolveUpdateCopy({ target, shownItems, copy: u })
 
   return (
-    <div className="grid gap-5 px-6 pb-6 pt-7 pr-8">
-      <div className="flex flex-col items-center gap-3 text-center">
+    <div className="flex max-h-[85dvh] min-h-0 flex-col" data-slot="updates-overlay-idle">
+      <div className="flex shrink-0 flex-col items-center gap-3 px-6 pt-7 pr-8 text-center">
         <BrandMark className="size-16" />
 
         <DialogTitle className="text-center text-xl">{title}</DialogTitle>
-        <DialogDescription className="text-center text-sm">
-          {body}
-        </DialogDescription>
+        <DialogDescription className="text-center text-sm">{body}</DialogDescription>
       </div>
 
-      <div className="grid gap-3 rounded-xl border border-border/70 bg-muted/20 px-4 py-3">
-        {groups.map(group => (
-          <div key={group.id}>
-            <p className="text-[0.625rem] font-semibold uppercase tracking-wide text-muted-foreground">{group.label}</p>
-            <ul className="mt-1.5 grid gap-1.5 text-xs text-foreground">
-              {group.items.map(item => (
-                <li className="flex items-start gap-2" key={item}>
-                  <span aria-hidden className="mt-1.5 inline-block size-1 shrink-0 rounded-full bg-primary" />
-                  <span className="leading-snug">{item}</span>
-                </li>
-              ))}
-            </ul>
+      <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4 pr-8" data-slot="updates-overlay-notes">
+        {groups.length > 0 && (
+          <div className="grid gap-3 rounded-xl border border-border/70 bg-muted/20 px-4 py-3">
+            {groups.map(group => (
+              <div key={group.id}>
+                <p className="text-[0.625rem] font-semibold uppercase tracking-wide text-muted-foreground">
+                  {group.label}
+                </p>
+                <ul className="mt-1.5 grid gap-1.5 text-xs text-foreground">
+                  {group.items.map(item => (
+                    <li className="flex items-start gap-2" key={item}>
+                      <span aria-hidden className="mt-1.5 inline-block size-1 shrink-0 rounded-full bg-primary" />
+                      <span className="leading-snug">{item}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
           </div>
-        ))}
+        )}
+
+        {remaining > 0 && <p className="mt-3 text-center text-xs text-muted-foreground">{u.moreChanges(remaining)}</p>}
       </div>
 
-      <div className="grid gap-2">
+      <div
+        className="grid shrink-0 gap-2 border-t border-border/60 bg-(--ui-chat-bubble-background) px-6 pb-6 pt-4 pr-8"
+        data-slot="updates-overlay-actions"
+      >
         <Button className="font-semibold" onClick={onInstall} size="lg">
           {u.updateNow}
         </Button>
@@ -253,12 +265,6 @@ function IdleView({
           {u.maybeLater}
         </Button>
       </div>
-
-      {remaining > 0 && (
-        <p className="text-center text-xs text-muted-foreground">
-          {u.moreChanges(remaining)}
-        </p>
-      )}
     </div>
   )
 }
@@ -311,9 +317,7 @@ function ManualView({
         <Terminal className="size-8 text-primary" />
 
         <DialogTitle className="text-center text-xl">{u.manualTitle}</DialogTitle>
-        <DialogDescription className="text-center text-sm">
-          {u.manualBody}
-        </DialogDescription>
+        <DialogDescription className="text-center text-sm">{u.manualBody}</DialogDescription>
       </div>
 
       <button
@@ -340,9 +344,7 @@ function ManualView({
         </span>
       </button>
 
-      <p className="text-center text-xs text-muted-foreground">
-        {u.manualPickedUp}
-      </p>
+      <p className="text-center text-xs text-muted-foreground">{u.manualPickedUp}</p>
 
       <Button className="font-semibold" onClick={onDone} size="lg" variant="secondary">
         {u.done}
@@ -394,9 +396,7 @@ function ApplyingView({ apply, isBackend }: { apply: UpdateApplyState; isBackend
         <Loader className="size-16" label={label} type="lemniscate-bloom" />
 
         <DialogTitle className="text-center text-xl">{label}</DialogTitle>
-        <DialogDescription className="text-center text-sm">
-          {body}
-        </DialogDescription>
+        <DialogDescription className="text-center text-sm">{body}</DialogDescription>
       </div>
 
       <div className="h-2 overflow-hidden rounded-full bg-muted">
@@ -426,9 +426,7 @@ function ErrorView({ message, onDismiss, onRetry }: { message: string; onDismiss
           {message || u.errorBody}
         </DialogDescription>
       }
-      title={
-        <DialogTitle className="text-center text-xl font-semibold tracking-tight">{u.errorTitle}</DialogTitle>
-      }
+      title={<DialogTitle className="text-center text-xl font-semibold tracking-tight">{u.errorTitle}</DialogTitle>}
     >
       <Button className="font-semibold" onClick={onRetry} size="lg">
         {u.tryAgain}
