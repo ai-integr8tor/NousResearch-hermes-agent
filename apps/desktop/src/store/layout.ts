@@ -9,6 +9,8 @@ import {
   storedStringArray
 } from '@/lib/storage'
 
+export const SIDEBAR_PROJECTS_OPEN_STORAGE_KEY = 'hermes.desktop.sidebarProjectsOpen'
+
 import { $paneStates, ensurePaneRegistered, setPaneOpen, setPaneWidthOverride, togglePane } from './panes'
 
 export const SIDEBAR_DEFAULT_WIDTH = 237
@@ -24,6 +26,7 @@ const SIDEBAR_PINNED_STORAGE_KEY = 'hermes.desktop.pinnedSessions'
 const SIDEBAR_AGENTS_GROUPED_STORAGE_KEY = 'hermes.desktop.agentsGroupedByWorkspace'
 const SIDEBAR_CRON_OPEN_STORAGE_KEY = 'hermes.desktop.sidebarCronOpen'
 const SIDEBAR_MESSAGING_OPEN_STORAGE_KEY = 'hermes.desktop.sidebarMessagingOpen'
+const SIDEBAR_EXPANDED_PROJECTS_STORAGE_KEY = 'hermes.desktop.expandedProjectIds'
 const SIDEBAR_SESSION_ORDER_STORAGE_KEY = 'hermes.desktop.sessionOrder'
 const SIDEBAR_SESSION_ORDER_MANUAL_STORAGE_KEY = 'hermes.desktop.sessionOrder.manual'
 const SIDEBAR_WORKSPACE_ORDER_STORAGE_KEY = 'hermes.desktop.workspaceOrder'
@@ -77,10 +80,12 @@ export const $sidebarRecentsOpen = atom(true)
 // default (it only renders at all when cron sessions exist) so the
 // scheduler's `[IMPORTANT: …]` first-message previews don't spam recents.
 export const $sidebarCronOpen = atom(storedBoolean(SIDEBAR_CRON_OPEN_STORAGE_KEY, false))
+export const $sidebarProjectsOpen = atom(storedBoolean(SIDEBAR_PROJECTS_OPEN_STORAGE_KEY, true))
 // Messaging platform sections collapse by default (they can be numerous and
 // tall). We persist the ids the user has *explicitly expanded*, so the default
 // stays collapsed unless they've opened a platform before.
 export const $sidebarMessagingOpenIds = atom<string[]>(storedStringArray(SIDEBAR_MESSAGING_OPEN_STORAGE_KEY))
+export const $expandedProjectIds = atom<string[]>(storedStringArray(SIDEBAR_EXPANDED_PROJECTS_STORAGE_KEY))
 export const $sidebarAgentsGrouped = atom(storedBoolean(SIDEBAR_AGENTS_GROUPED_STORAGE_KEY, false))
 // When true, the sessions sidebar moves to the right and the file browser +
 // preview rail move to the left — a mirror of the default layout.
@@ -90,7 +95,9 @@ export const $sessionsLimit = atom(SIDEBAR_SESSIONS_PAGE_SIZE)
 
 $pinnedSessionIds.subscribe(ids => persistStringArray(SIDEBAR_PINNED_STORAGE_KEY, [...ids]))
 $sidebarCronOpen.subscribe(open => persistBoolean(SIDEBAR_CRON_OPEN_STORAGE_KEY, open))
+$sidebarProjectsOpen.subscribe(open => persistBoolean(SIDEBAR_PROJECTS_OPEN_STORAGE_KEY, open))
 $sidebarMessagingOpenIds.subscribe(ids => persistStringArray(SIDEBAR_MESSAGING_OPEN_STORAGE_KEY, [...ids]))
+$expandedProjectIds.subscribe(ids => persistStringArray(SIDEBAR_EXPANDED_PROJECTS_STORAGE_KEY, [...ids]))
 $sidebarSessionOrderIds.subscribe(ids => persistStringArray(SIDEBAR_SESSION_ORDER_STORAGE_KEY, [...ids]))
 $sidebarSessionOrderManual.subscribe(manual => persistBoolean(SIDEBAR_SESSION_ORDER_MANUAL_STORAGE_KEY, manual))
 $sidebarWorkspaceOrderIds.subscribe(ids => persistStringArray(SIDEBAR_WORKSPACE_ORDER_STORAGE_KEY, [...ids]))
@@ -157,11 +164,23 @@ export function setSidebarCronOpen(open: boolean) {
   $sidebarCronOpen.set(open)
 }
 
+export function setSidebarProjectsOpen(open: boolean) {
+  $sidebarProjectsOpen.set(open)
+}
+
 export function toggleSidebarMessagingOpen(sourceId: string) {
   const current = $sidebarMessagingOpenIds.get()
 
   $sidebarMessagingOpenIds.set(
     current.includes(sourceId) ? current.filter(id => id !== sourceId) : [...current, sourceId]
+  )
+}
+
+export function toggleExpandedProjectId(projectId: string) {
+  const current = $expandedProjectIds.get()
+
+  $expandedProjectIds.set(
+    current.includes(projectId) ? current.filter(id => id !== projectId) : [...current, projectId]
   )
 }
 

@@ -81,6 +81,7 @@ import {
   newSessionInProfile,
   normalizeProfileKey
 } from '@/store/profile'
+import { $projects } from '@/store/projects'
 import {
   $cronSessions,
   $messagingPlatformTotals,
@@ -103,6 +104,7 @@ import { SidebarCronJobsSection } from './cron-jobs-section'
 import { SidebarLoadMoreRow } from './load-more-row'
 import { resolveManualSessionOrderIds } from './order'
 import { ProfileRail } from './profile-switcher'
+import { ProjectsSidebarSection } from './projects-section'
 import { SidebarSessionRow } from './session-row'
 import { VirtualSessionList } from './virtual-session-list'
 import { type SidebarSessionGroup, type SidebarWorkspaceTree, workspaceTreeFor } from './workspace-groups'
@@ -309,6 +311,9 @@ interface ChatSidebarProps extends React.ComponentProps<typeof Sidebar> {
   onNewSessionInWorkspace: (path: null | string) => void
   onManageCronJob: (jobId: string) => void
   onTriggerCronJob: (jobId: string) => void
+  selectedProjectId: string | null
+  onSelectProject: (id: string) => void
+  onNewProject: () => void
 }
 
 export function ChatSidebar({
@@ -322,7 +327,10 @@ export function ChatSidebar({
   onArchiveSession,
   onNewSessionInWorkspace,
   onManageCronJob,
-  onTriggerCronJob
+  onTriggerCronJob,
+  selectedProjectId,
+  onSelectProject,
+  onNewProject
 }: ChatSidebarProps) {
   const { t } = useI18n()
   const s = t.sidebar
@@ -340,6 +348,7 @@ export function ChatSidebar({
   const sessions = useStore($sessions)
   const cronSessions = useStore($cronSessions)
   const cronJobs = useStore($cronJobs)
+  const projects = useStore($projects)
   const messagingSessions = useStore($messagingSessions)
   const messagingPlatformTotals = useStore($messagingPlatformTotals)
   const messagingTruncated = useStore($messagingTruncated)
@@ -533,6 +542,7 @@ export function ChatSidebar({
 
     if (!next.length && agentOrderIds.length) {
       setSidebarSessionOrderIds([])
+
       return
     }
 
@@ -702,7 +712,21 @@ export function ChatSidebar({
     sessionProfileTotals
   ])
 
-  const displayAgentSessions = agentSessions
+  const nonProjectSessions = useMemo(() => {
+    if (!projects.length) {
+      return agentSessions
+    }
+
+    return agentSessions.filter(s => {
+      if (!s.cwd) {
+        return true
+      }
+
+      return !projects.some(p => s.cwd!.startsWith(p.path))
+    })
+  }, [agentSessions, projects])
+
+  const displayAgentSessions = nonProjectSessions
 
   // Pagination is scope-aware. In "All profiles" mode it tracks the global
   // unified set. When scoped to one profile it must compare that profile's own
@@ -908,6 +932,21 @@ export function ChatSidebar({
                 rootClassName="min-h-32 flex-1 overflow-hidden p-0"
                 sessions={searchResults}
                 workingSessionIdSet={workingSessionIdSet}
+              />
+            )}
+
+            {!trimmedQuery && (
+              <ProjectsSidebarSection
+                activeSessionId={activeSidebarSessionId}
+                onArchiveSession={onArchiveSession}
+                onDeleteSession={onDeleteSession}
+                onNewProject={onNewProject}
+                onResumeSession={onResumeSession}
+                onSelectProject={onSelectProject}
+                onTogglePin={pinSession}
+                projects={projects}
+                selectedProjectId={selectedProjectId}
+                sessions={agentSessions}
               />
             )}
 

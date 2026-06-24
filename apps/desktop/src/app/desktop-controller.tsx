@@ -1,6 +1,6 @@
 import { useStore } from '@nanostores/react'
 import { useQueryClient } from '@tanstack/react-query'
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Navigate, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom'
 
 import { BootFailureOverlay } from '@/components/boot-failure-overlay'
@@ -52,6 +52,7 @@ import {
   normalizeProfileKey,
   refreshActiveProfile
 } from '../store/profile'
+import { getProject } from '../store/projects'
 import {
   $activeSessionId,
   $attentionSessionIds,
@@ -60,8 +61,8 @@ import {
   $gatewayState,
   $messages,
   $messagingSessions,
-  $resumeFailedSessionId,
   $resumeExhaustedSessionId,
+  $resumeFailedSessionId,
   $selectedStoredSessionId,
   $sessions,
   $workingSessionIds,
@@ -70,6 +71,7 @@ import {
   mergeSessionPage,
   MESSAGING_SECTION_LIMIT,
   sessionPinId,
+  setActiveSessionId,
   setAwaitingResponse,
   setBusy,
   setCronSessions,
@@ -81,6 +83,7 @@ import {
   setMessagingPlatformTotals,
   setMessagingSessions,
   setMessagingTruncated,
+  setSelectedStoredSessionId,
   setSessionProfileTotals,
   setSessions,
   setSessionsLoading,
@@ -94,6 +97,8 @@ import { isSecondaryWindow } from '../store/windows'
 import { ChatView } from './chat'
 import { requestComposerFocus, requestComposerInsert } from './chat/composer/focus'
 import { useComposerActions } from './chat/hooks/use-composer-actions'
+import type { DroppedFile } from './chat/hooks/use-composer-actions'
+import type { ComposerAttachment } from '@/store/composer'
 import {
   ChatPreviewRail,
   PREVIEW_RAIL_MAX_WIDTH,
@@ -108,10 +113,12 @@ import { useKeybinds } from './hooks/use-keybinds'
 import { SIDEBAR_COLLAPSE_MEDIA_QUERY } from './layout-constants'
 import { ModelPickerOverlay } from './model-picker-overlay'
 import { ModelVisibilityOverlay } from './model-visibility-overlay'
+import { CreateProjectDialog } from './projects/create-project-dialog'
+import { ProjectPageView } from './projects/project-page'
 import { RightSidebarPane } from './right-sidebar'
 import { $terminalTakeover } from './right-sidebar/store'
 import { PersistentTerminal, TerminalSlot } from './right-sidebar/terminal/persistent'
-import { CRON_ROUTE, NEW_CHAT_ROUTE, routeSessionId, sessionRoute, SETTINGS_ROUTE } from './routes'
+import { CRON_ROUTE, NEW_CHAT_ROUTE, projectRoute, routeSessionId, sessionRoute, SETTINGS_ROUTE } from './routes'
 import { SessionPickerOverlay } from './session-picker-overlay'
 import { SessionSwitcher } from './session-switcher'
 import { useContextSuggestions } from './session/hooks/use-context-suggestions'
@@ -199,6 +206,14 @@ export function DesktopController() {
   const queryClient = useQueryClient()
   const location = useLocation()
   const navigate = useNavigate()
+
+  const [createProjectOpen, setCreateProjectOpen] = useState(false)
+
+  // Derive the active project directly from the URL so it clears automatically
+  // when the user navigates to a session, new chat, or any other view.
+  const selectedProjectId = location.pathname.startsWith('/project/')
+    ? decodeURIComponent(location.pathname.slice('/project/'.length))
+    : null
 
   const busyRef = useRef(false)
   const creatingSessionRef = useRef(false)
@@ -817,6 +832,32 @@ export function DesktopController() {
     [requestGateway, startFreshSessionDraft]
   )
 
+  // The project page is a launcher, mirroring the sidebar's "new session"
+  // action (which clears the active session via startFreshSessionDraft). The
+  // difference: we must NOT navigate to '/' — we stay on /project/:id and seed
+  // the project's cwd, so the chatbar's normal submit (submitText) sees no
+  // active session and mints a NEW one in this project, then navigates straight
+  // to it. Staying put also keeps createBackendSessionForSend's route-token
+  // baseline stable so its abort guard doesn't fire mid-create. currentView is
+  // 'project' here, so useRouteResume is inert and won't bounce us off the page.
+  useEffect(() => {
+    if (!selectedProjectId) {
+      return
+    }
+
+    setActiveSessionId(null)
+    activeSessionIdRef.current = null
+    setSelectedStoredSessionId(null)
+    selectedStoredSessionIdRef.current = null
+    setMessages([])
+
+    const project = getProject(selectedProjectId)
+
+    if (project) {
+      setCurrentCwd(project.path)
+    }
+  }, [activeSessionIdRef, selectedProjectId, selectedStoredSessionIdRef])
+
   const handleSkinCommand = useSkinCommand()
 
   const {
@@ -989,13 +1030,25 @@ export function DesktopController() {
         navigate(CRON_ROUTE)
       }}
       onNavigate={selectSidebarItem}
+      onNewProject={() => setCreateProjectOpen(true)}
       onNewSessionInWorkspace={startSessionInWorkspace}
       onResumeSession={sessionId => navigate(sessionRoute(sessionId))}
+      onSelectProject={id => {
+        const project = getProject(id)
+
+        navigate(projectRoute(id))
+
+        // Seed cwd so the next new session starts in the project folder,
+        // but do NOT call startSessionInWorkspace — that starts a fresh
+        // draft and navigates away, overwriting the project route we just set.
+        if (project) { setCurrentCwd(project.path) }
+      }}
       onTriggerCronJob={jobId => {
         void triggerCronJob(jobId)
           .then(() => refreshCronJobs())
           .catch(() => undefined)
       }}
+      selectedProjectId={selectedProjectId}
     />
   )
 
@@ -1029,6 +1082,13 @@ export function DesktopController() {
       <BootFailureOverlay />
       <CommandPalette />
       <SessionSwitcher />
+      <CreateProjectDialog
+        onClose={() => setCreateProjectOpen(false)}
+        onCreated={project => {
+          navigate(projectRoute(project.id))
+        }}
+        open={createProjectOpen}
+      />
 
       {settingsOpen && (
         <Suspense fallback={null}>
@@ -1145,7 +1205,8 @@ export function DesktopController() {
   const fileBrowserPane = (
     <Pane
       defaultOpen={false}
-      disabled={!chatOpen}
+      // disabled={!chatOpen || currentView === 'project'}
+      disabled={!chatOpen && currentView !== 'project'}
       forceCollapsed={narrowViewport}
       hoverReveal
       id="file-browser"
@@ -1245,6 +1306,23 @@ export function DesktopController() {
           <Route element={null} path="agents" />
           <Route element={<Navigate replace to={NEW_CHAT_ROUTE} />} path="new" />
           <Route element={<LegacySessionRedirect />} path="sessions/:sessionId" />
+          <Route
+            element={
+              <ProjectPageViewRoute
+                onAttachDroppedItems={composer.attachDroppedItems}
+                onAttachImageBlob={composer.attachImageBlob}
+                onCancel={cancelRun}
+                onPasteClipboardImage={() => void composer.pasteClipboardImage()}
+                onPickFiles={() => void composer.pickContextPaths('file')}
+                onPickFolders={() => void composer.pickContextPaths('folder')}
+                onPickImages={() => void composer.pickImages()}
+                onRemoveAttachment={id => void composer.removeAttachment(id)}
+                onStartSession={startSessionInWorkspace}
+                onSubmit={submitText}
+              />
+            }
+            path="project/:id"
+          />
           <Route element={<Navigate replace to={NEW_CHAT_ROUTE} />} path="*" />
         </Routes>
       </PaneMain>
@@ -1265,4 +1343,50 @@ function LegacySessionRedirect() {
   const { sessionId } = useParams()
 
   return <Navigate replace to={sessionId ? sessionRoute(sessionId) : NEW_CHAT_ROUTE} />
+}
+
+function ProjectPageViewRoute({
+  onAttachDroppedItems,
+  onAttachImageBlob,
+  onCancel,
+  onPasteClipboardImage,
+  onPickFiles,
+  onPickFolders,
+  onPickImages,
+  onRemoveAttachment,
+  onStartSession,
+  onSubmit
+}: {
+  onAttachDroppedItems: (candidates: DroppedFile[]) => Promise<boolean | void> | boolean | void
+  onAttachImageBlob: (blob: Blob) => Promise<boolean | void> | boolean | void
+  onCancel: () => Promise<void> | void
+  onPasteClipboardImage: () => void
+  onPickFiles: () => void
+  onPickFolders: () => void
+  onPickImages: () => void
+  onRemoveAttachment: (id: string) => void
+  onStartSession: (path: string) => void
+  onSubmit: (value: string, options?: { attachments?: ComposerAttachment[]; fromQueue?: boolean }) => Promise<boolean> | boolean
+}) {
+  const { id } = useParams()
+
+  if (!id) {
+    return <Navigate replace to={NEW_CHAT_ROUTE} />
+  }
+
+  return (
+    <ProjectPageView
+      onAttachDroppedItems={onAttachDroppedItems}
+      onAttachImageBlob={onAttachImageBlob}
+      onCancel={onCancel}
+      onPasteClipboardImage={onPasteClipboardImage}
+      onPickFiles={onPickFiles}
+      onPickFolders={onPickFolders}
+      onPickImages={onPickImages}
+      onRemoveAttachment={onRemoveAttachment}
+      onStartSession={onStartSession}
+      onSubmit={onSubmit}
+      projectId={decodeURIComponent(id)}
+    />
+  )
 }
