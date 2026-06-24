@@ -189,3 +189,100 @@ def test_spectrum_patch_preserves_text_when_single_attachment(tmp_path: Path) ->
     assert "content: asProviderGroup([textMsg, msg2])" in patched
     assert "content: asProviderGroup(items)" in patched
     assert "formatChildId(text2 ? i + 1 : i, messageGuidStr)" in patched
+
+
+def test_spectrum_patch_supports_v5_split_imessage_package(tmp_path: Path) -> None:
+    """spectrum-ts v5 moved iMessage internals into @spectrum-ts/imessage."""
+    dist = tmp_path / "node_modules" / "@spectrum-ts" / "imessage" / "dist"
+    dist.mkdir(parents=True)
+    chunk = dist / "index.js"
+    chunk.write_text(
+        """
+const rebuildFromAppleMessage = async (client, message, phone, chatGuidHint) => {
+	const messageGuidStr = message.guid;
+	const base = buildMessageBase(message, chatGuidHint, message.dateCreated ?? new Date(), phone);
+	const attachments = messageAttachments(message);
+	if (attachments.length === 1) {
+		const info = attachments[0];
+		if (!info) throw new Error("Unreachable: attachments.length === 1 but no element");
+		return buildAttachmentMessage(client, base, info, messageGuidStr, 0);
+	}
+	if (attachments.length > 1) {
+		const items = [];
+		for (let i = 0; i < attachments.length; i++) {
+			const info = attachments[i];
+			if (!info) continue;
+			items.push(await buildAttachmentMessage(client, base, info, formatChildId(i, messageGuidStr), i, messageGuidStr));
+		}
+		return {
+			...base,
+			id: messageGuidStr,
+			content: asProviderGroup(items)
+		};
+	}
+	if (getBalloonBundleId(message) === URL_BALLOON_BUNDLE_ID) return toRichlinkMessage(message, base, messageGuidStr);
+	const text = message.content.text;
+	return {
+		...base,
+		id: messageGuidStr,
+		content: text ? asText(text) : asCustom(message)
+	};
+};
+const toInboundMessages = async (client, cache, event, phone) => {
+	const base = buildMessageBase(event.message, event.chatGuid, event.occurredAt, phone);
+	const messageGuidStr = event.message.guid;
+	if (getBalloonBundleId(event.message) === URL_BALLOON_BUNDLE_ID) {
+		const msg = toRichlinkMessage(event.message, base, messageGuidStr);
+		cacheMessage(cache, msg);
+		return [msg];
+	}
+	const attachments = messageAttachments(event.message);
+	if (attachments.length === 1) {
+		const info = attachments[0];
+		if (!info) throw new Error("Unreachable: attachments.length === 1 but no element");
+		const msg = await buildAttachmentMessage(client, base, info, messageGuidStr, 0);
+		cacheMessage(cache, msg);
+		return [msg];
+	}
+	if (attachments.length > 1) {
+		const items = [];
+		for (let i = 0; i < attachments.length; i++) {
+			const info = attachments[i];
+			if (!info) continue;
+			items.push(await buildAttachmentMessage(client, base, info, formatChildId(i, messageGuidStr), i, messageGuidStr));
+		}
+		const parent = {
+			...base,
+			id: messageGuidStr,
+			content: asProviderGroup(items)
+		};
+		cacheMessage(cache, parent);
+		return [parent];
+	}
+	const text = event.message.content.text;
+	const msg = {
+		...base,
+		id: messageGuidStr,
+		content: text ? asText(text) : asCustom(event.message)
+	};
+	cacheMessage(cache, msg);
+	return [msg];
+};
+""",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        ["node", str(_PATCHER), str(tmp_path)],
+        cwd=Path.cwd(),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    patched = chunk.read_text(encoding="utf-8")
+    assert "Preserve mixed text + attachment iMessage payloads" in patched
+    assert "content: asProviderGroup([textMsg, msg2])" in patched
+    assert "content: asProviderGroup([textMsg, msg])" in patched
+    assert "formatChildId(text2 ? i + 1 : i, messageGuidStr)" in patched

@@ -152,7 +152,7 @@ All env vars are documented in `plugin.yaml`. The most important:
   as a synthetic `reaction:added:<emoji>` event. Removal after a sidecar
   restart is best-effort — the live reaction handle is lost, so a stale
   tapback heals when the next reaction replaces it. Group spaces stay
-  reachable across restarts via spectrum-ts v3's `space.get(id)`.
+  reachable across restarts via spectrum-ts' `space.get(id)`.
 - **Message effects, polls** — supported by `spectrum-ts` but not yet
   exposed; the sidecar is the natural place to add them.
 
@@ -169,8 +169,9 @@ release take down fresh setups silently. Upgrades are deliberate:
 2. Bump the exact pin in `sidecar/package.json`, then run `npm install`
    inside `sidecar/` to regenerate `package-lock.json`. Commit both.
 3. Migrate `sidecar/index.mjs` against the new typings
-   (`sidecar/node_modules/spectrum-ts/dist/*.d.ts` is the source of truth —
-   the hosted docs can lag).
+   (`sidecar/node_modules/spectrum-ts/dist/*.d.ts` and, for v5+ split
+   packages, `sidecar/node_modules/@spectrum-ts/*/dist/*.d.ts` are the
+   source of truth — the hosted docs can lag).
 4. Run `pytest tests/plugins/platforms/photon/`.
 5. Verify end-to-end: `hermes photon status`, a DM and a group roundtrip,
    and an agent reply into a group right after a gateway restart (exercises
