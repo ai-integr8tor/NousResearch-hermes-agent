@@ -64,6 +64,7 @@ _DISCORD_NONCONVERSATIONAL_METADATA_KEYS = frozenset({
 # metadata flag, not rely on a regex here.
 _DISCORD_NONCONVERSATIONAL_HISTORY_MESSAGE_PATTERNS = (
     re.compile(r"^\s*💾\s*Self-improvement review:\s+\S[\s\S]*$", re.IGNORECASE),
+    re.compile(r"^\s*💾\s*自己改善レビュー:\s+\S[\s\S]*$", re.IGNORECASE),
     # Legacy/background-review test doubles used this shorter form before the
     # self-improvement prefix became the stable emitter contract.
     re.compile(
@@ -3611,12 +3612,12 @@ class DiscordAdapter(BasePlatformAdapter):
         @tree.command(name="queue", description="Queue a prompt for the next turn (doesn't interrupt)")
         @discord.app_commands.describe(prompt="The prompt to queue")
         async def slash_queue(interaction: discord.Interaction, prompt: str):
-            await self._run_simple_slash(interaction, f"/queue {prompt}", "Queued for the next turn.")
+            await self._run_simple_slash(interaction, f"/queue {prompt}", "次の対応として受け付けました。")
 
         @tree.command(name="background", description="Run a prompt in the background")
         @discord.app_commands.describe(prompt="The prompt to run in the background")
         async def slash_background(interaction: discord.Interaction, prompt: str):
-            await self._run_simple_slash(interaction, f"/background {prompt}", "Background task started~")
+            await self._run_simple_slash(interaction, f"/background {prompt}", "バックグラウンド作業を開始しました。")
 
         # ── Auto-register any gateway-available commands not yet on the tree ──
         # This ensures new commands added to COMMAND_REGISTRY in

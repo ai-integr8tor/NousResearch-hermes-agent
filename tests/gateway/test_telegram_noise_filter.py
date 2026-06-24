@@ -11,9 +11,9 @@ def test_telegram_status_suppresses_auxiliary_and_retry_noise():
     """Auxiliary failures and retry backoff chatter should not hit Telegram."""
     noisy_messages = [
         "⚠ Auxiliary title generation failed: HTTP 400: Operation contains cybersecurity risk",
-        "⚠ Compression summary failed: upstream error. Inserted a fallback context marker.",
-        "🗜️ Compacting context — summarizing earlier conversation so I can continue...",
-        "ℹ Configured compression model 'small-model' failed (timeout). Recovered using main model — check auxiliary.compression.model in config.yaml.",
+        "⚠ 会話履歴の要約に失敗しました: upstream error。代替の文脈マーカーを挿入しました。",
+        "🗜️ 会話履歴を整理中です。続けられるように、ここまでの内容を要約しています。",
+        "ℹ 設定されている圧縮用モデル 'small-model' が失敗しました (timeout)。メインモデルで復旧済みです。必要に応じて config.yaml の auxiliary.compression.model を確認してください。",
         "⏳ Retrying in 4.2s (attempt 1/3)...",
         "⏱️ Rate limited. Waiting 30.0s (attempt 2/3)...",
         "⚠️ Max retries (3) exhausted — trying fallback...",
@@ -24,10 +24,10 @@ def test_telegram_status_suppresses_auxiliary_and_retry_noise():
 
 
 def test_non_telegram_status_is_unchanged():
-    """The Telegram quieting policy must not hide CLI/Discord diagnostics."""
+    """The Telegram quieting policy must not hide CLI diagnostics; Discord localizes progress."""
     message = "⏳ Retrying in 4.2s (attempt 1/3)..."
 
-    assert _prepare_gateway_status_message(Platform.DISCORD, "lifecycle", message) == message
+    assert _prepare_gateway_status_message(Platform.DISCORD, "lifecycle", message) == "🔍 確認中です。"
     assert _prepare_gateway_status_message("local", "lifecycle", message) == message
 
 

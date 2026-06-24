@@ -323,16 +323,16 @@ def build_turn_context(
             )
         elif _compressor.should_compress(_preflight_tokens):
             logger.info(
-                "Preflight compression: ~%s tokens >= %s threshold (model %s, ctx %s)",
+                "会話履歴の事前整理: 約%sトークンがしきい値%s以上です (model %s, ctx %s)",
                 f"{_preflight_tokens:,}",
                 f"{_compressor.threshold_tokens:,}",
                 agent.model,
                 f"{_compressor.context_length:,}",
             )
             agent._emit_status(
-                f"📦 Preflight compression: ~{_preflight_tokens:,} tokens "
-                f">= {_compressor.threshold_tokens:,} threshold. "
-                "This may take a moment."
+                f"📦 会話履歴を整理中です: 約{_preflight_tokens:,}トークンが "
+                f"しきい値{_compressor.threshold_tokens:,}トークンを超えました。"
+                "少し時間がかかる場合があります。"
             )
             for _pass in range(3):
                 _orig_len = len(messages)
