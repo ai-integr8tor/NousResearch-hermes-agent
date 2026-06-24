@@ -3080,6 +3080,7 @@ class SessionDB:
         session_id: str,
         include_ancestors: bool = False,
         include_inactive: bool = False,
+        limit: int | None = None,
     ) -> List[Dict[str, Any]]:
         """
         Load messages in the OpenAI conversation format (role + content dicts).
@@ -3088,6 +3089,11 @@ class SessionDB:
         By default only active messages are returned. Pass
         ``include_inactive=True`` to load soft-deleted (rewound) rows
         as well. See :meth:`rewind_to_message`.
+
+        When ``limit`` is set, only the last ``limit`` messages are returned
+        (ordered by timestamp, then id). This is used by ``--recent N`` to
+        load a partial transcript for quick session check-ins without
+        paying the full token cost of a long conversation.
         """
         session_ids = [session_id]
         if include_ancestors:
@@ -3096,14 +3102,22 @@ class SessionDB:
         active_clause = "" if include_inactive else " AND active = 1"
         with self._lock:
             placeholders = ",".join("?" for _ in session_ids)
-            rows = self._conn.execute(
+            sql = (
                 "SELECT role, content, tool_call_id, tool_calls, tool_name, "
                 "finish_reason, reasoning, reasoning_content, reasoning_details, "
                 "codex_reasoning_items, codex_message_items, platform_message_id, observed, timestamp "
                 f"FROM messages WHERE session_id IN ({placeholders})"
-                f"{active_clause} ORDER BY timestamp, id",
-                tuple(session_ids),
-            ).fetchall()
+                f"{active_clause} ORDER BY timestamp, id"
+            )
+            rows = self._conn.execute(sql, tuple(session_ids)).fetchall()
+
+        # Apply limit: keep only the last N rows (most recent by timestamp+id).
+        # Note: when include_ancestors=True, the limit applies across the entire
+        # merged lineage, not per-session. This is intentional — the caller
+        # wants the last N messages of the conversation, regardless of which
+        # session in the compression chain they belong to.
+        if limit is not None and limit > 0 and len(rows) > limit:
+            rows = rows[-limit:]
 
         messages = []
         for row in rows:
