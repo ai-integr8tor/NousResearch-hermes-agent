@@ -2835,3 +2835,75 @@ def test_host_derived_key_helper_basic_cases():
     for k in ("DEEPSEEK_API_KEY", "GROQ_API_KEY", "MISTRAL_API_KEY",
               "OPENAI_API_KEY", "OPENROUTER_API_KEY"):
         _os.environ.pop(k, None)
+
+
+def _copilot_runtime(monkeypatch, *, config_default, target_model):
+    """Resolve a Copilot runtime with a given config default + target model.
+
+    Helper for the api_mode regression tests below. Stubs the credential
+    layer so no real GitHub token is needed.
+    """
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "copilot")
+    monkeypatch.setattr(
+        rp,
+        "_get_model_config",
+        lambda: {"provider": "copilot", "default": config_default},
+    )
+    monkeypatch.setattr(
+        rp,
+        "load_pool",
+        lambda provider: type("Pool", (), {"has_credentials": lambda self: False})(),
+    )
+    monkeypatch.setattr(
+        rp,
+        "resolve_api_key_provider_credentials",
+        lambda provider: {
+            "provider": "copilot",
+            "api_key": "ghu_test_token",
+            "source": "env:COPILOT_GITHUB_TOKEN",
+        },
+    )
+    # The Copilot api_mode helper consults the model catalog/network; force the
+    # deterministic pattern-only path used by _should_use_copilot_responses_api.
+    from hermes_cli import models as _models
+    monkeypatch.setattr(
+        _models,
+        "normalize_copilot_model_id",
+        lambda model_id, **kw: model_id,
+    )
+    return rp.resolve_runtime_provider(requested="copilot", target_model=target_model)
+
+
+def test_copilot_api_mode_follows_target_model_gpt5(monkeypatch):
+    """Regression: switching TO gpt-5.x must route to the Responses API even
+    when config.default is a Chat-Completions model (e.g. Claude).
+
+    Before the fix, _copilot_runtime_api_mode ignored target_model and read
+    model.default, so a WebUI/gateway switch from claude-opus to gpt-5.5 left
+    api_mode='chat_completions' and the upstream rejected gpt-5.5 with
+    400 unsupported_api_for_model.
+    """
+    resolved = _copilot_runtime(
+        monkeypatch, config_default="claude-opus-4.8", target_model="gpt-5.5"
+    )
+    assert resolved["provider"] == "copilot"
+    assert resolved["api_mode"] == "codex_responses"
+
+
+def test_copilot_api_mode_follows_target_model_claude(monkeypatch):
+    """Inverse guard: switching TO a Claude model keeps Chat Completions even
+    when config.default is a GPT-5.x model (no over-correction to Responses)."""
+    resolved = _copilot_runtime(
+        monkeypatch, config_default="gpt-5.5", target_model="claude-opus-4.8"
+    )
+    assert resolved["provider"] == "copilot"
+    assert resolved["api_mode"] == "chat_completions"
+
+
+def test_copilot_api_mode_gpt5_mini_stays_chat_completions(monkeypatch):
+    """gpt-5-mini is the documented Copilot exception that still uses Chat
+    Completions despite matching the gpt-5* prefix."""
+    resolved = _copilot_runtime(
+        monkeypatch, config_default="claude-opus-4.8", target_model="gpt-5-mini"
+    )
+    assert resolved["api_mode"] == "chat_completions"
