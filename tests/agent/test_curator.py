@@ -7,6 +7,8 @@ tests run fully offline and the curator module doesn't need real credentials.
 from __future__ import annotations
 
 import importlib
+import sys
+import types
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -915,6 +917,129 @@ def test_review_model_defaults_to_main_when_slot_is_auto(curator_env):
     assert curator._resolve_review_model(cfg) == ("openrouter", "openai/gpt-5.5")
 
 
+def test_review_reasoning_defaults_to_agent_reasoning(curator_env):
+    """No curator-specific override → inherit valid agent.reasoning_effort."""
+    curator = curator_env["curator"]
+    cfg = {
+        "agent": {"reasoning_effort": "high"},
+        "model": {"provider": "openrouter", "default": "openai/gpt-5.5"},
+        "auxiliary": {"curator": {"provider": "auto", "model": ""}},
+    }
+
+    assert curator._resolve_review_reasoning_config(cfg) == {
+        "enabled": True,
+        "effort": "high",
+    }
+
+
+def test_review_reasoning_empty_config_uses_provider_default(curator_env):
+    """No curator or agent reasoning setting → leave provider default in effect."""
+    curator = curator_env["curator"]
+
+    assert curator._resolve_review_reasoning_config({}) is None
+
+
+def test_review_reasoning_honors_auxiliary_curator_override(curator_env):
+    """Canonical auxiliary.curator.reasoning_effort wins over agent reasoning."""
+    curator = curator_env["curator"]
+    cfg = {
+        "agent": {"reasoning_effort": "high"},
+        "auxiliary": {"curator": {"reasoning_effort": "xhigh"}},
+    }
+
+    assert curator._resolve_review_reasoning_config(cfg) == {
+        "enabled": True,
+        "effort": "xhigh",
+    }
+
+
+def test_review_reasoning_none_disables_and_stops_fallback(curator_env):
+    """The literal none is an explicit curator override, not an empty value."""
+    curator = curator_env["curator"]
+    cfg = {
+        "agent": {"reasoning_effort": "high"},
+        "auxiliary": {"curator": {"reasoning_effort": "none"}},
+    }
+
+    assert curator._resolve_review_reasoning_config(cfg) == {"enabled": False}
+
+
+def test_review_reasoning_invalid_override_falls_back_to_agent(curator_env, caplog):
+    """Invalid canonical curator reasoning logs and falls back to agent."""
+    import logging
+
+    curator = curator_env["curator"]
+    cfg = {
+        "agent": {"reasoning_effort": "high"},
+        "auxiliary": {"curator": {"reasoning_effort": "turbo"}},
+    }
+
+    with caplog.at_level(logging.WARNING, logger="agent.curator"):
+        assert curator._resolve_review_reasoning_config(cfg) == {
+            "enabled": True,
+            "effort": "high",
+        }
+    assert any("invalid auxiliary.curator.reasoning_effort" in rec.message for rec in caplog.records)
+
+
+def test_review_reasoning_legacy_curator_auxiliary_fallback(curator_env, caplog):
+    """Deprecated curator.auxiliary.reasoning_effort works when canonical is absent."""
+    import logging
+
+    curator = curator_env["curator"]
+    cfg = {
+        "agent": {"reasoning_effort": "medium"},
+        "curator": {"auxiliary": {"reasoning_effort": "xhigh"}},
+    }
+
+    with caplog.at_level(logging.INFO, logger="agent.curator"):
+        assert curator._resolve_review_reasoning_config(cfg) == {
+            "enabled": True,
+            "effort": "xhigh",
+        }
+    assert any(
+        "deprecated curator.auxiliary.reasoning_effort" in rec.message
+        for rec in caplog.records
+    )
+
+
+def test_review_reasoning_canonical_wins_over_legacy(curator_env):
+    """Canonical reasoning overrides deprecated curator.auxiliary reasoning."""
+    curator = curator_env["curator"]
+    cfg = {
+        "agent": {"reasoning_effort": "medium"},
+        "auxiliary": {"curator": {"reasoning_effort": "high"}},
+        "curator": {"auxiliary": {"reasoning_effort": "xhigh"}},
+    }
+
+    assert curator._resolve_review_reasoning_config(cfg) == {
+        "enabled": True,
+        "effort": "high",
+    }
+
+
+def test_review_reasoning_invalid_canonical_skips_legacy_and_falls_back_to_agent(
+    curator_env,
+    caplog,
+):
+    """Invalid canonical is still present, so legacy is skipped and agent wins."""
+    import logging
+
+    curator = curator_env["curator"]
+    cfg = {
+        "agent": {"reasoning_effort": "low"},
+        "auxiliary": {"curator": {"reasoning_effort": "turbo"}},
+        "curator": {"auxiliary": {"reasoning_effort": "xhigh"}},
+    }
+
+    with caplog.at_level(logging.WARNING, logger="agent.curator"):
+        assert curator._resolve_review_reasoning_config(cfg) == {
+            "enabled": True,
+            "effort": "low",
+        }
+    assert any("invalid auxiliary.curator.reasoning_effort" in rec.message for rec in caplog.records)
+
+
 def test_review_model_honors_auxiliary_curator_slot(curator_env):
     """auxiliary.curator.{provider,model} fully set → that pair wins."""
     curator = curator_env["curator"]
@@ -949,8 +1074,68 @@ def test_review_runtime_passes_auxiliary_curator_credentials(curator_env):
     binding = curator._resolve_review_runtime(cfg)
     assert binding.provider == "custom"
     assert binding.model == "local-mini"
-    assert binding.explicit_api_key == "sk-curator-only"
+    assert binding.explicit_api_key == cfg["auxiliary"]["curator"]["api_key"]
     assert binding.explicit_base_url == "http://localhost:11434/v1"
+
+
+def test_run_llm_review_passes_reasoning_config_to_aiagent(curator_env, monkeypatch):
+    """Resolved curator reasoning must reach the forked AIAgent constructor."""
+    curator = importlib.reload(curator_env["curator"])
+    captured = {}
+
+    class FakeAIAgent:
+        def __init__(self, **kwargs):
+            captured["kwargs"] = kwargs
+            self._session_messages = []
+
+        def run_conversation(self, user_message):
+            captured["prompt"] = user_message
+            return {"final_response": "done"}
+
+        def close(self):
+            captured["closed"] = True
+
+    monkeypatch.setitem(
+        sys.modules,
+        "run_agent",
+        types.SimpleNamespace(AIAgent=FakeAIAgent),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.config",
+        types.SimpleNamespace(
+            load_config=lambda: {
+                "model": {"provider": "openrouter", "default": "openai/gpt-5.5"},
+                "auxiliary": {
+                    "curator": {
+                        "provider": "openrouter",
+                        "model": "openai/gpt-5.4-mini",
+                        "reasoning_effort": "xhigh",
+                    },
+                },
+            },
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.runtime_provider",
+        types.SimpleNamespace(
+            resolve_runtime_provider=lambda **_kwargs: {
+                "api_key": "resolved-key",
+                "base_url": "https://openrouter.ai/api/v1",
+                "api_mode": "openai",
+                "provider": "openrouter",
+            },
+        ),
+    )
+
+    result = curator._run_llm_review("review prompt")
+
+    assert result["final"] == "done"
+    assert captured["kwargs"]["reasoning_config"] == {
+        "enabled": True,
+        "effort": "xhigh",
+    }
 
 
 def test_review_runtime_strips_blank_aux_credentials(curator_env):
@@ -1108,6 +1293,7 @@ def test_curator_slot_is_canonical_aux_task():
     assert slot["provider"] == "auto"
     assert slot["model"] == ""
     assert slot["timeout"] > 0, "curator timeout should be set (reviews run long)"
+    assert slot["reasoning_effort"] == ""
 
     # 2. hermes_cli/main.py _AUX_TASKS — CLI picker
     aux_keys = {k for k, _name, _desc in _AUX_TASKS}

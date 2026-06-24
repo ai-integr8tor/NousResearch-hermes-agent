@@ -77,13 +77,28 @@ auxiliary:
   curator:
     provider: openrouter
     model: google/gemini-3-flash-preview
-    timeout: 600               # generous — reviews can take several minutes
+    reasoning_effort: ""        # empty = inherit agent.reasoning_effort, then provider default
 ```
 
 Leaving `provider: auto` (the default) routes the review pass through whatever your main chat model is, matching the behavior of every other auxiliary task.
 
+For a high-capability curator pass while keeping normal chat sessions cheaper, configure only the curator slot:
+
+```yaml
+curator:
+  consolidate: true            # required for scheduled LLM consolidation
+
+auxiliary:
+  curator:
+    provider: openai-codex
+    model: gpt-5.5
+    reasoning_effort: xhigh
+```
+
+`auxiliary.curator.reasoning_effort` controls only the curator review fork. Empty string means the curator inherits `agent.reasoning_effort` when set; if neither is set, the provider/transport default applies. The literal `none` disables reasoning for the curator fork even if `agent.reasoning_effort` is configured. The reasoning key does not enable the LLM consolidation pass by itself — `curator.consolidate: true` or `hermes curator run --consolidate` is still required.
+
 :::note Legacy config
-Earlier releases used a one-off `curator.auxiliary.{provider,model}` block. That path still works but emits a deprecation log line — please migrate to `auxiliary.curator` above so the curator shares the same plumbing (`hermes model`, dashboard Models tab, `base_url`, `api_key`, `timeout`, `extra_body`) as every other aux task.
+Earlier releases used a one-off `curator.auxiliary.{provider,model}` block. Provider/model and `curator.auxiliary.reasoning_effort` still work as deprecated fallbacks when the canonical `auxiliary.curator` keys are absent, but emit deprecation log lines. Please migrate to `auxiliary.curator` above so the curator shares the same honored routing fields (`hermes model`, dashboard Models tab, `base_url`, `api_key`, `reasoning_effort`) as other aux tasks. Known limitation: `auxiliary.curator.timeout` and `auxiliary.curator.extra_body` are tracked separately and are not currently honored by the curator review fork.
 :::
 
 ## CLI

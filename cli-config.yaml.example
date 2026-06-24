@@ -120,6 +120,22 @@ model:
 #         stale_timeout_seconds: 1800  # Longer non-stream stale timeout for slow large-context turns
 
 # =============================================================================
+# Auxiliary Task Model Overrides
+# =============================================================================
+# Optional per-task model routing. Use this when a side task should use a
+# different provider/model/reasoning profile than normal chat.
+#
+# auxiliary:
+#   curator:
+#     provider: openai-codex       # "auto" inherits the main chat provider
+#     model: gpt-5.5
+#     reasoning_effort: xhigh      # Empty string inherits agent.reasoning_effort, then provider default
+#
+# Note: curator LLM consolidation still requires curator.consolidate: true or
+# `hermes curator run --consolidate`; this reasoning key only affects the
+# curator review fork once consolidation is running.
+
+# =============================================================================
 # OpenRouter Provider Routing (only applies when using OpenRouter)
 # =============================================================================
 # Control how requests are routed across providers on OpenRouter.
