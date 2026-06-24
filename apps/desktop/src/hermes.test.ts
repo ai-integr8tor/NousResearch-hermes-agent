@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { getSessionMessages, listAllProfileSessions, listSessions } from './hermes'
+import { getSessionMessages, listAllProfileSessions, listSessions, speakText, transcribeAudio } from './hermes'
 
 const emptySessionsResponse = {
   limit: 0,
@@ -56,5 +56,27 @@ describe('Hermes REST session helpers', () => {
       path: '/api/sessions/session-1/messages?profile=xiaoxuxu',
       profile: 'xiaoxuxu'
     })
+  })
+
+  it('uses a longer timeout for desktop audio transcription', async () => {
+    await transcribeAudio('data:audio/webm;base64,aGVsbG8=', 'audio/webm')
+
+    expect(api).toHaveBeenCalledWith(
+      expect.objectContaining({
+        path: '/api/audio/transcribe',
+        timeoutMs: 120_000
+      })
+    )
+  })
+
+  it('uses a longer timeout for desktop speech synthesis', async () => {
+    await speakText('This response may take more than fifteen seconds to synthesize.')
+
+    expect(api).toHaveBeenCalledWith(
+      expect.objectContaining({
+        path: '/api/audio/speak',
+        timeoutMs: 180_000
+      })
+    )
   })
 })
