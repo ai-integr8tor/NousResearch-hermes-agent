@@ -39,10 +39,6 @@ logger = logging.getLogger(__name__)
 # image_generation tool drives that same model, so the cap applies here too.
 _MAX_REFERENCE_IMAGES = 16
 
-# Enough leading bytes to identify any format ``_sniff_mime_from_bytes`` knows
-# (the longest check inspects offset 12).
-_SNIFF_BYTES = 64
-
 
 # ---------------------------------------------------------------------------
 # Model catalog — mirrors the ``openai`` plugin so the picker UX is identical.
@@ -156,65 +152,16 @@ def _resolve_source_image(ref: str) -> str:
     """Resolve a source image to a URL or base64 ``data:`` URI for input_image.
 
     The Codex Responses ``image_generation`` tool conditions on ``input_image``
-    parts whose ``image_url`` is a public URL or a base64 ``data:`` URI. Public
-    URLs pass through; a local file (what a user-attached image looks like once
-    the gateway has saved it to disk) is inlined as a ``data:`` URI. Local files
-    and ``data:`` URIs are validated as real images via magic-byte sniffing —
-    not the extension or a ``data:`` label — and a local file additionally must
-    pass the read denylist, so a credential store can't be shipped to the image
-    API just because its bytes happen to look like an image.
+    parts whose ``image_url`` is a public URL or a base64 ``data:`` URI. The
+    shared resolver validates the source (read denylist + magic-byte sniff for
+    local files); public URLs and image ``data:`` URIs pass through, while local
+    files are inlined as a ``data:`` URI.
 
     Raises ``ValueError`` on an empty, missing, non-image, or denylisted source.
     """
-    import base64
-    import os
+    from agent.image_source import resolve_image_source
 
-    from agent.image_routing import _sniff_mime_from_bytes
-
-    value = (ref or "").strip()
-    if not value:
-        raise ValueError("Empty source image reference")
-
-    low = value[:8].lower()
-    if low.startswith(("http://", "https://")):
-        return value
-
-    if low.startswith("data:"):
-        header, _, payload = value.partition(",")
-        if not header.lower().startswith("data:image/"):
-            raise ValueError(f"Source data URI is not an image: {ref}")
-        if ";base64" not in header.lower():
-            raise ValueError(f"Image data URIs must be base64-encoded: {ref}")
-        compact = "".join(payload.lstrip()[: _SNIFF_BYTES * 2].split())
-        prefix = compact[:_SNIFF_BYTES]
-        prefix = prefix[: len(prefix) - (len(prefix) % 4)]
-        try:
-            head = base64.b64decode(prefix)
-        except Exception as exc:  # noqa: BLE001 — malformed payload, reject clearly
-            raise ValueError(f"Source data URI has malformed base64: {ref}") from exc
-        if _sniff_mime_from_bytes(head) is None:
-            raise ValueError(f"Source image is not a recognised image file: {ref}")
-        return value
-
-    path = os.path.expanduser(value)
-    if not os.path.isfile(path):
-        raise ValueError(
-            f"Source image not found: {ref}. Pass a public URL, a data: URI, "
-            f"or a readable local image file."
-        )
-
-    from agent.file_safety import get_read_block_error
-
-    block_error = get_read_block_error(path)
-    if block_error:
-        raise ValueError(block_error)
-
-    with open(path, "rb") as handle:
-        raw = handle.read()
-    mime = _sniff_mime_from_bytes(raw[:_SNIFF_BYTES])
-    if mime is None:
-        raise ValueError(f"Source image is not a recognised image file: {ref}")
-    return f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
+    return resolve_image_source(ref).as_url_or_inline()
 
 
 def _build_responses_payload(
