@@ -31,8 +31,6 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import List, Optional, Tuple
 
-from agent.skill_utils import is_excluded_skill_path
-
 _PROFILE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 # Directories bootstrapped inside every new profile
@@ -621,16 +619,14 @@ def _check_gateway_running(profile_dir: Path) -> bool:
 
 
 def _count_skills(profile_dir: Path) -> int:
-    """Count installed skills in a profile."""
-    skills_dir = profile_dir / "skills"
-    if not skills_dir.is_dir():
-        return 0
-    count = 0
-    for md in skills_dir.rglob("SKILL.md"):
-        if is_excluded_skill_path(md):
-            continue
-        count += 1
-    return count
+    """Count loadable skills in a profile (matches /api/skills contract)."""
+    from tools.skills_tool import _find_all_skills
+    # No global mutation needed — pass skills_dir explicitly
+    skills = _find_all_skills(
+        skip_disabled=True,
+        skills_dir=profile_dir / "skills",
+    )
+    return len(skills)
 
 
 # ---------------------------------------------------------------------------
