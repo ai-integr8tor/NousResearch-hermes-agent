@@ -136,8 +136,9 @@ async def login_page(request: Request) -> HTMLResponse:
     next_path = _validate_post_login_target(
         request.query_params.get("next", "")
     )
+    prefix = _prefix(request)
     return HTMLResponse(
-        render_login_html(next_path=next_path),
+        render_login_html(next_path=next_path, prefix=prefix),
         headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
     )
 

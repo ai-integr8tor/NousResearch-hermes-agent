@@ -46,28 +46,28 @@ _LOGIN_HTML_TEMPLATE = """\
     font-style: normal;
     font-weight: 400;
     font-display: swap;
-    src: url('/fonts/Collapse-Regular.woff2') format('woff2');
+    src: url('{pfx}/fonts/Collapse-Regular.woff2') format('woff2');
   }}
   @font-face {{
     font-family: 'Collapse';
     font-style: normal;
     font-weight: 700;
     font-display: swap;
-    src: url('/fonts/Collapse-Bold.woff2') format('woff2');
+    src: url('{pfx}/fonts/Collapse-Bold.woff2') format('woff2');
   }}
   @font-face {{
     font-family: 'Rules Compressed';
     font-style: normal;
     font-weight: 400;
     font-display: swap;
-    src: url('/fonts/RulesCompressed-Regular.woff2') format('woff2');
+    src: url('{pfx}/fonts/RulesCompressed-Regular.woff2') format('woff2');
   }}
   @font-face {{
     font-family: 'Rules Compressed';
     font-style: normal;
     font-weight: 600;
     font-display: swap;
-    src: url('/fonts/RulesCompressed-Medium.woff2') format('woff2');
+    src: url('{pfx}/fonts/RulesCompressed-Medium.woff2') format('woff2');
   }}
 
   :root {{
@@ -419,13 +419,14 @@ _PASSWORD_FORM_SCRIPT = """\
       var btn = form.querySelector('button[type=submit]');
       if (err) { err.hidden = true; err.textContent = ''; }
       if (btn) { btn.disabled = true; }
+      var pfx = form.getAttribute('data-prefix') || '';
       var body = {
         provider: form.getAttribute('data-provider') || '',
         username: (form.querySelector('input[name=username]') || {}).value || '',
         password: (form.querySelector('input[name=password]') || {}).value || '',
         next: (form.querySelector('input[name=next]') || {}).value || ''
       };
-      fetch('/auth/password-login', {
+      fetch(pfx + '/auth/password-login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -433,7 +434,7 @@ _PASSWORD_FORM_SCRIPT = """\
       }).then(function (resp) {
         if (resp.ok) {
           return resp.json().then(function (data) {
-            window.location.assign((data && data.next) || '/');
+            window.location.assign(pfx + ((data && data.next) || '/'));
           });
         }
         var msg = resp.status === 429
@@ -455,7 +456,7 @@ _PASSWORD_FORM_SCRIPT = """\
 """
 
 
-def render_login_html(*, next_path: str = "") -> str:
+def render_login_html(*, next_path: str = "", prefix: str = "") -> str:
     """Return the full HTML for ``GET /login``.
 
     ``next_path`` — when set, the post-login landing path the user
@@ -464,7 +465,17 @@ def render_login_html(*, next_path: str = "") -> str:
     end-to-end. The caller (``routes.login_page``) is responsible for
     validating ``next_path`` against the same-origin rules before we
     emit it; we still HTML-escape it as defence in depth.
+
+    ``prefix`` — when set, an X-Forwarded-Prefix value (e.g. ``/hermes``)
+    that is prepended to all root-relative URLs in the rendered page so
+    the login page works behind a path-prefix reverse proxy.
+    See: NousResearch/hermes-agent#48623
     """
+    # Normalise prefix: ensure it starts with / and has no trailing slash.
+    pfx = (prefix or "").strip().rstrip("/")
+    if pfx and not pfx.startswith("/"):
+        pfx = "/" + pfx
+
     providers = list_providers()
     if not providers:
         return _EMPTY_HTML
@@ -484,21 +495,22 @@ def render_login_html(*, next_path: str = "") -> str:
     for p in providers:
         if getattr(p, "supports_password", False):
             needs_password_script = True
-            buttons.append(_render_password_form(p, next_path))
+            buttons.append(_render_password_form(p, next_path, pfx))
         else:
             buttons.append(
                 f'      <a class="provider-btn" '
-                f'href="/auth/login?provider={html.escape(p.name, quote=True)}{next_qs}">'
+                f'href="{pfx}/auth/login?provider={html.escape(p.name, quote=True)}{next_qs}">'
                 f'Sign in with {html.escape(p.display_name)}</a>'
             )
     script = _PASSWORD_FORM_SCRIPT if needs_password_script else ""
     return _LOGIN_HTML_TEMPLATE.format(
         provider_buttons="\n".join(buttons),
         password_script=script,
+        pfx=pfx,
     )
 
 
-def _render_password_form(provider, next_path: str) -> str:
+def _render_password_form(provider, next_path: str, prefix: str = "") -> str:
     """Render a username/password form for a ``supports_password`` provider.
 
     The form is wired by :data:`_PASSWORD_FORM_SCRIPT` (a single delegated
@@ -514,6 +526,7 @@ def _render_password_form(provider, next_path: str) -> str:
     safe_next = html.escape(next_path, quote=True) if next_path else ""
     return (
         f'      <form class="provider-form" data-provider="{pname}" '
+        f'data-prefix="{html.escape(prefix, quote=True)}" '
         f'autocomplete="on">\n'
         f'        <div class="form-title">Sign in with {plabel}</div>\n'
         f'        <input type="hidden" name="next" value="{safe_next}">\n'
