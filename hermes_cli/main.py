@@ -2240,6 +2240,29 @@ def cmd_chat(args):
         # If resolution fails, keep the original value — _init_agent will
         # report "Session not found" with the original input
 
+    # Workspace restore: cd back into the resumed session's recorded cwd so a
+    # session resumes in the repo it belonged to (the session<->workspace bind).
+    # Opt out with --no-restore-cwd. Best-effort: a missing dir warns and falls
+    # back to the current dir rather than failing the resume.
+    if getattr(args, "resume", None) and not getattr(args, "no_restore_cwd", False):
+        try:
+            from hermes_state import SessionDB as _SessionDB
+            _row = _SessionDB().get_session(args.resume)
+            _saved_cwd = (_row or {}).get("cwd")
+            if _saved_cwd and not getattr(args, "worktree", False):
+                if os.path.isdir(_saved_cwd):
+                    if os.path.realpath(_saved_cwd) != os.path.realpath(os.getcwd()):
+                        os.chdir(_saved_cwd)
+                        print(f"↪ restored workspace dir: {_saved_cwd}")
+                else:
+                    sys.stderr.write(
+                        f"⚠ session's recorded dir is gone ({_saved_cwd}); "
+                        f"staying in {os.getcwd()}\n"
+                    )
+        except Exception:
+            # Never let cwd-restore break a resume.
+            pass
+
     # xAI retirement warning — one-shot, non-blocking, never fails startup
     try:
         from hermes_cli.xai_retirement import (
@@ -12685,6 +12708,11 @@ def main():
     sessions_list.add_argument(
         "--limit", type=int, default=20, help="Max sessions to show"
     )
+    sessions_list.add_argument(
+        "--workspace",
+        help="Filter to one workspace: a git remote (e.g. 'owner/repo') or a "
+        "project directory. Adds a Workspace column to the listing.",
+    )
 
     sessions_export = sessions_subparsers.add_parser(
         "export", help="Export sessions to a JSONL file"
@@ -12830,33 +12858,60 @@ def main():
         _exclude = None if _source else ["tool"]
 
         if action == "list":
+            _workspace = getattr(args, "workspace", None)
             sessions = db.list_sessions_rich(
-                source=args.source, exclude_sources=_exclude, limit=args.limit
+                source=args.source, exclude_sources=_exclude, limit=args.limit,
+                workspace=_workspace,
             )
             if not sessions:
                 print("No sessions found.")
                 return
+            from hermes_state import workspace_key as _ws_key
             has_titles = any(s.get("title") for s in sessions)
+            # Short workspace label: repo basename (from remote or cwd), so the
+            # column stays narrow. Falls back to "—" for unbound sessions.
+            def _ws_label(s):
+                key = _ws_key(s)
+                if not key:
+                    return "—"
+                base = key.rstrip("/").rsplit("/", 1)[-1]
+                br = s.get("git_branch")
+                return f"{base}@{br}" if br else base
+            has_ws = any(_ws_key(s) for s in sessions)
             if has_titles:
-                print(f"{'Title':<32} {'Preview':<40} {'Last Active':<13} {'ID'}")
-                print("─" * 110)
+                if has_ws:
+                    print(f"{'Title':<26} {'Workspace':<22} {'Last Active':<13} {'ID'}")
+                    print("─" * 110)
+                else:
+                    print(f"{'Title':<32} {'Preview':<40} {'Last Active':<13} {'ID'}")
+                    print("─" * 110)
             else:
-                print(f"{'Preview':<50} {'Last Active':<13} {'Src':<6} {'ID'}")
-                print("─" * 95)
+                if has_ws:
+                    print(f"{'Preview':<40} {'Workspace':<22} {'Last Active':<13} {'ID'}")
+                    print("─" * 100)
+                else:
+                    print(f"{'Preview':<50} {'Last Active':<13} {'Src':<6} {'ID'}")
+                    print("─" * 95)
             for s in sessions:
                 last_active = _relative_time(s.get("last_active"))
-                preview = (
-                    s.get("preview", "")[:38]
-                    if has_titles
-                    else s.get("preview", "")[:48]
-                )
+                sid = s["id"]
                 if has_titles:
-                    title = (s.get("title") or "—")[:30]
-                    sid = s["id"]
-                    print(f"{title:<32} {preview:<40} {last_active:<13} {sid}")
+                    if has_ws:
+                        title = (s.get("title") or "—")[:24]
+                        ws = _ws_label(s)[:20]
+                        print(f"{title:<26} {ws:<22} {last_active:<13} {sid}")
+                    else:
+                        title = (s.get("title") or "—")[:30]
+                        preview = s.get("preview", "")[:38]
+                        print(f"{title:<32} {preview:<40} {last_active:<13} {sid}")
                 else:
-                    sid = s["id"]
-                    print(f"{preview:<50} {last_active:<13} {s['source']:<6} {sid}")
+                    if has_ws:
+                        preview = s.get("preview", "")[:38]
+                        ws = _ws_label(s)[:20]
+                        print(f"{preview:<40} {ws:<22} {last_active:<13} {sid}")
+                    else:
+                        preview = s.get("preview", "")[:48]
+                        print(f"{preview:<50} {last_active:<13} {s['source']:<6} {sid}")
 
         elif action == "export":
             if args.session_id:

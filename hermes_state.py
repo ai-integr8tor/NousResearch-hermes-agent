@@ -29,6 +29,76 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar
 
 logger = logging.getLogger(__name__)
 
+
+def _git_value(cwd: str, args: list) -> Optional[str]:
+    """Run a git command in ``cwd`` and return stripped stdout, or None.
+
+    Best-effort and never fatal: any failure (not a repo, git missing, detached
+    HEAD, timeout) yields None so session creation can't be broken by git.
+    """
+    if not cwd:
+        return None
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(cwd), *args],
+            capture_output=True, text=True, timeout=3,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    val = (out.stdout or "").strip()
+    return val or None
+
+
+def _normalize_git_remote(url: Optional[str]) -> Optional[str]:
+    """Normalize an origin URL into a stable host/owner/repo key.
+
+    Strips credentials, scheme, and the trailing .git so HTTPS and SSH clones of
+    the same repo collapse to one workspace key
+    (e.g. ``github.com/owner/repo``). Returns None when there's no remote.
+    """
+    if not url:
+        return None
+    u = url.strip()
+    # scp-style: git@host:owner/repo.git -> host/owner/repo
+    m = re.match(r"^[^@]+@([^:]+):(.+)$", u)
+    if m:
+        u = f"{m.group(1)}/{m.group(2)}"
+    else:
+        u = re.sub(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", "", u)  # drop scheme
+        u = re.sub(r"^[^@/]+@", "", u)  # drop user[:pass]@
+    u = re.sub(r"\.git/?$", "", u)
+    return u.strip("/") or None
+
+
+def _detect_git_remote(cwd: str) -> Optional[str]:
+    """Normalized origin remote for ``cwd``'s repo, or None (best-effort)."""
+    return _normalize_git_remote(_git_value(cwd, ["remote", "get-url", "origin"]))
+
+
+def _detect_git_branch(cwd: str) -> Optional[str]:
+    """Current branch for ``cwd``'s repo, or None (best-effort)."""
+    return _git_value(cwd, ["rev-parse", "--abbrev-ref", "HEAD"])
+
+
+def workspace_key(row: Dict[str, Any]) -> Optional[str]:
+    """Derive a session's workspace grouping key from a rich row.
+
+    The key is the git remote when present (so the same repo cloned to
+    different paths groups together), else the cwd (so non-git project dirs
+    still group). Branch is deliberately NOT part of the key — it's a
+    per-session attribute, so checking out a new branch doesn't fragment a
+    workspace's session history. Returns None when neither is recorded
+    (pre-existing/unbound sessions).
+    """
+    remote = row.get("git_remote")
+    if remote:
+        return str(remote)
+    cwd = row.get("cwd")
+    return str(cwd) if cwd else None
+
 def _delegate_from_json(col: str = "model_config") -> str:
     return f"json_extract(COALESCE({col}, '{{}}'), '$._delegate_from')"
 
@@ -539,6 +609,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     cache_write_tokens INTEGER DEFAULT 0,
     reasoning_tokens INTEGER DEFAULT 0,
     cwd TEXT,
+    git_remote TEXT,
+    git_branch TEXT,
     billing_provider TEXT,
     billing_base_url TEXT,
     billing_mode TEXT,
@@ -1355,13 +1427,15 @@ class SessionDB:
         user_id: str = None,
         parent_session_id: str = None,
         cwd: str = None,
+        git_remote: str = None,
+        git_branch: str = None,
     ) -> None:
         """Shared INSERT OR IGNORE for session rows."""
         def _do(conn):
             conn.execute(
                 """INSERT OR IGNORE INTO sessions (id, source, user_id, model, model_config,
-                   system_prompt, parent_session_id, cwd, started_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   system_prompt, parent_session_id, cwd, git_remote, git_branch, started_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     session_id,
                     source,
@@ -1371,13 +1445,31 @@ class SessionDB:
                     system_prompt,
                     parent_session_id,
                     cwd,
+                    git_remote,
+                    git_branch,
                     time.time(),
                 ),
             )
         self._execute_write(_do)
 
     def create_session(self, session_id: str, source: str, **kwargs) -> str:
-        """Create a new session record. Returns the session_id."""
+        """Create a new session record. Returns the session_id.
+
+        When a ``cwd`` is supplied and ``git_remote``/``git_branch`` are not
+        explicitly passed, they are auto-derived from that directory's git repo
+        (best-effort, never fatal). This is the session<->workspace binding:
+        the grouping key is ``(cwd, git_remote)`` and the branch is recorded as
+        a per-session attribute (see ``workspace_key``). Auto-derivation is
+        skipped for child sessions (subagents/compression) so worktree byproduct
+        doesn't get its own workspace identity.
+        """
+        cwd = kwargs.get("cwd")
+        is_child = bool(kwargs.get("parent_session_id"))
+        if cwd and not is_child:
+            if kwargs.get("git_remote") is None:
+                kwargs["git_remote"] = _detect_git_remote(cwd)
+            if kwargs.get("git_branch") is None:
+                kwargs["git_branch"] = _detect_git_branch(cwd)
         self._insert_session_row(session_id, source, **kwargs)
         return session_id
     def end_session(self, session_id: str, end_reason: str) -> None:
@@ -2115,6 +2207,7 @@ class SessionDB:
         include_archived: bool = False,
         archived_only: bool = False,
         id_query: str = None,
+        workspace: str = None,
     ) -> List[Dict[str, Any]]:
         """List sessions with preview (first user message) and last active timestamp.
 
@@ -2167,6 +2260,17 @@ class SessionDB:
         if source:
             where_clauses.append("s.source = ?")
             params.append(source)
+        if workspace:
+            # Match the workspace grouping key: a session belongs to <workspace>
+            # if its normalized git_remote equals it (or contains it, so
+            # "owner/repo" matches "github.com/owner/repo"), or — for non-git
+            # dirs — its cwd equals it.
+            where_clauses.append(
+                "(s.git_remote = ? OR s.git_remote LIKE ? ESCAPE '\\' OR s.cwd = ?)"
+            )
+            ws = str(workspace)
+            like = "%" + ws.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            params.extend([ws, like, ws])
         if exclude_sources:
             placeholders = ",".join("?" for _ in exclude_sources)
             where_clauses.append(f"s.source NOT IN ({placeholders})")

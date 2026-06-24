@@ -165,6 +165,12 @@ def build_top_level_parser():
         default=False,
         help="Run in an isolated git worktree (for parallel agents)",
     )
+    parser.add_argument(
+        "--no-restore-cwd",
+        action="store_true",
+        default=False,
+        help="Do not cd into a resumed session's recorded working directory.",
+    )
     _inherited_flag(
         parser,
         "--accept-hooks",
@@ -320,6 +326,12 @@ def build_top_level_parser():
         action="store_true",
         default=argparse.SUPPRESS,
         help="Run in an isolated git worktree (for parallel agents on the same repo)",
+    )
+    chat_parser.add_argument(
+        "--no-restore-cwd",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Do not cd into a resumed session's recorded working directory.",
     )
     _inherited_flag(
         chat_parser,
