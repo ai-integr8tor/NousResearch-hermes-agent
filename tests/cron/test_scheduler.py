@@ -3486,3 +3486,119 @@ class TestHomeTargetEnvVarRegistry:
         from cron.scheduler import _HOME_TARGET_ENV_VARS
 
         assert _HOME_TARGET_ENV_VARS.get("whatsapp") == "WHATSAPP_HOME_CHANNEL"
+
+
+class TestFallbackProviderModel:
+    """Regression: fallback_providers entry with a model field must override
+    the primary model. Without this, the fallback provider receives the primary
+    model id, which may cost more or outright fail. (#47781)"""
+
+    def test_fallback_model_override_applied(self, tmp_path):
+        job = {
+            "id": "fb-model-job",
+            "name": "fb test",
+            "prompt": "hello",
+            "provider": "openai-codex",
+        }
+        fake_db = MagicMock()
+        fallback_hit = {"provider": "openrouter", "model": "deepseek/deepseek-v3.2"}
+
+        # First call raises AuthError (primary fails); second call succeeds.
+        def _resolve_side_effect(*, requested, explicit_base_url=None, explicit_api_key=None):
+            if requested == "openai-codex":
+                from hermes_cli.auth import AuthError
+                raise AuthError("Codex auth is missing access_token.")
+            return {
+                "api_key": "fallback-key",
+                "base_url": "https://openrouter.ai/api/v1",
+                "provider": "openrouter",
+                "api_mode": "chat_completions",
+            }
+
+        # Config with fallback_providers containing a model override
+        config = {
+            "model": {"default": "gpt-5.5", "provider": "openai-codex"},
+            "fallback_providers": [
+                {"provider": "openrouter", "model": "deepseek/deepseek-v3.2"},
+            ],
+        }
+
+        with patch("cron.scheduler._hermes_home", tmp_path), \
+             patch("cron.scheduler._resolve_origin", return_value=None), \
+             patch("dotenv.load_dotenv"), \
+             patch("hermes_state.SessionDB", return_value=fake_db), \
+             patch(
+                 "hermes_cli.runtime_provider.resolve_runtime_provider",
+                 side_effect=_resolve_side_effect,
+             ) as resolve_mock, \
+             patch("run_agent.AIAgent") as mock_agent_cls:
+            mock_agent = MagicMock()
+            mock_agent.run_conversation.return_value = {"final_response": "ok"}
+            mock_agent_cls.return_value = mock_agent
+
+            import yaml
+            config_path = tmp_path / "config.yaml"
+            with open(config_path, "w") as f:
+                yaml.dump(config, f)
+
+            success, output, final_response, error = run_job(job)
+
+        assert success is True
+        assert error is None
+        kwargs = mock_agent_cls.call_args.kwargs
+        assert kwargs["model"] == "deepseek/deepseek-v3.2"
+        assert kwargs["provider"] == "openrouter"
+        # Assert resolve_runtime_provider was called twice:
+        # once for primary, once for fallback
+        assert resolve_mock.call_count == 2
+
+    def test_fallback_without_model_keeps_primary_model(self, tmp_path):
+        job = {
+            "id": "fb-no-model-job",
+            "name": "fb no model",
+            "prompt": "hello",
+        }
+        fake_db = MagicMock()
+
+        def _resolve_side_effect(*, requested, explicit_base_url=None, explicit_api_key=None):
+            if requested == "openai-codex":
+                from hermes_cli.auth import AuthError
+                raise AuthError("Codex auth is missing access_token.")
+            return {
+                "api_key": "fallback-key",
+                "base_url": "https://openrouter.ai/api/v1",
+                "provider": "openrouter",
+                "api_mode": "chat_completions",
+            }
+
+        config = {
+            "model": {"default": "gpt-5.5", "provider": "openai-codex"},
+            "fallback_providers": [
+                {"provider": "openrouter"},  # no model field
+            ],
+        }
+
+        with patch("cron.scheduler._hermes_home", tmp_path), \
+             patch("cron.scheduler._resolve_origin", return_value=None), \
+             patch("dotenv.load_dotenv"), \
+             patch("hermes_state.SessionDB", return_value=fake_db), \
+             patch(
+                 "hermes_cli.runtime_provider.resolve_runtime_provider",
+                 side_effect=_resolve_side_effect,
+             ), \
+             patch("run_agent.AIAgent") as mock_agent_cls:
+            mock_agent = MagicMock()
+            mock_agent.run_conversation.return_value = {"final_response": "ok"}
+            mock_agent_cls.return_value = mock_agent
+
+            import yaml
+            config_path = tmp_path / "config.yaml"
+            with open(config_path, "w") as f:
+                yaml.dump(config, f)
+
+            success, output, final_response, error = run_job(job)
+
+        assert success is True
+        kwargs = mock_agent_cls.call_args.kwargs
+        # When no fallback model is specified, the primary model remains
+        assert kwargs["model"] == "gpt-5.5"

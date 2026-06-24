@@ -1999,6 +1999,13 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
                         fb_kwargs["explicit_api_key"] = entry["api_key"]
                     runtime = resolve_runtime_provider(**fb_kwargs)
                     logger.info("Job '%s': fallback resolved to %s", job_id, runtime.get("provider"))
+                    # Apply fallback model if specified in the fallback entry
+                    # so the agent uses the right model for the fallback provider.
+                    # Without this, the primary model is sent to the fallback provider,
+                    # which may cost more or outright fail. (#47781)
+                    if entry.get("model"):
+                        model = entry["model"]
+                        logger.info("Job '%s': fallback model set to %s", job_id, model)
                     break
                 except Exception as fb_exc:
                     logger.debug("Job '%s': fallback %s failed: %s", job_id, entry.get("provider"), fb_exc)
