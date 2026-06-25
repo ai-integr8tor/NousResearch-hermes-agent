@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { $uiState, resetUiState } from '../app/uiStore.js'
 import {
@@ -9,7 +9,6 @@ import {
   normalizeMouseTracking,
   normalizeStatusBar
 } from '../app/useConfigSync.js'
-import type { ParsedVoiceRecordKey } from '../lib/platform.js'
 
 describe('applyDisplay', () => {
   beforeEach(() => {
@@ -71,6 +70,20 @@ describe('applyDisplay', () => {
     expect(s.statusBar).toBe('top')
     expect(s.streaming).toBe(true)
     expect(s.sections).toEqual({})
+    expect(s.copyOnSelect).toBe(true)
+  })
+
+  it('keeps macOS copy-on-select enabled unless explicitly disabled', () => {
+    const setBell = vi.fn()
+
+    applyDisplay({ config: { display: { copy_on_select: false } } }, setBell)
+    expect($uiState.get().copyOnSelect).toBe(false)
+
+    applyDisplay({ config: { display: { copy_on_select: true } } }, setBell)
+    expect($uiState.get().copyOnSelect).toBe(true)
+
+    applyDisplay({ config: { display: {} } }, setBell)
+    expect($uiState.get().copyOnSelect).toBe(true)
   })
 
   it('uses documented mouse_tracking with legacy tui_mouse fallback', () => {

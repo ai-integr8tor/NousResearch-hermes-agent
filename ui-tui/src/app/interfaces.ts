@@ -161,6 +161,7 @@ export interface UiState {
   busy: boolean
   busyInputMode: BusyInputMode
   compact: boolean
+  copyOnSelect: boolean
   detailsMode: DetailsMode
   detailsModeCommandOverride: boolean
   info: null | SessionInfo
