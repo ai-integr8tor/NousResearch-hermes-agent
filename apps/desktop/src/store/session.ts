@@ -10,12 +10,22 @@ import type { SessionInfo, UsageStats } from '@/types/hermes'
 type Updater<T> = T | ((current: T) => T)
 
 const WORKSPACE_CWD_KEY = 'hermes.desktop.workspace-cwd'
+const LEGACY_WORKSPACE_CWD_KEY = WORKSPACE_CWD_KEY
+
+// Which profile's workspace localStorage row we read/write. Updated on profile
+// switch before fresh-session drafts so Cmd+N and new chats stay scoped.
+export const $workspaceProfileKey = atom('default')
+
+export function setWorkspaceProfileContext(name: string | null | undefined): void {
+  const value = (name ?? '').trim() || 'default'
+  $workspaceProfileKey.set(value)
+}
 
 // The composer's model/effort/fast is sticky UI state, NOT the profile default
 // (that lives in Settings → Model). Persisting it in localStorage makes a pick
 // follow across Cmd+N and app restarts instead of snapping back to the default.
-// It's deliberately global (not per-profile): a profile switch force-reseeds to
-// that profile's default, while within a profile new chats keep your last pick.
+// Workspace cwd IS per-profile (local + remote): switching profiles restores that
+// profile's last folder, or terminal.cwd from its config when none is remembered.
 const COMPOSER_MODEL_KEY = 'hermes.desktop.composer.model'
 const COMPOSER_PROVIDER_KEY = 'hermes.desktop.composer.provider'
 const COMPOSER_EFFORT_KEY = 'hermes.desktop.composer.reasoning-effort'
@@ -24,16 +34,40 @@ const COMPOSER_FAST_KEY = 'hermes.desktop.composer.fast'
 let configuredDefaultProjectDir = ''
 
 function workspaceCwdKey(connection: HermesConnection | null = $connection.get()): string {
+  const profile = encodeURIComponent($workspaceProfileKey.get())
+
   if (connection?.mode !== 'remote') {
-    return WORKSPACE_CWD_KEY
+    return `${WORKSPACE_CWD_KEY}.local.${profile}`
   }
 
   const base = encodeURIComponent(connection.baseUrl || 'remote')
-  const profile = encodeURIComponent(connection.profile || 'default')
+
   return `${WORKSPACE_CWD_KEY}.remote.${base}.${profile}`
 }
 
-export const getRememberedWorkspaceCwd = (): string => storedString(workspaceCwdKey())?.trim() || ''
+function readRememberedWorkspaceCwd(connection: HermesConnection | null = $connection.get()): string {
+  const key = workspaceCwdKey(connection)
+  const scoped = storedString(key)?.trim()
+
+  if (scoped) {
+    return scoped
+  }
+
+  // Migrate the pre-per-profile single key into the default profile slot once.
+  if (connection?.mode !== 'remote' && $workspaceProfileKey.get() === 'default') {
+    const legacy = storedString(LEGACY_WORKSPACE_CWD_KEY)?.trim()
+
+    if (legacy) {
+      persistString(key, legacy)
+
+      return legacy
+    }
+  }
+
+  return ''
+}
+
+export const getRememberedWorkspaceCwd = (): string => readRememberedWorkspaceCwd()
 
 export const getConfiguredDefaultProjectDir = (): string => configuredDefaultProjectDir
 
@@ -319,6 +353,57 @@ export const workspaceCwdForNewSession = (): string => {
   }
 
   return getConfiguredDefaultProjectDir() || getRememberedWorkspaceCwd() || $currentCwd.get().trim()
+}
+
+/** After the gateway swaps to a profile, seed the draft workspace from that
+ *  profile's remembered folder or its config `terminal.cwd`. */
+export async function applyWorkspaceForActiveProfile(
+  requestGateway: <T = unknown>(method: string, params?: Record<string, unknown>) => Promise<T>
+): Promise<void> {
+  if ($activeSessionId.get()) {
+    return
+  }
+
+  const remembered = getRememberedWorkspaceCwd()
+
+  if (remembered) {
+    setCurrentCwd(remembered)
+
+    try {
+      const info = await requestGateway<{ branch?: string; cwd?: string }>('config.get', {
+        key: 'project',
+        cwd: remembered
+      })
+
+      if (!$activeSessionId.get()) {
+        if (info.cwd) {
+          setCurrentCwd(info.cwd)
+        }
+
+        setCurrentBranch(info.branch || '')
+      }
+    } catch {
+      if (!$activeSessionId.get()) {
+        setCurrentBranch('')
+      }
+    }
+
+    return
+  }
+
+  try {
+    const info = await requestGateway<{ branch?: string; cwd?: string }>('config.get', {
+      key: 'project'
+    })
+
+    if (!$activeSessionId.get() && info.cwd?.trim()) {
+      setCurrentCwd(info.cwd.trim())
+      setCurrentBranch(info.branch || '')
+    }
+  } catch {
+    // Leave the prior draft cwd; session.create can omit cwd and let the gateway
+    // resolve from the bound profile when the user sends the first message.
+  }
 }
 
 export const setCurrentBranch = (next: Updater<string>) => updateAtom($currentBranch, next)

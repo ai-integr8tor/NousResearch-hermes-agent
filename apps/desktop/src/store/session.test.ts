@@ -10,11 +10,13 @@ import {
   $workingSessionIds,
   applyConfiguredDefaultProjectDir,
   getRecentlySettledSessionIds,
+  getRememberedWorkspaceCwd,
   mergeSessionPage,
   sessionPinId,
   setCurrentCwd,
   setSessionAttention,
   setSessionWorking,
+  setWorkspaceProfileContext,
   workspaceCwdForNewSession
 } from './session'
 
@@ -152,6 +154,7 @@ describe('mergeSessionPage', () => {
       session({ id: 'tip-4', _lineage_root_id: 'root' }),
       session({ id: 'other' }),
     ] as SessionInfo[]
+
     const incoming = [
       session({ id: 'tip-5', _lineage_root_id: 'root' }),
     ] as SessionInfo[]
@@ -173,6 +176,7 @@ describe('mergeSessionPage', () => {
       session({ id: 'a-old', _lineage_root_id: 'lineage-a' }),
       session({ id: 'b', _lineage_root_id: 'lineage-b' }),
     ] as SessionInfo[]
+
     const incoming = [
       session({ id: 'a-new', _lineage_root_id: 'lineage-a' }),
     ] as SessionInfo[]
@@ -189,22 +193,41 @@ describe('workspaceCwdForNewSession', () => {
     $connection.set(null)
     $currentCwd.set('')
     $activeSessionId.set(null)
-    window.localStorage.removeItem('hermes.desktop.workspace-cwd')
-    window.localStorage.removeItem('hermes.desktop.workspace-cwd.remote.http%3A%2F%2Fbackend-a.default')
-    window.localStorage.removeItem('hermes.desktop.workspace-cwd.remote.http%3A%2F%2Fbackend-b.default')
+    setWorkspaceProfileContext('default')
+
+    for (let i = window.localStorage.length - 1; i >= 0; i -= 1) {
+      const key = window.localStorage.key(i)
+
+      if (key?.startsWith('hermes.desktop.workspace-cwd')) {
+        window.localStorage.removeItem(key)
+      }
+    }
   })
 
-  it('prefers the configured default over the sticky remembered workspace', () => {
-    window.localStorage.setItem('hermes.desktop.workspace-cwd', '/home/user/sticky')
+  it('prefers the configured default over the remembered workspace', () => {
+    setCurrentCwd('/home/user/sticky')
     applyConfiguredDefaultProjectDir('/home/user/configured')
 
     expect(workspaceCwdForNewSession()).toBe('/home/user/configured')
   })
 
   it('falls back to the remembered workspace when no configured default is set', () => {
-    window.localStorage.setItem('hermes.desktop.workspace-cwd', '/home/user/sticky')
+    setCurrentCwd('/home/user/sticky')
 
     expect(workspaceCwdForNewSession()).toBe('/home/user/sticky')
+  })
+
+  it('isolates remembered workspace across workspace profile context changes', () => {
+    setWorkspaceProfileContext('ctx-one')
+    setCurrentCwd('/tmp/ws-one')
+    setWorkspaceProfileContext('ctx-two')
+    setCurrentCwd('/tmp/ws-two')
+
+    setWorkspaceProfileContext('ctx-one')
+    expect(getRememberedWorkspaceCwd()).toBe('/tmp/ws-one')
+
+    setWorkspaceProfileContext('ctx-two')
+    expect(getRememberedWorkspaceCwd()).toBe('/tmp/ws-two')
   })
 
   it('falls back to the live cwd when neither configured nor remembered values exist', () => {
@@ -223,7 +246,7 @@ describe('workspaceCwdForNewSession', () => {
   })
 
   it('keeps remote workspace memory separate from local and other remotes', () => {
-    window.localStorage.setItem('hermes.desktop.workspace-cwd', '/local/project')
+    window.localStorage.setItem('hermes.desktop.workspace-cwd.local.default', '/local/project')
     $currentCwd.set('/live/session/path')
     $connection.set({ baseUrl: 'http://backend-a', mode: 'remote' } as never)
 

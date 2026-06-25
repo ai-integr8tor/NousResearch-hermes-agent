@@ -12,7 +12,7 @@ import {
   storedStringRecord
 } from '@/lib/storage'
 import { $gateway, ensureGatewayForProfile } from '@/store/gateway'
-import { setConnection } from '@/store/session'
+import { setConnection, setWorkspaceProfileContext } from '@/store/session'
 import type { ProfileInfo } from '@/types/hermes'
 
 // Canonical key for a profile: trimmed, empty → "default". Used everywhere we
@@ -244,6 +244,7 @@ export async function ensureGatewayProfile(profile: string | null | undefined): 
     // ensureGatewayForProfile opens (or reuses) the target's socket and points
     // the active gateway at it — without closing the profile you came from.
     await ensureGatewayForProfile(target)
+    setWorkspaceProfileContext(target)
     $activeGatewayProfile.set(target)
     // The active backend just changed; resync $connection so remote-aware
     // paths (image.attach_bytes vs image.attach, /api/fs/*, /api/media) follow.
@@ -288,6 +289,7 @@ export const $profileScope = computed([$showAllProfiles, $activeGatewayProfile],
 // $activeGatewayProfile → name, so $profileScope follows).
 export function selectProfile(name: string): void {
   const target = normalizeProfileKey(name)
+  setWorkspaceProfileContext(target)
   // Switching profiles (or coming back from the all-profiles browse view) starts
   // fresh; re-tapping the profile you're already in leaves your session be.
   const switching = $showAllProfiles.get() || target !== normalizeProfileKey($activeGatewayProfile.get())
@@ -309,6 +311,7 @@ export function selectProfile(name: string): void {
 // message lands in the right place.
 export function newSessionInProfile(name: string): void {
   const target = normalizeProfileKey(name)
+  setWorkspaceProfileContext(target)
   $newChatProfile.set(target)
   requestFreshSession()
   void ensureGatewayProfile(target)
