@@ -1,6 +1,15 @@
 import { describe, expect, it } from 'vitest'
 
-import { currentPickerSelection, displayModelName, formatModelStatusLabel, reasoningEffortLabel } from './model-status-label'
+import {
+  currentPickerSelection,
+  displayModelName,
+  formatModelPillLabel,
+  formatReasoningPillLabel,
+  isThinkingEnabled,
+  normalizeReasoningEffort,
+  REASONING_EFFORT_OPTIONS,
+  reasoningEffortLabel
+} from './model-status-label'
 
 describe('model-status-label', () => {
   it('formats display names consistently', () => {
@@ -21,19 +30,48 @@ describe('model-status-label', () => {
     expect(reasoningEffortLabel('')).toBe('')
   })
 
-  it('appends fast + effort session state to the status label', () => {
-    expect(formatModelStatusLabel('openai/gpt-5.5', { fastMode: true, reasoningEffort: 'high' })).toBe(
-      'GPT-5.5 · Fast High'
-    )
+  it('exposes the full effort options list for the picker radio group', () => {
+    expect(REASONING_EFFORT_OPTIONS.map(option => option.value)).toEqual([
+      'minimal',
+      'low',
+      'medium',
+      'high',
+      'xhigh'
+    ])
   })
 
-  it('always surfaces the effort (default medium) so the level is visible', () => {
-    expect(formatModelStatusLabel('openai/gpt-5.5', { reasoningEffort: 'medium' })).toBe('GPT-5.5 · Med')
-    expect(formatModelStatusLabel('openai/gpt-5.5')).toBe('GPT-5.5 · Med')
+  it('treats empty effort as thinking-on (Hermes default) and only none as off', () => {
+    expect(isThinkingEnabled('')).toBe(true)
+    expect(isThinkingEnabled('medium')).toBe(true)
+    expect(isThinkingEnabled('none')).toBe(false)
   })
 
-  it('returns just the placeholder name when there is no model', () => {
-    expect(formatModelStatusLabel('')).toBe('No model')
+  it('normalizes effort to a valid radio value, with "none" → "" and unknown → medium', () => {
+    expect(normalizeReasoningEffort('high')).toBe('high')
+    expect(normalizeReasoningEffort('none')).toBe('')
+    expect(normalizeReasoningEffort('gibberish')).toBe('medium')
+    expect(normalizeReasoningEffort('')).toBe('medium')
+  })
+
+  it('formats the model pill as just the name (no effort suffix)', () => {
+    expect(formatModelPillLabel('openai/gpt-5.5', { fastMode: true })).toBe('GPT-5.5 · Fast')
+    expect(formatModelPillLabel('openai/gpt-5.5')).toBe('GPT-5.5')
+  })
+
+  it('appends · Fast to the model pill when the active variant is a `-fast` sibling', () => {
+    expect(formatModelPillLabel('openai/gpt-5.5-fast')).toBe('GPT-5.5 · Fast')
+  })
+
+  it('returns just the placeholder name when the model is empty', () => {
+    expect(formatModelPillLabel('')).toBe('No model')
+    expect(formatModelPillLabel('   ')).toBe('No model')
+  })
+
+  it('formats the reasoning pill label, falling back to Med for empty effort', () => {
+    expect(formatReasoningPillLabel('high')).toBe('High')
+    expect(formatReasoningPillLabel('xhigh')).toBe('Max')
+    expect(formatReasoningPillLabel('none')).toBe('Off')
+    expect(formatReasoningPillLabel('')).toBe('Med')
   })
 
   describe('currentPickerSelection', () => {
