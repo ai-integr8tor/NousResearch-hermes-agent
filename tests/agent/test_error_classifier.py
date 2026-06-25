@@ -675,6 +675,85 @@ class TestClassifyApiError:
         assert result.reason == FailoverReason.context_overflow
         assert result.should_compress is True
 
+    def test_streaming_process_memory_limit_exceeded_is_overloaded_not_billing(self):
+        # Status-LESS streaming abort (oMLX emits this on the streaming path
+        # under memory pressure).  "process memory limit exceeded" contains the
+        # substring "limit exceeded", a _USAGE_LIMIT_PATTERN — so before the
+        # memory guard was moved ahead of the billing/usage checks in
+        # _classify_by_message, this misclassified as BILLING (retryable=False,
+        # rotate-credential), a different wrong bucket than context_overflow.
+        e = Exception(
+            "Request aborted: process memory limit exceeded (usage 13.7 GB, "
+            "ceiling 13.5 GB). Reduce context size or lower memory_guard_tier."
+        )
+        result = classify_api_error(
+            e, provider="custom", model="omlx-chat",
+            approx_tokens=5745, context_length=64000,
+        )
+        assert result.reason == FailoverReason.overloaded
+        assert result.retryable is True
+        assert result.should_compress is False
+        # Must NOT be routed into credential rotation like a billing error.
+        assert result.should_rotate_credential is False
+
+    def test_400_prefill_memory_code_reworded_message_is_overloaded(self):
+        # Direct (non-proxied) connection: the message is reworded with NO
+        # memory substring, but the structured body carries the unambiguous
+        # ``code: "prefill_memory_exceeded"`` (+ limit_bytes in *bytes*).
+        # Without the error-code guard this fell through to a non-retryable
+        # ``format_error`` (no overflow wording to catch it either).
+        body = {"error": {
+            "message": "Prompt rejected by the prefill guard. Try a smaller request.",
+            "type": "invalid_request_error",
+            "code": "prefill_memory_exceeded",
+            "omlx_code": "prefill_memory_exceeded",
+            "limit_bytes": 14495514624,
+        }, "type": "error"}
+        e = MockAPIError(
+            "Prompt rejected by the prefill guard. Try a smaller request.",
+            status_code=400, body=body,
+        )
+        result = classify_api_error(
+            e, provider="custom", model="omlx-chat",
+            approx_tokens=5700, context_length=64000,
+        )
+        assert result.reason == FailoverReason.overloaded
+        assert result.retryable is True
+        assert result.should_compress is False
+
+    def test_no_status_prefill_memory_code_is_overloaded(self):
+        # Streaming / no-status path carrying only the structured code (message
+        # fully reworded).  Previously fell to the retryable ``unknown`` bucket;
+        # the _classify_by_error_code memory-code guard now catches it.
+        body = {"error": {
+            "message": "Prompt rejected by the prefill guard. Try a smaller request.",
+            "code": "prefill_memory_exceeded",
+            "limit_bytes": 14495514624,
+        }, "type": "error"}
+        e = MockAPIError(
+            "Prompt rejected by the prefill guard. Try a smaller request.",
+            status_code=None, body=body,
+        )
+        result = classify_api_error(
+            e, provider="custom", model="omlx-chat",
+            approx_tokens=5700, context_length=64000,
+        )
+        assert result.reason == FailoverReason.overloaded
+        assert result.retryable is True
+        assert result.should_compress is False
+
+    def test_genuine_billing_credit_limit_still_billing(self):
+        # NEGATIVE/invariant guard: a real billing exhaustion message must STILL
+        # classify as billing — proves the memory-guard reorder in
+        # _classify_by_message did not swallow legitimate billing errors.
+        e = Exception("Your account has insufficient credits to complete this request.")
+        result = classify_api_error(
+            e, provider="openrouter", model="x",
+            approx_tokens=5000, context_length=64000,
+        )
+        assert result.reason == FailoverReason.billing
+        assert result.retryable is False
+
     # ── Server disconnect + large session ──
 
     def test_disconnect_large_session_context_overflow(self):
