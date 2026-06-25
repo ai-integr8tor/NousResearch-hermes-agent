@@ -270,6 +270,31 @@ _REQUEST_VALIDATION_PATTERNS = [
     "unsupported_parameter",
 ]
 
+# Local-inference memory/resource-ceiling rejections (oMLX / MLX memory guard,
+# llama.cpp/vLLM OOM, Metal/CUDA allocation ceilings).  The server aborts on a
+# GPU/unified-memory PREFILL peak — NOT a context-window limit — yet the
+# rejection text often suggests "reduce context length" / "reduce context size"
+# as a remediation hint, which collides with _CONTEXT_OVERFLOW_PATTERNS.
+# Compressing conversation history cannot lower a prefill memory peak (the
+# conversation is typically far below the window), so routing these into the
+# compress-and-shrink loop burns max_compression_attempts, re-hits the wedged
+# server with each compression call, and ends in "Cannot compress further" →
+# destructive session reset.  These tokens reference memory/allocation/ceiling/
+# guard wording exclusively (never a token or window count), so they are
+# disjoint from genuine context-window-overflow language.  Must be checked
+# BEFORE context_overflow at every classification site.  See issue #52261.
+_MEMORY_CEILING_PATTERNS = [
+    "memory guard",                      # "prefill memory guard rejected"
+    "memory limit exceeded",             # "process memory limit exceeded"
+    "memory_guard_tier",                 # "lower memory_guard_tier"
+    "dynamic ceiling",                   # "dynamic ceiling is 13.50 GB"
+    "memory ceiling",
+    "available memory",                  # "too large for available memory"
+    "out of memory",
+    "insufficient memory",
+    "prefill would require",             # "Prefill would require ~13.87 GB peak"
+]
+
 # OpenRouter aggregator policy-block patterns.
 #
 # When a user's OpenRouter account privacy setting (or a per-request
@@ -1012,6 +1037,20 @@ def _classify_400(
             should_fallback=True,
         )
 
+    # Local-inference memory/resource-ceiling rejection (oMLX/MLX memory guard,
+    # OOM).  Checked BEFORE context_overflow: the prompt is often tiny and the
+    # remediation hint ("reduce context length"/"reduce context size") collides
+    # with the overflow patterns, but compressing history cannot relieve a
+    # prefill memory peak — routing it into compression wedges the session into
+    # a "Cannot compress further" reset loop.  Treat as a transient server-side
+    # capacity condition: retry with backoff, NO compression, NO session reset
+    # (mirrors the 503/529 ``overloaded`` recovery).  See issue #52261.
+    if any(p in error_msg for p in _MEMORY_CEILING_PATTERNS):
+        return result_fn(
+            FailoverReason.overloaded,
+            retryable=True,
+        )
+
     # Context overflow from 400
     if any(p in error_msg for p in _CONTEXT_OVERFLOW_PATTERNS):
         return result_fn(
@@ -1210,6 +1249,17 @@ def _classify_by_message(
             retryable=True,
             should_rotate_credential=True,
             should_fallback=True,
+        )
+
+    # Local-inference memory/resource-ceiling rejection without an HTTP status
+    # (streaming / no-status APIError, e.g. "Prefill context too large for
+    # available memory").  Checked BEFORE context_overflow for the same reason
+    # as in _classify_400: compressing history cannot relieve a prefill memory
+    # peak, so it must not enter the compress-and-shrink loop.  See issue #52261.
+    if any(p in error_msg for p in _MEMORY_CEILING_PATTERNS):
+        return result_fn(
+            FailoverReason.overloaded,
+            retryable=True,
         )
 
     # Context overflow patterns
