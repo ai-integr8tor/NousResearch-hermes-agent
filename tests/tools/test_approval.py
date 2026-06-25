@@ -1,6 +1,7 @@
 """Tests for the dangerous command approval module."""
 
 import ast
+import json
 import os
 import threading
 import time
@@ -1713,3 +1714,393 @@ class TestApprovalTimeoutIsNotConsent:
         assert last_post.get("choice") == "timeout", (
             f"hook choice should be 'timeout' on no-response, got {last_post.get('choice')!r}"
         )
+
+
+# ===========================================================================
+# Credential file read detection tests (#50734)
+# ===========================================================================
+class TestCredentialFileReadDetection:
+    """Tests for terminal command patterns that detect reading credential files.
+
+    Issue #50734: Agent used `cat ~/.hermes/.env` to exfiltrate all API keys
+    to the LLM provider. The read_file tool already blocks this via
+    get_read_block_error(), but the terminal tool had no equivalent guard.
+    These patterns detect common read commands targeting credential paths.
+    """
+
+    # -------------------------------------------------------------------------
+    # Hermes credential files under HERMES_HOME
+    # -------------------------------------------------------------------------
+    def test_cat_hermes_env_detected(self):
+        """cat ~/.hermes/.env should be detected."""
+        is_dangerous, key, desc = detect_dangerous_command("cat ~/.hermes/.env")
+        assert is_dangerous is True
+        assert "credential" in desc.lower() or "hermes" in desc.lower()
+
+    def test_cat_hermes_auth_json_detected(self):
+        """cat ~/.hermes/auth.json should be detected."""
+        is_dangerous, key, desc = detect_dangerous_command("cat ~/.hermes/auth.json")
+        assert is_dangerous is True
+        assert "credential" in desc.lower() or "hermes" in desc.lower()
+
+    def test_less_hermes_env_detected(self):
+        """less ~/.hermes/.env should be detected."""
+        is_dangerous, key, desc = detect_dangerous_command("less ~/.hermes/.env")
+        assert is_dangerous is True
+
+    def test_head_hermes_oauth_detected(self):
+        """head -n 10 ~/.hermes/auth/google_oauth.json should be detected."""
+        is_dangerous, key, desc = detect_dangerous_command("head -n 10 ~/.hermes/auth/google_oauth.json")
+        assert is_dangerous is True
+
+    def test_tail_hermes_mcp_token_detected(self):
+        """tail ~/.hermes/mcp-tokens/some_token.json should be detected."""
+        is_dangerous, key, desc = detect_dangerous_command("tail ~/.hermes/mcp-tokens/some_token.json")
+        assert is_dangerous is True
+
+    def test_cat_hermes_profile_env_detected(self):
+        """cat ~/.hermes/profiles/default/.env should be detected."""
+        is_dangerous, key, desc = detect_dangerous_command("cat ~/.hermes/profiles/default/.env")
+        assert is_dangerous is True
+
+    def test_cat_hermes_anthropic_oauth_detected(self):
+        """cat ~/.hermes/.anthropic_oauth.json should be detected."""
+        is_dangerous, key, desc = detect_dangerous_command("cat ~/.hermes/.anthropic_oauth.json")
+        assert is_dangerous is True
+
+    def test_cat_hermes_webhook_subscriptions_detected(self):
+        """cat ~/.hermes/webhook_subscriptions.json should be detected."""
+        is_dangerous, key, desc = detect_dangerous_command("cat ~/.hermes/webhook_subscriptions.json")
+        assert is_dangerous is True
+
+    def test_strings_hermes_env_detected(self):
+        """strings ~/.hermes/.env should be detected (binary analysis tool)."""
+        is_dangerous, key, desc = detect_dangerous_command("strings ~/.hermes/.env")
+        assert is_dangerous is True
+
+    def test_base64_hermes_env_detected(self):
+        """base64 ~/.hermes/.env should be detected (encoding exfiltration)."""
+        is_dangerous, key, desc = detect_dangerous_command("base64 ~/.hermes/.env")
+        assert is_dangerous is True
+
+    # -------------------------------------------------------------------------
+    # Project-local .env files anywhere on disk
+    # -------------------------------------------------------------------------
+    def test_cat_project_env_detected(self):
+        """cat .env should be detected."""
+        is_dangerous, key, desc = detect_dangerous_command("cat .env")
+        assert is_dangerous is True
+        assert "env" in desc.lower()
+
+    def test_cat_project_env_local_detected(self):
+        """cat .env.local should be detected."""
+        is_dangerous, key, desc = detect_dangerous_command("cat .env.local")
+        assert is_dangerous is True
+
+    def test_cat_project_env_production_detected(self):
+        """cat .env.production should be detected."""
+        is_dangerous, key, desc = detect_dangerous_command("cat .env.production")
+        assert is_dangerous is True
+
+    def test_cat_project_env_development_detected(self):
+        """cat .env.development should be detected."""
+        is_dangerous, key, desc = detect_dangerous_command("cat .env.development")
+        assert is_dangerous is True
+
+    def test_cat_project_env_test_detected(self):
+        """cat .env.test should be detected."""
+        is_dangerous, key, desc = detect_dangerous_command("cat .env.test")
+        assert is_dangerous is True
+
+    def test_cat_project_env_staging_detected(self):
+        """cat .env.staging should be detected."""
+        is_dangerous, key, desc = detect_dangerous_command("cat .env.staging")
+        assert is_dangerous is True
+
+    def test_cat_envrc_detected(self):
+        """cat .envrc should be detected (direnv credentials)."""
+        is_dangerous, key, desc = detect_dangerous_command("cat .envrc")
+        assert is_dangerous is True
+
+    def test_cat_absolute_project_env_detected(self):
+        """cat /path/to/project/.env should be detected."""
+        is_dangerous, key, desc = detect_dangerous_command("cat /path/to/project/.env")
+        assert is_dangerous is True
+
+    # -------------------------------------------------------------------------
+    # User credential files
+    # -------------------------------------------------------------------------
+    def test_cat_netrc_detected(self):
+        """cat ~/.netrc should be detected."""
+        is_dangerous, key, desc = detect_dangerous_command("cat ~/.netrc")
+        assert is_dangerous is True
+
+    def test_cat_pgpass_detected(self):
+        """cat ~/.pgpass should be detected."""
+        is_dangerous, key, desc = detect_dangerous_command("cat ~/.pgpass")
+        assert is_dangerous is True
+
+    def test_cat_npmrc_detected(self):
+        """cat ~/.npmrc should be detected."""
+        is_dangerous, key, desc = detect_dangerous_command("cat ~/.npmrc")
+        assert is_dangerous is True
+
+    def test_cat_pypirc_detected(self):
+        """cat ~/.pypirc should be detected."""
+        is_dangerous, key, desc = detect_dangerous_command("cat ~/.pypirc")
+        assert is_dangerous is True
+
+    # -------------------------------------------------------------------------
+    # SSH key files
+    # -------------------------------------------------------------------------
+    def test_cat_ssh_id_rsa_detected(self):
+        """cat ~/.ssh/id_rsa should be detected."""
+        is_dangerous, key, desc = detect_dangerous_command("cat ~/.ssh/id_rsa")
+        assert is_dangerous is True
+        assert "ssh" in desc.lower()
+
+    def test_cat_ssh_id_ed25519_detected(self):
+        """cat ~/.ssh/id_ed25519 should be detected."""
+        is_dangerous, key, desc = detect_dangerous_command("cat ~/.ssh/id_ed25519")
+        assert is_dangerous is True
+
+    # -------------------------------------------------------------------------
+    # Source commands (load credentials into shell environment)
+    # -------------------------------------------------------------------------
+    def test_source_env_detected(self):
+        """source .env should be detected."""
+        is_dangerous, key, desc = detect_dangerous_command("source .env")
+        assert is_dangerous is True
+        assert "source" in desc.lower() or "leak" in desc.lower()
+
+    def test_dot_source_env_detected(self):
+        """. .env should be detected."""
+        is_dangerous, key, desc = detect_dangerous_command(". .env")
+        assert is_dangerous is True
+
+    def test_source_hermes_env_detected(self):
+        """source ~/.hermes/.env should be detected."""
+        is_dangerous, key, desc = detect_dangerous_command("source ~/.hermes/.env")
+        assert is_dangerous is True
+
+    # -------------------------------------------------------------------------
+    # False positive checks - safe commands that should NOT be detected
+    # -------------------------------------------------------------------------
+    def test_cat_env_example_allowed(self):
+        """cat .env.example should NOT be detected (documentation file)."""
+        is_dangerous, key, desc = detect_dangerous_command("cat .env.example")
+        assert is_dangerous is False, f"False positive: .env.example should be safe, got: {desc}"
+
+    def test_cat_env_template_allowed(self):
+        """cat .env.template should NOT be detected (documentation file)."""
+        is_dangerous, key, desc = detect_dangerous_command("cat .env.template")
+        assert is_dangerous is False, f"False positive: .env.template should be safe, got: {desc}"
+
+    def test_cat_readme_allowed(self):
+        """cat README.md should NOT be detected."""
+        is_dangerous, key, desc = detect_dangerous_command("cat README.md")
+        assert is_dangerous is False
+
+    def test_grep_in_env_allowed(self):
+        """grep API_KEY .env should NOT be detected (not a direct read command)."""
+        is_dangerous, key, desc = detect_dangerous_command("grep API_KEY .env")
+        assert is_dangerous is False
+
+    def test_echo_allowed(self):
+        """echo hello should NOT be detected."""
+        is_dangerous, key, desc = detect_dangerous_command("echo hello")
+        assert is_dangerous is False
+
+    def test_ls_allowed(self):
+        """ls -la should NOT be detected."""
+        is_dangerous, key, desc = detect_dangerous_command("ls -la")
+        assert is_dangerous is False
+
+    def test_cat_hermes_config_allowed(self):
+        """cat ~/.hermes/config.yaml should NOT be detected (not a credential file)."""
+        is_dangerous, key, desc = detect_dangerous_command("cat ~/.hermes/config.yaml")
+        assert is_dangerous is False
+
+    def test_cat_ssh_config_allowed(self):
+        """cat ~/.ssh/config should NOT be detected (not a private key)."""
+        is_dangerous, key, desc = detect_dangerous_command("cat ~/.ssh/config")
+        assert is_dangerous is False
+
+    def test_cat_authorized_keys_allowed(self):
+        """cat ~/.ssh/authorized_keys should NOT be detected (public keys)."""
+        is_dangerous, key, desc = detect_dangerous_command("cat ~/.ssh/authorized_keys")
+        assert is_dangerous is False
+
+    # -------------------------------------------------------------------------
+    # Edge cases and bypass attempts
+    # -------------------------------------------------------------------------
+    def test_quoted_path_detected(self):
+        """cat "~/.hermes/.env" should be detected (quoted path)."""
+        is_dangerous, key, desc = detect_dangerous_command('cat "~/.hermes/.env"')
+        assert is_dangerous is True
+
+    def test_sudo_cat_hermes_env_detected(self):
+        """sudo cat ~/.hermes/.env should be detected."""
+        is_dangerous, key, desc = detect_dangerous_command("sudo cat ~/.hermes/.env")
+        assert is_dangerous is True
+
+    def test_env_wrapper_cat_detected(self):
+        """env cat ~/.hermes/.env should be detected."""
+        is_dangerous, key, desc = detect_dangerous_command("env cat ~/.hermes/.env")
+        assert is_dangerous is True
+
+    def test_cat_with_flags_detected(self):
+        """cat -n ~/.hermes/.env should be detected (with line numbers)."""
+        is_dangerous, key, desc = detect_dangerous_command("cat -n ~/.hermes/.env")
+        assert is_dangerous is True
+
+    def test_more_hermes_env_detected(self):
+        """more ~/.hermes/.env should be detected."""
+        is_dangerous, key, desc = detect_dangerous_command("more ~/.hermes/.env")
+        assert is_dangerous is True
+
+    def test_tac_hermes_env_detected(self):
+        """tac ~/.hermes/.env should be detected (reverse cat)."""
+        is_dangerous, key, desc = detect_dangerous_command("tac ~/.hermes/.env")
+        assert is_dangerous is True
+
+    def test_xxd_hermes_env_detected(self):
+        """xxd ~/.hermes/.env should be detected (hex dump)."""
+        is_dangerous, key, desc = detect_dangerous_command("xxd ~/.hermes/.env")
+        assert is_dangerous is True
+
+    # -------------------------------------------------------------------------
+    # Cloud provider credentials (#50734 follow-up)
+    # -------------------------------------------------------------------------
+    def test_cat_aws_credentials_detected(self):
+        """cat ~/.aws/credentials should be detected."""
+        is_dangerous, key, desc = detect_dangerous_command("cat ~/.aws/credentials")
+        assert is_dangerous is True
+        assert "cloud" in desc.lower() or "credential" in desc.lower()
+
+    def test_cat_aws_config_detected(self):
+        """cat ~/.aws/config should be detected."""
+        is_dangerous, key, desc = detect_dangerous_command("cat ~/.aws/config")
+        assert is_dangerous is True
+
+    def test_cat_kube_config_detected(self):
+        """cat ~/.kube/config should be detected."""
+        is_dangerous, key, desc = detect_dangerous_command("cat ~/.kube/config")
+        assert is_dangerous is True
+
+    def test_cat_docker_config_detected(self):
+        """cat ~/.docker/config.json should be detected."""
+        is_dangerous, key, desc = detect_dangerous_command("cat ~/.docker/config.json")
+        assert is_dangerous is True
+
+    def test_cat_git_credentials_detected(self):
+        """cat ~/.git-credentials should be detected."""
+        is_dangerous, key, desc = detect_dangerous_command("cat ~/.git-credentials")
+        assert is_dangerous is True
+
+    def test_cat_gh_hosts_detected(self):
+        """cat ~/.config/gh/hosts.yml should be detected."""
+        is_dangerous, key, desc = detect_dangerous_command("cat ~/.config/gh/hosts.yml")
+        assert is_dangerous is True
+
+    def test_cat_gcloud_credentials_detected(self):
+        """cat ~/.config/gcloud/credentials should be detected."""
+        is_dangerous, key, desc = detect_dangerous_command("cat ~/.config/gcloud/credentials")
+        assert is_dangerous is True
+
+    def test_cat_azure_tokens_detected(self):
+        """cat ~/.azure/accessTokens.json should be detected."""
+        is_dangerous, key, desc = detect_dangerous_command("cat ~/.azure/accessTokens.json")
+        assert is_dangerous is True
+
+    def test_cat_gpg_private_keys_detected(self):
+        """cat ~/.gnupg/secring.gpg should be detected."""
+        is_dangerous, key, desc = detect_dangerous_command("cat ~/.gnupg/secring.gpg")
+        assert is_dangerous is True
+
+
+class TestSearchFilesCredentialProtection:
+    """Tests for search_files credential file protection (#50734 follow-up).
+
+    The search_files tool should block content searches that target credential
+    files, mirroring the read_file protection via get_read_block_error().
+    """
+
+    def test_search_env_file_blocked(self, tmp_path, monkeypatch):
+        """search_files path=.env should be blocked."""
+        from tools.file_tools import search_tool
+        from unittest.mock import patch
+
+        # Create a mock .env file
+        env_file = tmp_path / ".env"
+        env_file.write_text("API_KEY=secret123")
+
+        # Mock _get_file_ops to avoid actual shell execution
+        with patch("tools.file_tools._get_file_ops") as mock_ops:
+            # This should be blocked before reaching file_ops
+            result = search_tool(pattern="API_KEY", path=str(env_file), target="content")
+            result_dict = json.loads(result)
+            assert "error" in result_dict
+            assert "secret-bearing environment file" in result_dict["error"] or "credential" in result_dict["error"].lower()
+
+    def test_search_hermes_auth_blocked(self, tmp_path, monkeypatch):
+        """search_files path=~/.hermes/auth.json should be blocked."""
+        import json
+        from tools.file_tools import search_tool
+        from unittest.mock import patch
+        import agent.file_safety as fs
+
+        # Set up fake hermes home
+        hermes_home = tmp_path / "hermes_home"
+        hermes_home.mkdir()
+        monkeypatch.setattr(fs, "_hermes_home_path", lambda: hermes_home)
+        monkeypatch.setattr(fs, "_hermes_root_path", lambda: hermes_home)
+
+        auth_file = hermes_home / "auth.json"
+        auth_file.write_text('{"api_key": "secret"}')
+
+        with patch("tools.file_tools._get_file_ops"):
+            result = search_tool(pattern="api_key", path=str(auth_file), target="content")
+            result_dict = json.loads(result)
+            assert "error" in result_dict
+
+    def test_search_directory_allowed(self, tmp_path):
+        """search_files path=<directory> should NOT be blocked."""
+        import json
+        from tools.file_tools import search_tool
+        from unittest.mock import patch, MagicMock
+
+        # Create a normal directory
+        test_dir = tmp_path / "project"
+        test_dir.mkdir()
+
+        mock_result = MagicMock()
+        mock_result.matches = []
+        mock_result.to_dict.return_value = {"matches": [], "total_count": 0}
+
+        with patch("tools.file_tools._get_file_ops") as mock_ops:
+            mock_ops.return_value.search.return_value = mock_result
+            result = search_tool(pattern="test", path=str(test_dir), target="content")
+            result_dict = json.loads(result)
+            # Should not have credential block error
+            assert "secret-bearing" not in result_dict.get("error", "")
+
+    def test_search_files_target_allowed(self, tmp_path):
+        """search_files target=files should NOT be blocked (only lists files)."""
+        import json
+        from tools.file_tools import search_tool
+        from unittest.mock import patch, MagicMock
+
+        env_file = tmp_path / ".env"
+        env_file.write_text("API_KEY=secret")
+
+        mock_result = MagicMock()
+        mock_result.matches = []
+        mock_result.to_dict.return_value = {"matches": [], "total_count": 0}
+
+        with patch("tools.file_tools._get_file_ops") as mock_ops:
+            mock_ops.return_value.search.return_value = mock_result
+            result = search_tool(pattern=".env", path=str(tmp_path), target="files")
+            result_dict = json.loads(result)
+            # File search should not be blocked
+            assert "secret-bearing" not in result_dict.get("error", "")

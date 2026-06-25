@@ -191,6 +191,98 @@ _CREDENTIAL_FILES = (
     r'(?:~|\$home|\$\{home\})/\.'
     r'(?:netrc|pgpass|npmrc|pypirc)\b'
 )
+
+# ---------------------------------------------------------------------------
+# Credential file read detection (#50734)
+# ---------------------------------------------------------------------------
+# Patterns for detecting terminal commands that READ credential files.
+# The read_file tool already blocks these via get_read_block_error() in
+# agent/file_safety.py, but the terminal tool had no equivalent guard —
+# `cat ~/.hermes/.env` would succeed and exfiltrate credentials to the LLM
+# provider. These patterns detect file-reading commands targeting credential
+# paths so the approval system can gate or block them.
+#
+# The Hermes credential paths mirror what get_read_block_error() blocks:
+# auth.json, auth.lock, .anthropic_oauth.json, .env, webhook_subscriptions.json,
+# auth/google_oauth.json, cache/bws_cache.json, mcp-tokens/*, and any .env*
+# file under HERMES_HOME.
+#
+# Defense-in-depth: the terminal tool runs as the same OS user, so a
+# determined agent can still bypass via base64 encoding, python one-liners,
+# etc. These patterns catch the common/direct cases and surface an audit
+# trail. See get_read_block_error() docstring for the full threat model.
+# ---------------------------------------------------------------------------
+
+# Commands that read file contents (used to detect credential exfiltration).
+_CREDENTIAL_READ_COMMANDS = (
+    r'(?:cat|less|more|head|tail|tac|strings|xxd|od|hexdump|base64|openssl\s+base64)'
+)
+
+# Credential file paths under HERMES_HOME that must not be read via terminal.
+# Matches both the active profile HERMES_HOME and the global Hermes root.
+# Uses the same path fragments as _HERMES_ENV_PATH for consistency.
+_HERMES_HOME_PREFIX = (
+    r'(?:~\/\.hermes/|'
+    r'(?:\$home|\$\{home\})/\.hermes/|'
+    r'(?:\$hermes_home|\$\{hermes_home\})/)'
+)
+
+# Specific credential files under HERMES_HOME (mirrors get_read_block_error).
+_HERMES_CREDENTIAL_FILE = (
+    rf'(?:{_HERMES_HOME_PREFIX}'
+    r'(?:\.env|'
+    r'auth\.json|'
+    r'auth\.lock|'
+    r'\.anthropic_oauth\.json|'
+    r'webhook_subscriptions\.json|'
+    r'auth/google_oauth\.json|'
+    r'cache/bws_cache\.json'
+    r')\b)'
+)
+
+# mcp-tokens/ directory under HERMES_HOME (OAuth token material).
+_HERMES_MCP_TOKENS = (
+    rf'(?:{_HERMES_HOME_PREFIX}mcp-tokens(?:/|\b))'
+)
+
+# profiles/*/  subdirectories — each profile has its own .env, auth.json, etc.
+_HERMES_PROFILE_CREDENTIAL = (
+    rf'(?:{_HERMES_HOME_PREFIX}profiles/[^/\s"\'`]+/'
+    r'(?:\.env|auth\.json|auth\.lock|\.anthropic_oauth\.json)\b)'
+)
+
+# Combined: all Hermes credential paths that should be gated for reads.
+_HERMES_CREDENTIAL_READ_TARGET = (
+    rf'(?:{_HERMES_CREDENTIAL_FILE}|{_HERMES_MCP_TOKENS}|{_HERMES_PROFILE_CREDENTIAL})'
+)
+
+# Project-local .env files that contain secrets (mirrors _BLOCKED_PROJECT_ENV_BASENAMES
+# in agent/file_safety.py). This is more specific than _PROJECT_ENV_PATH because
+# .env.example and .env.template are safe documentation files that should be readable.
+_PROJECT_SECRET_ENV_BASENAMES = (
+    r'\.env(?:\.(?:local|development|production|test|staging))?\b|\.envrc\b'
+)
+_PROJECT_ENV_READ_TARGET = (
+    rf'(?:(?:/|\.{1,2}/)?(?:[^\s/"\'`]+/)*(?:{_PROJECT_SECRET_ENV_BASENAMES}))'
+)
+
+# ---------------------------------------------------------------------------
+# Cloud provider credential paths (#50734 follow-up)
+# ---------------------------------------------------------------------------
+# These directories/files contain cloud provider credentials that should not
+# be read via terminal. Mirrors build_write_denied_prefixes() in file_safety.py.
+# ---------------------------------------------------------------------------
+_CLOUD_CREDENTIAL_PATHS = (
+    r'(?:~|\$home|\$\{home\})/'
+    r'(?:\.aws/(?:credentials|config)|'           # AWS credentials
+    r'\.kube/config|'                              # Kubernetes config
+    r'\.docker/config\.json|'                      # Docker registry auth
+    r'\.git-credentials|'                          # Git credential helper
+    r'\.config/gh/hosts\.yml|'                     # GitHub CLI tokens
+    r'\.config/gcloud/(?:credentials|application_default_credentials)(?:\.json)?|'  # GCP
+    r'\.azure/(?:accessTokens\.json|azureProfile\.json|msal_token_cache\.json)|'  # Azure
+    r'\.gnupg/(?:private-keys-v1\.d|secring\.gpg))'  # GPG private keys
+)
 # macOS: /etc, /var, /tmp, /home are symlinks to /private/{etc,var,tmp,home}.
 # A command written to target /private/etc/sudoers works identically to
 # /etc/sudoers on macOS but bypasses a plain "/etc/" pattern check. Match
@@ -519,6 +611,41 @@ DANGEROUS_PATTERNS = [
     # into a single -X token. Catches the same threat class.
     (r'\bsudo\b[^;|&\n]*?\s+-[a-z]*[sa][a-z]*\b',
      "sudo with combined-flag privilege escalation"),
+    # -------------------------------------------------------------------------
+    # Credential file read detection (#50734)
+    # -------------------------------------------------------------------------
+    # Detect terminal commands that READ credential files. The read_file tool
+    # blocks these via get_read_block_error() but the terminal tool had no
+    # equivalent guard — `cat ~/.hermes/.env` would exfiltrate all API keys
+    # to the LLM provider. These patterns catch common read commands targeting
+    # Hermes credential paths and project-local .env files.
+    #
+    # Defense-in-depth: not a security boundary (agent can bypass via python
+    # one-liners, base64 encoding, etc.) but catches direct attempts and
+    # surfaces an audit trail. Requires user approval in interactive sessions.
+    # -------------------------------------------------------------------------
+    # Hermes credential files under HERMES_HOME (auth.json, .env, etc.)
+    (rf'{_CMDPOS}{_CREDENTIAL_READ_COMMANDS}\b[^;|&\n]*{_HERMES_CREDENTIAL_READ_TARGET}',
+     "read Hermes credential file via terminal"),
+    # Project-local .env files anywhere on disk
+    (rf'{_CMDPOS}{_CREDENTIAL_READ_COMMANDS}\b[^;|&\n]*["\']?{_PROJECT_ENV_READ_TARGET}["\']?{_COMMAND_TAIL}',
+     "read project .env file via terminal"),
+    # User credential files (~/.netrc, ~/.pgpass, etc.)
+    (rf'{_CMDPOS}{_CREDENTIAL_READ_COMMANDS}\b[^;|&\n]*{_CREDENTIAL_FILES}',
+     "read user credential file via terminal"),
+    # SSH private keys (~/.ssh/id_rsa, ~/.ssh/id_ed25519, etc.)
+    # Note: authorized_keys contains PUBLIC keys and is safe to read.
+    (rf'{_CMDPOS}{_CREDENTIAL_READ_COMMANDS}\b[^;|&\n]*{_SSH_SENSITIVE_PATH}(?:id_\w+)\b',
+     "read SSH private key file via terminal"),
+    # Sourcing .env files loads credentials into shell environment where they
+    # can be exfiltrated via `env`, `export`, or subsequent commands.
+    (rf'{_CMDPOS}(?:source|\.)\s+["\']?{_PROJECT_ENV_READ_TARGET}["\']?{_COMMAND_TAIL}',
+     "source project .env file (leaks credentials to environment)"),
+    (rf'{_CMDPOS}(?:source|\.)\s+["\']?{_HERMES_CREDENTIAL_READ_TARGET}["\']?{_COMMAND_TAIL}',
+     "source Hermes credential file (leaks credentials to environment)"),
+    # Cloud provider credentials (AWS, GCP, Azure, Docker, Kubernetes, GitHub CLI, GPG)
+    (rf'{_CMDPOS}{_CREDENTIAL_READ_COMMANDS}\b[^;|&\n]*{_CLOUD_CREDENTIAL_PATHS}',
+     "read cloud provider credential via terminal"),
 ]
 
 
