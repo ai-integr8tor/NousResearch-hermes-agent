@@ -149,7 +149,7 @@ def _get_backend() -> str:
     keys manually without running setup.
     """
     configured = (_load_web_config().get("backend") or "").lower().strip()
-    if configured in {"parallel", "firecrawl", "tavily", "exa", "searxng", "brave-free", "ddgs", "xai"}:
+    if configured in {"parallel", "firecrawl", "tavily", "exa", "searxng", "brave-free", "ddgs", "xai", "auxiliary"}:
         return configured
 
     # Fallback for manual / legacy config — pick the highest-priority
@@ -206,11 +206,23 @@ def _get_capability_backend(capability: str) -> str:
 
     Reads ``web.{capability}_backend`` from config; if set and available,
     uses it. Otherwise falls through to the shared ``_get_backend()``.
+
+    When a user-explicit backend is configured but unavailable, a warning
+    is logged so the user can diagnose why their choice was overridden
+    (previously the silent fallthrough led to confusing errors such as
+    "Brave Search is a search-only backend" after explicitly setting
+    ``web.extract_backend: auxiliary`` -- see issue #52149).
     """
     cfg = _load_web_config()
     specific = (cfg.get(f"{capability}_backend") or "").lower().strip()
     if specific and _is_backend_available(specific):
         return specific
+    if specific:
+        logger.warning(
+            "Explicitly configured %s %s_backend='%s' is not available "
+            "(check API keys / config). Falling back to auto-detected backend.",
+            capability, "web", specific,
+        )
     return _get_backend()
 
 
@@ -240,6 +252,8 @@ def _is_backend_available(backend: str) -> bool:
             return has_xai_credentials()
         except Exception:
             return False
+    if backend == "auxiliary":
+        return check_auxiliary_model()
     return False
 
 
@@ -978,69 +992,102 @@ async def web_extract_tool(
         else:
             backend = _get_extract_backend()
 
-            # All seven providers (brave-free, ddgs, searxng, exa, parallel,
-            # tavily, firecrawl) now live as plugins. The dispatcher is a
-            # registry lookup + delegation. Some providers' extract() is
-            # async (parallel, firecrawl), others sync (exa, tavily) — we
-            # detect coroutine functions and await; sync functions run
-            # inline (the policy gate, SSRF re-check, etc. live inside the
-            # provider itself for the firecrawl per-URL loop).
-            _ensure_web_plugins_loaded()
-            from agent.web_search_registry import (
-                get_active_extract_provider,
-                get_provider as _wsp_get_provider,
-            )
-
-            provider = _wsp_get_provider(backend) if backend else None
-            if provider is None or not provider.supports_extract():
-                # When the configured name IS registered but doesn't support
-                # extract (search-only providers like brave-free / ddgs /
-                # searxng), surface that as a typed "search-only" error
-                # rather than silently switching backends. When the name
-                # isn't registered at all (typo / uninstalled plugin), fall
-                # through to the active-provider walk.
-                if provider is not None and not provider.supports_extract():
-                    return json.dumps(
-                        {
-                            "success": False,
-                            "error": (
-                                f"{provider.display_name} is a search-only "
-                                "backend and cannot extract URL content. "
-                                "Set web.extract_backend to firecrawl, "
-                                "tavily, exa, or parallel."
-                            ),
-                        },
-                        ensure_ascii=False,
-                    )
-                provider = get_active_extract_provider()
-                if provider is None:
-                    return json.dumps(
-                        {
-                            "success": False,
-                            "error": (
-                                "No web extract provider configured. "
-                                "Set web.extract_backend to firecrawl, "
-                                "tavily, exa, or parallel."
-                            ),
-                        },
-                        ensure_ascii=False,
-                    )
-
-            logger.info(
-                "Web extract via %s: %d URL(s)", provider.name, len(safe_urls)
-            )
-
-            # Async-or-sync dispatch: parallel + firecrawl have async
-            # extract(); exa + tavily are sync.
-            import inspect
-            if inspect.iscoroutinefunction(provider.extract):
-                results = await provider.extract(safe_urls, format=format)
+            # Special case: "auxiliary" backend fetches URLs directly via
+            # httpx and returns raw content. This lets users who configured
+            # auxiliary.web_extract (e.g. with a gemini provider) use the
+            # auxiliary LLM for content extraction without needing a separate
+            # web extract provider like Firecrawl or Tavily.
+            if backend == "auxiliary":
+                results = []
+                for url in safe_urls:
+                    try:
+                        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+                            resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0 (compatible; HermesAgent/1.0)"})
+                            resp.raise_for_status()
+                            content_type = resp.headers.get("content-type", "")
+                            if "text/" in content_type or "application/json" in content_type or "application/xml" in content_type or "application/xhtml" in content_type or content_type.startswith("text/"):
+                                text = resp.text
+                            else:
+                                text = f"[Binary content: {content_type}]"
+                            results.append({
+                                "url": url,
+                                "title": "",
+                                "content": text,
+                                "raw_content": text,
+                            })
+                    except Exception as fetch_err:
+                        results.append({
+                            "url": url,
+                            "title": "",
+                            "content": "",
+                            "raw_content": "",
+                            "error": str(fetch_err),
+                        })
             else:
-                # Run sync extract() in a thread so we don't block the
-                # event loop on network I/O.
-                results = await asyncio.to_thread(
-                    provider.extract, safe_urls, format=format
+
+                # All seven providers (brave-free, ddgs, searxng, exa, parallel,
+                # tavily, firecrawl) now live as plugins. The dispatcher is a
+                # registry lookup + delegation. Some providers' extract() is
+                # async (parallel, firecrawl), others sync (exa, tavily) — we
+                # detect coroutine functions and await; sync functions run
+                # inline (the policy gate, SSRF re-check, etc. live inside the
+                # provider itself for the firecrawl per-URL loop).
+                _ensure_web_plugins_loaded()
+                from agent.web_search_registry import (
+                    get_active_extract_provider,
+                    get_provider as _wsp_get_provider,
                 )
+
+                provider = _wsp_get_provider(backend) if backend else None
+                if provider is None or not provider.supports_extract():
+                    # When the configured name IS registered but doesn't support
+                    # extract (search-only providers like brave-free / ddgs /
+                    # searxng), surface that as a typed "search-only" error
+                    # rather than silently switching backends. When the name
+                    # isn't registered at all (typo / uninstalled plugin), fall
+                    # through to the active-provider walk.
+                    if provider is not None and not provider.supports_extract():
+                        return json.dumps(
+                            {
+                                "success": False,
+                                "error": (
+                                    f"{provider.display_name} is a search-only "
+                                    "backend and cannot extract URL content. "
+                                    "Set web.extract_backend to firecrawl, "
+                                    "tavily, exa, or parallel."
+                                ),
+                            },
+                            ensure_ascii=False,
+                        )
+                    provider = get_active_extract_provider()
+                    if provider is None:
+                        return json.dumps(
+                            {
+                                "success": False,
+                                "error": (
+                                    "No web extract provider configured. "
+                                    "Set web.extract_backend to firecrawl, "
+                                    "tavily, exa, or parallel."
+                                ),
+                            },
+                            ensure_ascii=False,
+                        )
+
+                logger.info(
+                    "Web extract via %s: %d URL(s)", provider.name, len(safe_urls)
+                )
+
+                # Async-or-sync dispatch: parallel + firecrawl have async
+                # extract(); exa + tavily are sync.
+                import inspect
+                if inspect.iscoroutinefunction(provider.extract):
+                    results = await provider.extract(safe_urls, format=format)
+                else:
+                    # Run sync extract() in a thread so we don't block the
+                    # event loop on network I/O.
+                    results = await asyncio.to_thread(
+                        provider.extract, safe_urls, format=format
+                    )
 
         # Merge any SSRF-blocked results back in
         if ssrf_blocked:
@@ -1185,11 +1232,11 @@ async def web_extract_tool(
 def check_web_api_key() -> bool:
     """Check whether the configured web backend is available."""
     configured = _load_web_config().get("backend", "").lower().strip()
-    if configured in {"exa", "parallel", "firecrawl", "tavily", "searxng", "brave-free", "ddgs", "xai"}:
+    if configured in {"exa", "parallel", "firecrawl", "tavily", "searxng", "brave-free", "ddgs", "xai", "auxiliary"}:
         return _is_backend_available(configured)
     return any(
         _is_backend_available(backend)
-        for backend in ("exa", "parallel", "firecrawl", "tavily", "searxng", "brave-free", "ddgs", "xai")
+        for backend in ("exa", "parallel", "firecrawl", "tavily", "searxng", "brave-free", "ddgs", "xai", "auxiliary")
     )
 
 
