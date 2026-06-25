@@ -1414,7 +1414,7 @@ def _ensure_session_db_row(session: dict) -> None:
             source=_session_source(session),
             model=row_model,
             model_config=model_config or None,
-            cwd=_session_cwd(session) if session.get("explicit_cwd") else None,
+            cwd=_session_cwd(session),
         )
     except Exception:
         logger.debug("failed to persist desktop session row", exc_info=True)
