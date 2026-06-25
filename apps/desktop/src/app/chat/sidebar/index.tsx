@@ -146,7 +146,7 @@ const PROFILE_INITIAL_PAGE = 5
 const COMPACT_FLAT = 'compact:max-h-none compact:overflow-visible'
 
 // Vertical scroll only — never a horizontal bar from glow bleed, long titles, etc.
-const SCROLL_Y = 'overflow-y-auto overflow-x-hidden overscroll-contain'
+const SCROLL_Y = 'overflow-y-auto overflow-x-hidden overscroll-contain pr-2.5'
 
 // A non-session group's scroll body: own scroller when tall, flattened when compact.
 const GROUP_BODY = cn(SCROLL_Y, COMPACT_FLAT)
@@ -806,7 +806,7 @@ export function ChatSidebar({
       )}
       collapsible="none"
     >
-      <SidebarContent className="gap-0 overflow-hidden bg-transparent px-2.5">
+      <SidebarContent className="gap-0 overflow-hidden bg-transparent pl-2.5">
         <SidebarGroup className="shrink-0 p-0 pb-2 pt-[calc(var(--titlebar-height)+0.375rem)]">
           <SidebarGroupContent>
             <SidebarMenu className="gap-px">
@@ -886,7 +886,7 @@ export function ChatSidebar({
         )}
 
         {contentVisible && showSessionSections && (
-          <div className={cn('flex min-h-0 flex-1 flex-col pb-1.75', SCROLL_Y)}>
+          <div className={cn('flex min-h-0 flex-1 flex-col pb-1.75', SCROLL_Y, 'pr-2.5')}>
             {trimmedQuery && (
               <SidebarSessionsSection
                 activeSessionId={activeSidebarSessionId}
@@ -1328,8 +1328,12 @@ function SidebarSessionsSection({
   }
 
   // The virtualizer owns its own scroller, so suppress the wrapper's overflow
-  // to avoid a double scroll container.
-  const resolvedContentClassName = cn(contentClassName, flatVirtualized && 'overflow-y-visible')
+  // to avoid a double scroll container. When virtualized, the inner scroller
+  // already carries pr-2.5 for scrollbar clearance; removing it from the
+  // wrapper prevents double-padding that would narrow the virtualized list.
+  const resolvedContentClassName = flatVirtualized
+    ? cn(contentClassName.replace(/pr-2\.5/g, ''), 'overflow-y-visible')
+    : contentClassName
 
   return (
     <SidebarGroup className={rootClassName}>
