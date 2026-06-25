@@ -255,11 +255,32 @@ function upsertResolvedSession(session: SessionInfo, storedSessionId: string) {
   ])
 }
 
-async function resolveStoredSession(storedSessionId: string): Promise<SessionInfo | undefined> {
-  const cached = $sessions.get().find(session => sessionMatchesStoredId(session, storedSessionId))
+async function resolveStoredSession(storedSessionId: string, profileHint?: null | string): Promise<SessionInfo | undefined> {
+  const hint = profileHint ? normalizeProfileKey(profileHint) : null
+
+  const cached = $sessions.get().find(session => {
+    if (!sessionMatchesStoredId(session, storedSessionId)) {
+      return false
+    }
+
+    return !hint || normalizeProfileKey(session.profile) === hint
+  })
 
   if (cached) {
     return cached
+  }
+
+  if (hint) {
+    try {
+      const session = await getSession(storedSessionId, hint)
+
+      upsertResolvedSession(session, storedSessionId)
+
+      return session
+    } catch {
+      // Explicit route/sidebar profile was stale or unreachable; keep the legacy
+      // active/other-profile probe below as a best-effort fallback.
+    }
   }
 
   // Direct by-id on the live backend — one row lookup, no list scan. Covers
@@ -594,7 +615,7 @@ export function useSessionActions({
   }, [navigate, selectedStoredSessionId])
 
   const resumeSession = useCallback(
-    async (storedSessionId: string, replaceRoute = false) => {
+    async (storedSessionId: string, replaceRoute = false, profileHint?: null | string) => {
       const requestId = resumeRequestRef.current + 1
       resumeRequestRef.current = requestId
 
@@ -623,9 +644,34 @@ export function useSessionActions({
       // chat view drops the error state and shows the loader again.
       setResumeExhaustedSessionId(current => (current === storedSessionId ? null : current))
 
-      const warmRuntimeId = runtimeIdByStoredSessionIdRef.current.get(storedSessionId)
+      // A warm cache entry is only trustworthy when it still BELONGS to the
+      // session being resumed. A pooled profile backend that gets idle-reaped
+      // and respawned (pruneSecondaryGateways) re-mints runtime ids, so a
+      // recycled id can resolve to a live-but-DIFFERENT session's cache entry.
+      // The session.usage 404 guard below only catches a fully-DEAD id — a
+      // recycled-live id 200s, so an unchecked hit paints the wrong transcript
+      // under the current route (the "open chat A, chat B loads" bug). On a
+      // mismatch the mapping is cross-wired: purge both sides and report a miss
+      // so the caller falls through to a full resume that rebinds a correct id.
+      const takeWarmCache = (): { runtimeId: string; state: ClientSessionState } | null => {
+        const runtimeId = runtimeIdByStoredSessionIdRef.current.get(storedSessionId)
+        const state = runtimeId ? sessionStateByRuntimeIdRef.current.get(runtimeId) : undefined
 
-      if (!warmRuntimeId || !sessionStateByRuntimeIdRef.current.get(warmRuntimeId)) {
+        if (!runtimeId || !state) {
+          return null
+        }
+
+        if (state.storedSessionId !== storedSessionId) {
+          runtimeIdByStoredSessionIdRef.current.delete(storedSessionId)
+          sessionStateByRuntimeIdRef.current.delete(runtimeId)
+
+          return null
+        }
+
+        return { runtimeId, state }
+      }
+
+      if (!takeWarmCache()) {
         setActiveSessionId(null)
         activeSessionIdRef.current = null
         setMessages([])
@@ -635,8 +681,13 @@ export function useSessionActions({
       // gateway call (no-op when it's already on that profile / single-profile).
       // resolveStoredSession finds the row by id (cheap), so an uncached pasted
       // id loads as fast as a sidebar click instead of hanging on a list scan.
-      const storedForProfile = await resolveStoredSession(storedSessionId)
+      const storedForProfile = await resolveStoredSession(storedSessionId, profileHint)
+
       const sessionProfile = storedForProfile?.profile
+        ? normalizeProfileKey(storedForProfile.profile)
+        : profileHint
+          ? normalizeProfileKey(profileHint)
+          : undefined
 
       if (resumeRequestRef.current !== requestId) {
         return
@@ -644,11 +695,20 @@ export function useSessionActions({
 
       await ensureGatewayProfile(sessionProfile)
 
-      const cachedRuntimeId = runtimeIdByStoredSessionIdRef.current.get(storedSessionId)
-      const cachedState = cachedRuntimeId && sessionStateByRuntimeIdRef.current.get(cachedRuntimeId)
+      // Re-check after the profile-resolve / gateway-swap awaits above: the
+      // cache may have changed, and takeWarmCache re-validates belongs-to and
+      // purges a cross-wired mapping before we trust the fast-path.
+      const warmHit = takeWarmCache()
 
-      if (cachedRuntimeId && cachedState) {
-        const stored = $sessions.get().find(session => session.id === storedSessionId)
+      if (warmHit) {
+        const cachedRuntimeId = warmHit.runtimeId
+        const cachedState = warmHit.state
+
+        const stored = $sessions.get().find(
+          session =>
+            sessionMatchesStoredId(session, storedSessionId) &&
+            (!sessionProfile || normalizeProfileKey(session.profile) === sessionProfile)
+        )
 
         const cachedViewState =
           !cachedState.model && stored?.model != null
@@ -746,6 +806,7 @@ export function useSessionActions({
           ...(watchWindow ? { lazy: true } : {}),
           ...(sessionProfile ? { profile: sessionProfile } : {})
         })
+
         // The rejection is consumed by the `await` below; this guard only
         // keeps it from surfacing as unhandled while the prefetch settles.
         resumePromise.catch(() => undefined)
@@ -922,6 +983,7 @@ export function useSessionActions({
         // + auto-names it then). The selected row survives refreshes (sessionsToKeep).
         const rows = $sessions.get()
         const parent = parentStoredId ? rows.find(session => sessionMatchesStoredId(session, parentStoredId)) : null
+
         const siblings = parentStoredId
           ? rows.filter(session => session.parent_session_id?.trim() === parentStoredId).length
           : 0
@@ -984,9 +1046,11 @@ export function useSessionActions({
       }
 
       const messages = $messages.get()
+
       const at = messageId
         ? messages.findIndex(message => message.id === messageId)
         : messages.findLastIndex(message => message.role === 'assistant' || message.role === 'user')
+
       const start = at >= 0 ? at : Math.max(messages.length - 1, 0)
       const end = at >= 0 ? at + 1 : messages.length
       const branchMessages = toBranchMessages(messages.slice(start, end))

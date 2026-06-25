@@ -11,7 +11,7 @@ interface RouteResumeOptions {
   freshDraftReady: boolean
   gatewayState: string | undefined
   locationPathname: string
-  resumeSession: (sessionId: string, focus: boolean) => Promise<unknown>
+  resumeSession: (sessionId: string, focus: boolean, profile?: null | string) => Promise<unknown>
   // Stored-session id whose most recent resume failed terminally (set by
   // useSessionActions, mirrored from $resumeFailedSessionId). While this equals
   // routedSessionId the window would otherwise latch on the loader forever, so
@@ -24,6 +24,7 @@ interface RouteResumeOptions {
   // signal the effect below uses to reset the attempt counter.
   resumeExhaustedSessionId: string | null
   routedSessionId: string | null
+  routedSessionProfile: string | null
   runtimeIdByStoredSessionIdRef: MutableRefObject<Map<string, string>>
   selectedStoredSessionId: string | null
   selectedStoredSessionIdRef: MutableRefObject<string | null>
@@ -77,6 +78,7 @@ export function useRouteResume({
   resumeFailedSessionId,
   resumeExhaustedSessionId,
   routedSessionId,
+  routedSessionProfile,
   runtimeIdByStoredSessionIdRef,
   selectedStoredSessionId,
   selectedStoredSessionIdRef,
@@ -147,7 +149,11 @@ export function useRouteResume({
       // rebinds/reaps the session on its side, and trusting it strands Desktop on
       // a dead id ("session not found"). Otherwise keep skipping when already active.
       if ((gatewayBecameOpen || !alreadyActive) && shouldResume && !creatingSessionRef.current) {
-        void resumeSession(routedSessionId, true)
+        if (routedSessionProfile) {
+          void resumeSession(routedSessionId, true, routedSessionProfile)
+        } else {
+          void resumeSession(routedSessionId, true)
+        }
       }
 
       return
@@ -171,6 +177,7 @@ export function useRouteResume({
     locationPathname,
     resumeSession,
     routedSessionId,
+    routedSessionProfile,
     runtimeIdByStoredSessionIdRef,
     selectedStoredSessionId,
     selectedStoredSessionIdRef,
@@ -200,6 +207,7 @@ export function useRouteResume({
     // the store/session.ts + use-session-actions.ts comments promise. (Point 2)
     const wasExhausted = prevResumeExhaustedRef.current
     prevResumeExhaustedRef.current = resumeExhaustedSessionId
+
     if (wasExhausted && wasExhausted === routedSessionId && resumeExhaustedSessionId !== wasExhausted) {
       retrySessionIdRef.current = routedSessionId
       retryAttemptRef.current = 0
@@ -268,7 +276,12 @@ export function useRouteResume({
       // having fired. A flapping backend could then hit MAX in a couple of
       // re-renders with far fewer than MAX real attempts. (Point 3)
       retryAttemptRef.current += 1
-      void resumeSession(sessionId, true)
+
+      if (routedSessionProfile) {
+        void resumeSession(sessionId, true, routedSessionProfile)
+      } else {
+        void resumeSession(sessionId, true)
+      }
     }, resumeRetryDelayMs(attempt))
 
     return () => clearTimeout(timer)
@@ -281,6 +294,7 @@ export function useRouteResume({
     resumeFailedSessionId,
     resumeExhaustedSessionId,
     routedSessionId,
+    routedSessionProfile,
     selectedStoredSessionIdRef
   ])
 }

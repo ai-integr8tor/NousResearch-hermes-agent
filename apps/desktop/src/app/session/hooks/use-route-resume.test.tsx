@@ -14,10 +14,11 @@ interface HarnessProps {
   freshDraftReady: boolean
   gatewayState: string
   locationPathname: string
-  resumeSession: (sessionId: string, focus: boolean) => Promise<unknown>
+  resumeSession: (sessionId: string, focus: boolean, profile?: null | string) => Promise<unknown>
   resumeFailedSessionId?: null | string
   resumeExhaustedSessionId?: null | string
   routedSessionId: null | string
+  routedSessionProfile?: null | string
   runtimeIdByStoredSessionIdRef: MutableRefObject<Map<string, string>>
   selectedStoredSessionId: null | string
   selectedStoredSessionIdRef: MutableRefObject<null | string>
@@ -27,9 +28,10 @@ interface HarnessProps {
 function RouteResumeHarness({
   resumeFailedSessionId = null,
   resumeExhaustedSessionId = null,
+  routedSessionProfile = null,
   ...props
 }: HarnessProps) {
-  useRouteResume({ ...props, resumeExhaustedSessionId, resumeFailedSessionId })
+  useRouteResume({ ...props, resumeExhaustedSessionId, resumeFailedSessionId, routedSessionProfile })
 
   return null
 }
@@ -144,6 +146,32 @@ describe('useRouteResume', () => {
 
     expect(resumeSession).toHaveBeenCalledTimes(1)
     expect(resumeSession).toHaveBeenCalledWith('session-1', true)
+  })
+
+  it('passes the routed profile through to resumeSession', () => {
+    const resumeSession = vi.fn(async () => undefined)
+    const startFreshSessionDraft = vi.fn()
+
+    render(
+      <RouteResumeHarness
+        activeSessionId={null}
+        activeSessionIdRef={{ current: null }}
+        creatingSessionRef={{ current: false }}
+        currentView="chat"
+        freshDraftReady={false}
+        gatewayState="open"
+        locationPathname="/telegram-session"
+        resumeSession={resumeSession}
+        routedSessionId="telegram-session"
+        routedSessionProfile="ubuntu-server"
+        runtimeIdByStoredSessionIdRef={{ current: new Map() }}
+        selectedStoredSessionId={null}
+        selectedStoredSessionIdRef={{ current: null }}
+        startFreshSessionDraft={startFreshSessionDraft}
+      />
+    )
+
+    expect(resumeSession).toHaveBeenCalledWith('telegram-session', true, 'ubuntu-server')
   })
 
   it('resumes when pathname changes to a routed session', () => {
@@ -276,7 +304,7 @@ describe('useRouteResume bounded auto-retry after a failed resume', () => {
   // Common stranded-window props: gateway open, route on the session, no runtime
   // yet, and the ref already synced to the route (resumeSession sets it at entry
   // before failing) — the exact state that defeats the main effect's self-heal.
-  function strandedProps(resumeSession: (sid: string, focus: boolean) => Promise<unknown>) {
+  function strandedProps(resumeSession: (sid: string, focus: boolean, profile?: null | string) => Promise<unknown>) {
     return {
       activeSessionId: null,
       activeSessionIdRef: { current: null } as MutableRefObject<null | string>,
@@ -424,11 +452,13 @@ describe('useRouteResume bounded auto-retry after a failed resume', () => {
     // the store, which doesn't feed back into the prop in this harness.
     const { rerender } = render(<RouteResumeHarness {...props} resumeFailedSessionId="session-1" />)
     resumeSession.mockClear()
+
     for (let i = 0; i < 8; i += 1) {
       vi.advanceTimersByTime(8_000)
       rerender(<RouteResumeHarness {...props} resumeFailedSessionId={null} />)
       rerender(<RouteResumeHarness {...props} resumeFailedSessionId="session-1" />)
     }
+
     expect(resumeSession.mock.calls.length).toBe(4) // capped
     expect($resumeExhaustedSessionId.get()).toBe('session-1')
 
@@ -464,6 +494,7 @@ describe('useRouteResume bounded auto-retry after a failed resume', () => {
     const { rerender } = render(
       <RouteResumeHarness {...props} resumeFailedSessionId="session-1" resumeSession={vi.fn(async () => undefined)} />
     )
+
     for (let j = 0; j < 8; j += 1) {
       rerender(
         <RouteResumeHarness {...props} resumeFailedSessionId="session-1" resumeSession={vi.fn(async () => undefined)} />

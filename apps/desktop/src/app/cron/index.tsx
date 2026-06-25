@@ -240,7 +240,7 @@ function matchesQuery(job: CronJob, q: string): boolean {
 
 interface CronViewProps extends React.ComponentProps<'section'> {
   onClose: () => void
-  onOpenSession?: (sessionId: string) => void
+  onOpenSession?: (sessionId: string, profile?: null | string) => void
   setStatusbarItemGroup?: SetStatusbarItemGroup
 }
 
@@ -538,7 +538,7 @@ function CronJobDetail({
   job: CronJob
   onDelete: () => void
   onEdit: () => void
-  onOpenSession?: (sessionId: string) => void
+  onOpenSession?: (sessionId: string, profile?: null | string) => void
   onPauseResume: () => void
   onTrigger: () => void
 }) {
@@ -636,7 +636,7 @@ function CronJobRuns({
 }: {
   c: Translations['cron']
   jobId: string
-  onOpenSession?: (sessionId: string) => void
+  onOpenSession?: (sessionId: string, profile?: null | string) => void
 }) {
   const [runs, setRuns] = useState<null | SessionInfo[]>(null)
 
@@ -689,7 +689,7 @@ function CronJobRuns({
             <button
               className="flex items-center justify-between gap-3 rounded-md px-2 py-1 text-left text-xs hover:bg-(--chrome-action-hover) focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
               key={run.id}
-              onClick={() => onOpenSession?.(run.id)}
+              onClick={() => onOpenSession?.(run.id, run.profile)}
               type="button"
             >
               <span className="truncate text-foreground">{run.title?.trim() || run.preview?.trim() || run.id}</span>

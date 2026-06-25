@@ -108,6 +108,7 @@ interface PalettePage {
 interface SessionEntry {
   id: string
   preview?: string
+  profile?: null | string
   title: string
 }
 
@@ -136,6 +137,7 @@ type SessionRow = Awaited<ReturnType<typeof listAllProfileSessions>>['sessions']
 const toSessionEntry = (session: SessionRow): SessionEntry => ({
   id: session.id,
   preview: session.preview ?? undefined,
+  profile: session.profile,
   title: sessionTitle(session)
 })
 
@@ -508,7 +510,7 @@ export function CommandPalette() {
           id: `session-${session.id}`,
           keywords: ['chat', 'session', ...(session.preview ? [session.preview] : [])],
           label: session.title,
-          run: go(sessionRoute(session.id))
+          run: go(sessionRoute(session.id, session.profile))
         }))
       })
     }
