@@ -1543,7 +1543,9 @@ def _save_cfg(cfg: dict):
     global _cfg_cache, _cfg_mtime, _cfg_path
     import yaml
 
-    path = _hermes_home / "config.yaml"
+    override = get_hermes_home_override()
+    home = override if isinstance(override, str) and override else _hermes_home
+    path = Path(home) / "config.yaml"
     with open(path, "w", encoding="utf-8") as f:
         yaml.safe_dump(cfg, f, allow_unicode=True)
     with _cfg_lock:
@@ -9480,6 +9482,32 @@ def _(rid, params: dict) -> dict:
             return _err(rid, 5001, str(e))
 
     return _err(rid, 4002, f"unknown config key: {key}")
+
+
+_config_set_unscoped = _methods.get("config.set")
+
+
+def _config_set_profile_scoped(rid, params: dict) -> dict:
+    if _config_set_unscoped is None:
+        return _err(rid, 5001, "config.set handler unavailable")
+    session = (
+        _sessions.get(params.get("session_id", ""))
+        if isinstance(params, dict)
+        else None
+    )
+    profile_home = session.get("profile_home") if isinstance(session, dict) else None
+    if not profile_home:
+        return _config_set_unscoped(rid, params)
+
+    token = set_hermes_home_override(str(profile_home))
+    try:
+        return _config_set_unscoped(rid, params)
+    finally:
+        reset_hermes_home_override(token)
+
+
+if _config_set_unscoped is not None:
+    _methods["config.set"] = _config_set_profile_scoped
 
 
 @method("config.get")
