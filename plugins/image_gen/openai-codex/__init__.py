@@ -27,48 +27,22 @@ from agent.image_gen_provider import (
     DEFAULT_ASPECT_RATIO,
     ImageGenProvider,
     error_response,
+    normalize_reference_images,
     resolve_aspect_ratio,
     save_b64_image,
     success_response,
 )
+from agent.openai_image_catalog import (
+    API_MODEL,
+    DEFAULT_MODEL,
+    MAX_REFERENCE_IMAGES,
+    MODELS as _MODELS,
+    SIZES as _SIZES,
+    resolve_tier,
+)
 
 logger = logging.getLogger(__name__)
 
-
-# ---------------------------------------------------------------------------
-# Model catalog — mirrors the ``openai`` plugin so the picker UX is identical.
-# ---------------------------------------------------------------------------
-
-API_MODEL = "gpt-image-2"
-
-_MODELS: Dict[str, Dict[str, Any]] = {
-    "gpt-image-2-low": {
-        "display": "GPT Image 2 (Low)",
-        "speed": "~15s",
-        "strengths": "Fast iteration, lowest cost",
-        "quality": "low",
-    },
-    "gpt-image-2-medium": {
-        "display": "GPT Image 2 (Medium)",
-        "speed": "~40s",
-        "strengths": "Balanced — default",
-        "quality": "medium",
-    },
-    "gpt-image-2-high": {
-        "display": "GPT Image 2 (High)",
-        "speed": "~2min",
-        "strengths": "Highest fidelity, strongest prompt adherence",
-        "quality": "high",
-    },
-}
-
-DEFAULT_MODEL = "gpt-image-2-medium"
-
-_SIZES = {
-    "landscape": "1536x1024",
-    "square": "1024x1024",
-    "portrait": "1024x1536",
-}
 
 # Codex Responses surface used for the request. The chat model itself is only
 # the host that calls the ``image_generation`` tool; the actual image work is
@@ -86,43 +60,9 @@ _CODEX_INSTRUCTIONS = (
 # ---------------------------------------------------------------------------
 
 
-def _load_image_gen_config() -> Dict[str, Any]:
-    """Read ``image_gen`` from config.yaml (returns {} on any failure)."""
-    try:
-        from hermes_cli.config import load_config
-
-        cfg = load_config()
-        section = cfg.get("image_gen") if isinstance(cfg, dict) else None
-        return section if isinstance(section, dict) else {}
-    except Exception as exc:
-        logger.debug("Could not load image_gen config: %s", exc)
-        return {}
-
-
 def _resolve_model() -> Tuple[str, Dict[str, Any]]:
     """Decide which tier to use and return ``(model_id, meta)``."""
-    import os
-
-    env_override = os.environ.get("OPENAI_IMAGE_MODEL")
-    if env_override and env_override in _MODELS:
-        return env_override, _MODELS[env_override]
-
-    cfg = _load_image_gen_config()
-    sub = cfg.get("openai-codex") if isinstance(cfg.get("openai-codex"), dict) else {}
-    candidate: Optional[str] = None
-    if isinstance(sub, dict):
-        value = sub.get("model")
-        if isinstance(value, str) and value in _MODELS:
-            candidate = value
-    if candidate is None:
-        top = cfg.get("model")
-        if isinstance(top, str) and top in _MODELS:
-            candidate = top
-
-    if candidate is not None:
-        return candidate, _MODELS[candidate]
-
-    return DEFAULT_MODEL, _MODELS[DEFAULT_MODEL]
+    return resolve_tier("openai-codex")
 
 
 def _read_codex_access_token() -> Optional[str]:
@@ -143,8 +83,40 @@ def _read_codex_access_token() -> Optional[str]:
         return None
 
 
-def _build_responses_payload(*, prompt: str, size: str, quality: str) -> Dict[str, Any]:
-    """Build the Codex Responses request body for an image_generation call."""
+def _resolve_source_image(ref: str) -> str:
+    """Resolve a source image to a URL or base64 ``data:`` URI for input_image.
+
+    The Codex Responses ``image_generation`` tool conditions on ``input_image``
+    parts whose ``image_url`` is a public URL or a base64 ``data:`` URI. The
+    shared resolver validates the source (read denylist + magic-byte sniff for
+    local files); public URLs and image ``data:`` URIs pass through, while local
+    files are inlined as a ``data:`` URI.
+
+    Raises ``ValueError`` on an empty, missing, non-image, or denylisted source.
+    """
+    from agent.image_source import resolve_image_source
+
+    return resolve_image_source(ref).as_url_or_inline()
+
+
+def _build_responses_payload(
+    *,
+    prompt: str,
+    size: str,
+    quality: str,
+    image_urls: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Build the Codex Responses request body for an image_generation call.
+
+    For image-to-image, each source in ``image_urls`` (a public URL or a base64
+    ``data:`` URI) is added as an ``input_image`` content part alongside the
+    prompt text. The ``image_generation`` tool conditions on those references —
+    the same mechanism the ChatGPT web app uses to edit an uploaded image.
+    """
+    content: List[Dict[str, Any]] = [{"type": "input_text", "text": prompt}]
+    for url in image_urls or []:
+        content.append({"type": "input_image", "image_url": url})
+
     return {
         "model": _CODEX_CHAT_MODEL,
         "store": False,
@@ -152,7 +124,7 @@ def _build_responses_payload(*, prompt: str, size: str, quality: str) -> Dict[st
         "input": [{
             "type": "message",
             "role": "user",
-            "content": [{"type": "input_text", "text": prompt}],
+            "content": content,
         }],
         "tools": [{
             "type": "image_generation",
@@ -242,7 +214,14 @@ def _iter_sse_json(response: Any):
         yield payload
 
 
-def _collect_image_b64(token: str, *, prompt: str, size: str, quality: str) -> Optional[str]:
+def _collect_image_b64(
+    token: str,
+    *,
+    prompt: str,
+    size: str,
+    quality: str,
+    image_urls: Optional[List[str]] = None,
+) -> Optional[str]:
     """Stream a Codex Responses image_generation call and return the b64 image."""
     import httpx
     from agent.auxiliary_client import _codex_cloudflare_headers
@@ -253,7 +232,12 @@ def _collect_image_b64(token: str, *, prompt: str, size: str, quality: str) -> O
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
     })
-    payload = _build_responses_payload(prompt=prompt, size=size, quality=quality)
+    payload = _build_responses_payload(
+        prompt=prompt,
+        size=size,
+        quality=quality,
+        image_urls=image_urls,
+    )
     timeout = httpx.Timeout(300.0, connect=30.0, read=300.0, write=30.0, pool=30.0)
 
     image_b64: Optional[str] = None
@@ -319,7 +303,7 @@ class OpenAICodexImageGenProvider(ImageGenProvider):
         return {
             "name": "OpenAI (Codex auth)",
             "badge": "free",
-            "tag": "gpt-image-2 via ChatGPT/Codex OAuth — no API key required (text-to-image only)",
+            "tag": "gpt-image-2 via ChatGPT/Codex OAuth — no API key required, text-to-image & image editing",
             "env_vars": [],
             "post_setup_hint": (
                 "Sign in with `hermes auth codex` (or `hermes setup` → Codex) "
@@ -328,12 +312,10 @@ class OpenAICodexImageGenProvider(ImageGenProvider):
         }
 
     def capabilities(self) -> Dict[str, Any]:
-        # The Codex Responses image_generation tool path is text-to-image
-        # only here. Image-to-image / editing via Codex OAuth is not wired —
-        # users who need editing should use the `openai` (API key), `fal`, or
-        # `xai` backends. Declaring text-only keeps the dynamic tool schema
-        # honest so the model doesn't attempt an unsupported edit.
-        return {"modalities": ["text"], "max_reference_images": 0}
+        # The Codex Responses image_generation tool conditions on input_image
+        # content parts, so it supports both text-to-image and image-to-image /
+        # editing — the same surface as the API-key ``openai`` backend.
+        return {"modalities": ["text", "image"], "max_reference_images": MAX_REFERENCE_IMAGES}
 
     def generate(
         self,
@@ -347,20 +329,15 @@ class OpenAICodexImageGenProvider(ImageGenProvider):
         prompt = (prompt or "").strip()
         aspect = resolve_aspect_ratio(aspect_ratio)
 
-        # Image-to-image / editing is not supported on the Codex OAuth path.
-        # Surface a clear, actionable error instead of silently ignoring the
-        # source image and producing an unrelated picture.
-        if (isinstance(image_url, str) and image_url.strip()) or reference_image_urls:
-            return error_response(
-                error=(
-                    "This model is not capable of image-to-image / editing. "
-                    "Please provide a text-only prompt (drop image_url and "
-                    "reference_image_urls)."
-                ),
-                error_type="modality_unsupported",
-                provider="openai-codex",
-                aspect_ratio=aspect,
-            )
+        # Collect source images (primary + references) for image-to-image; an
+        # empty list keeps this a plain text-to-image call.
+        sources: List[str] = []
+        if isinstance(image_url, str) and image_url.strip():
+            sources.append(image_url.strip())
+        for ref in (normalize_reference_images(reference_image_urls) or []):
+            sources.append(ref)
+        sources = sources[:MAX_REFERENCE_IMAGES]
+        modality = "image" if sources else "text"
 
         if not prompt:
             return error_response(
@@ -409,11 +386,24 @@ class OpenAICodexImageGenProvider(ImageGenProvider):
             )
 
         try:
+            image_urls = [_resolve_source_image(s) for s in sources]
+        except Exception as exc:
+            return error_response(
+                error=f"Could not load source image for editing: {exc}",
+                error_type="io_error",
+                provider="openai-codex",
+                model=tier_id,
+                prompt=prompt,
+                aspect_ratio=aspect,
+            )
+
+        try:
             b64 = _collect_image_b64(
                 token,
                 prompt=prompt,
                 size=size,
                 quality=meta["quality"],
+                image_urls=image_urls or None,
             )
         except Exception as exc:
             logger.debug("Codex image generation failed", exc_info=True)
@@ -454,6 +444,7 @@ class OpenAICodexImageGenProvider(ImageGenProvider):
             prompt=prompt,
             aspect_ratio=aspect,
             provider="openai-codex",
+            modality=modality,
             extra={"size": size, "quality": meta["quality"]},
         )
 

@@ -269,3 +269,32 @@ class TestGenerate:
 
         assert result["success"] is True
         assert result["image"] == "https://example.com/img.png"
+
+
+class TestSourceImageHardening:
+    """_load_image_bytes delegates local/data-URI validation to the resolver."""
+
+    _PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+
+    def test_local_image_bytes_and_name(self, tmp_path):
+        path = tmp_path / "cat.png"
+        path.write_bytes(self._PNG)
+
+        data, name = openai_plugin._load_image_bytes(str(path))
+
+        assert data == self._PNG
+        assert name == "cat.png"
+
+    def test_denylisted_local_rejected(self, tmp_path):
+        env_file = tmp_path / ".env"
+        env_file.write_bytes(self._PNG)
+
+        with pytest.raises(ValueError, match="Access denied"):
+            openai_plugin._load_image_bytes(str(env_file))
+
+    def test_non_image_local_rejected(self, tmp_path):
+        path = tmp_path / "notes.txt"
+        path.write_text("not an image")
+
+        with pytest.raises(ValueError, match="not a recognised image file"):
+            openai_plugin._load_image_bytes(str(path))

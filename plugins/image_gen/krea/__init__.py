@@ -154,6 +154,27 @@ def _resolve_creativity(value: Optional[str]) -> str:
     return "medium"
 
 
+def _resolve_style_refs(refs: List[Any]) -> List[Any]:
+    """Resolve Krea style references into a payload-ready list.
+
+    Krea fetches ``image_style_references`` server-side, so a bare local file
+    path can't be used as-is. String refs (URLs, ``data:`` URIs, local paths)
+    go through the shared resolver, which validates them (read denylist +
+    magic-byte sniff) and inlines local files as a ``data:`` URI. Non-string
+    refs — Krea's richer ``{"url": ..., "strength": ...}`` objects — pass
+    through verbatim for backward compatibility.
+    """
+    from agent.image_source import resolve_image_source
+
+    resolved: List[Any] = []
+    for ref in refs:
+        if isinstance(ref, str):
+            resolved.append(resolve_image_source(ref).as_url_or_inline())
+        else:
+            resolved.append(ref)
+    return resolved
+
+
 # ---------------------------------------------------------------------------
 # Provider
 # ---------------------------------------------------------------------------
@@ -301,7 +322,17 @@ class KreaImageGenProvider(ImageGenProvider):
         if style_refs:
             # Reference-guided generation (image-to-image style transfer).
             # Krea caps at 10 refs per request (already clamped above).
-            payload["image_style_references"] = style_refs
+            try:
+                payload["image_style_references"] = _resolve_style_refs(style_refs)
+            except Exception as exc:
+                return error_response(
+                    error=f"Could not load source image for editing: {exc}",
+                    error_type="io_error",
+                    provider="krea",
+                    model=model_id,
+                    prompt=prompt,
+                    aspect_ratio=aspect,
+                )
 
         moodboards = kwargs.get("moodboards")
         if isinstance(moodboards, list) and moodboards:

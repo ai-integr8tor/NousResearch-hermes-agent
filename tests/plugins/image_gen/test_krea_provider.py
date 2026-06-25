@@ -623,3 +623,31 @@ class TestRegistration:
         provider = mock_ctx.register_image_gen_provider.call_args[0][0]
         assert isinstance(provider, KreaImageGenProvider)
         assert provider.name == "krea"
+
+
+class TestStyleRefHardening:
+    """_resolve_style_refs validates string refs and passes dict refs through."""
+
+    _PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+
+    def test_local_inlined_dict_and_url_passthrough(self, tmp_path):
+        from plugins.image_gen.krea import _resolve_style_refs
+
+        path = tmp_path / "ref.png"
+        path.write_bytes(self._PNG)
+        rich_ref = {"url": "https://x.com/a.png", "strength": 0.5}
+
+        out = _resolve_style_refs([str(path), rich_ref, "https://x.com/b.png"])
+
+        assert out[0].startswith("data:image/png;base64,")
+        assert out[1] == rich_ref
+        assert out[2] == "https://x.com/b.png"
+
+    def test_denylisted_local_rejected(self, tmp_path):
+        from plugins.image_gen.krea import _resolve_style_refs
+
+        env_file = tmp_path / ".env"
+        env_file.write_bytes(self._PNG)
+
+        with pytest.raises(ValueError, match="Access denied"):
+            _resolve_style_refs([str(env_file)])

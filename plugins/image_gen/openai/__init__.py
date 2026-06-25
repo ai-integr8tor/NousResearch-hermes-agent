@@ -37,85 +37,21 @@ from agent.image_gen_provider import (
     save_url_image,
     success_response,
 )
+from agent.openai_image_catalog import (
+    API_MODEL,
+    DEFAULT_MODEL,
+    MAX_REFERENCE_IMAGES,
+    MODELS as _MODELS,
+    SIZES as _SIZES,
+    resolve_tier,
+)
 
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Model catalog
-# ---------------------------------------------------------------------------
-#
-# All three IDs resolve to the same underlying API model with a different
-# ``quality`` setting. ``api_model`` is what gets sent to OpenAI;
-# ``quality`` is the knob that changes generation time and output fidelity.
-
-API_MODEL = "gpt-image-2"
-
-_MODELS: Dict[str, Dict[str, Any]] = {
-    "gpt-image-2-low": {
-        "display": "GPT Image 2 (Low)",
-        "speed": "~15s",
-        "strengths": "Fast iteration, lowest cost",
-        "quality": "low",
-    },
-    "gpt-image-2-medium": {
-        "display": "GPT Image 2 (Medium)",
-        "speed": "~40s",
-        "strengths": "Balanced — default",
-        "quality": "medium",
-    },
-    "gpt-image-2-high": {
-        "display": "GPT Image 2 (High)",
-        "speed": "~2min",
-        "strengths": "Highest fidelity, strongest prompt adherence",
-        "quality": "high",
-    },
-}
-
-DEFAULT_MODEL = "gpt-image-2-medium"
-
-_SIZES = {
-    "landscape": "1536x1024",
-    "square": "1024x1024",
-    "portrait": "1024x1536",
-}
-
-
-def _load_openai_config() -> Dict[str, Any]:
-    """Read ``image_gen`` from config.yaml (returns {} on any failure)."""
-    try:
-        from hermes_cli.config import load_config
-
-        cfg = load_config()
-        section = cfg.get("image_gen") if isinstance(cfg, dict) else None
-        return section if isinstance(section, dict) else {}
-    except Exception as exc:
-        logger.debug("Could not load image_gen config: %s", exc)
-        return {}
-
-
 def _resolve_model() -> Tuple[str, Dict[str, Any]]:
     """Decide which tier to use and return ``(model_id, meta)``."""
-    env_override = os.environ.get("OPENAI_IMAGE_MODEL")
-    if env_override and env_override in _MODELS:
-        return env_override, _MODELS[env_override]
-
-    cfg = _load_openai_config()
-    openai_cfg = cfg.get("openai") if isinstance(cfg.get("openai"), dict) else {}
-    candidate: Optional[str] = None
-    if isinstance(openai_cfg, dict):
-        value = openai_cfg.get("model")
-        if isinstance(value, str) and value in _MODELS:
-            candidate = value
-    if candidate is None:
-        top = cfg.get("model")
-        if isinstance(top, str) and top in _MODELS:
-            candidate = top
-
-    if candidate is not None:
-        return candidate, _MODELS[candidate]
-
-    return DEFAULT_MODEL, _MODELS[DEFAULT_MODEL]
+    return resolve_tier("openai")
 
 
 # ---------------------------------------------------------------------------
@@ -124,33 +60,28 @@ def _resolve_model() -> Tuple[str, Dict[str, Any]]:
 
 
 def _load_image_bytes(ref: str) -> Tuple[bytes, str]:
-    """Load image bytes from a URL or local file path.
+    """Load image bytes from a URL, local file path, or data URI.
 
-    Returns ``(data, filename)``. Raises on any network / IO error so the
-    caller can surface a clean error_response.
+    Remote URLs are downloaded here — gpt-image-2's ``images.edit`` endpoint
+    needs the raw bytes as a multipart file. Local files and ``data:`` URIs go
+    through the shared resolver so they get the read denylist and magic-byte
+    validation every backend applies. Returns ``(data, filename)``; raises on
+    any network / IO / validation error so the caller surfaces a clean
+    error_response.
     """
-    ref = ref.strip()
-    lower = ref.lower()
-    if lower.startswith(("http://", "https://")):
+    from agent.image_source import SourceKind, resolve_image_source
+
+    source = resolve_image_source(ref)
+
+    if source.kind is SourceKind.REMOTE:
         import requests
 
-        resp = requests.get(ref, timeout=60)
+        resp = requests.get(source.value, timeout=60)
         resp.raise_for_status()
-        name = ref.split("?", 1)[0].rsplit("/", 1)[-1] or "image.png"
+        name = source.value.split("?", 1)[0].rsplit("/", 1)[-1] or "image.png"
         return resp.content, name
-    if lower.startswith("data:"):
-        import base64
 
-        header, _, b64 = ref.partition(",")
-        ext = "png"
-        if "image/" in header:
-            ext = header.split("image/", 1)[1].split(";", 1)[0] or "png"
-        return base64.b64decode(b64), f"image.{ext}"
-    # Local file path.
-    with open(ref, "rb") as fh:
-        data = fh.read()
-    name = os.path.basename(ref) or "image.png"
-    return data, name
+    return source.read_bytes(), source.filename()
 
 
 # ---------------------------------------------------------------------------
@@ -208,9 +139,8 @@ class OpenAIImageGenProvider(ImageGenProvider):
         }
 
     def capabilities(self) -> Dict[str, Any]:
-        # gpt-image-2 supports editing via images.edit() with up to 16 source
-        # images.
-        return {"modalities": ["text", "image"], "max_reference_images": 16}
+        # gpt-image-2 supports editing via images.edit().
+        return {"modalities": ["text", "image"], "max_reference_images": MAX_REFERENCE_IMAGES}
 
     def generate(
         self,
@@ -263,7 +193,7 @@ class OpenAIImageGenProvider(ImageGenProvider):
             sources.append(image_url.strip())
         for ref in (normalize_reference_images(reference_image_urls) or []):
             sources.append(ref)
-        sources = sources[:16]  # gpt-image-2 edit caps at 16 images
+        sources = sources[:MAX_REFERENCE_IMAGES]
         is_edit = bool(sources)
         modality = "image" if is_edit else "text"
 
