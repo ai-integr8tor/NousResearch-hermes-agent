@@ -162,6 +162,7 @@ except (ValueError, TypeError):
 _WS_ORPHAN_REAP_GRACE_S = max(0.0, _ws_orphan_reap_grace)
 _DETAIL_SECTION_NAMES = ("thinking", "tools", "subagents", "activity")
 _DETAIL_MODES = frozenset({"hidden", "collapsed", "expanded"})
+_SESSION_HISTORY_REFRESH_SECONDS = 2.0
 
 # ── Async RPC dispatch (#12546) ──────────────────────────────────────
 # A handful of handlers block the dispatcher loop in entry.py for seconds
@@ -462,6 +463,9 @@ def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> No
     stop_event = session.get("_notif_stop")
     if stop_event is not None:
         stop_event.set()
+    history_stop = session.get("_history_refresh_stop")
+    if history_stop is not None:
+        history_stop.set()
 
     agent = session.get("agent")
     lock = session.get("history_lock")
@@ -1164,6 +1168,7 @@ def _start_agent_build(sid: str, session: dict) -> None:
             with _sessions_lock:
                 if sid in _sessions:
                     _sessions[sid]["_notif_stop"] = _start_notification_poller(sid, _sessions[sid])
+                    _sessions[sid]["_history_refresh_stop"] = _start_history_refresh_poller(sid, _sessions[sid])
             _notify_session_boundary("on_session_reset", key)
 
             info = _session_info(agent, current)
@@ -4068,6 +4073,7 @@ def _init_session(
     with _sessions_lock:
         if sid in _sessions:
             _sessions[sid]["_notif_stop"] = _start_notification_poller(sid, _sessions[sid])
+            _sessions[sid]["_history_refresh_stop"] = _start_history_refresh_poller(sid, _sessions[sid])
     _notify_session_boundary("on_session_reset", key)
     _emit("session.info", sid, _session_info(agent, _sessions.get(sid, {})))
     _schedule_mcp_late_refresh(sid, agent)
@@ -4840,6 +4846,7 @@ def _(rid, params: dict) -> dict:
     )
 
     def _reuse_live_payload(sid: str, session: dict) -> dict:
+        _refresh_session_history_from_db(sid, session)
         payload = _live_session_payload(
             sid,
             session,
@@ -4935,6 +4942,7 @@ def _(rid, params: dict) -> dict:
                     "transport": current_transport() or _stdio_transport,
                 }
                 _register_session_cwd(_sessions[sid])
+                _sessions[sid]["_history_refresh_stop"] = _start_history_refresh_poller(sid, _sessions[sid])
         return _ok(
             rid,
             {
@@ -5238,6 +5246,84 @@ def _live_session_payload(
     if inflight:
         payload["inflight"] = inflight
     return payload
+
+
+def _refresh_session_history_from_db(sid: str, session: dict) -> dict | None:
+    """Refresh an idle live session from persisted history when another surface wrote it."""
+    key = str(session.get("session_key") or "")
+    lock = session.get("history_lock")
+    if not key or lock is None:
+        return None
+
+    with lock:
+        if session.get("running"):
+            return None
+        previous_history = list(session.get("history") or [])
+        previous_prefix = list(session.get("display_history_prefix") or [])
+
+    try:
+        with _session_db(session) as db:
+            if db is None:
+                return None
+            db.reopen_session(key)
+            history = db.get_messages_as_conversation(key)
+            if session.get("lazy"):
+                display_history = list(history)
+            else:
+                display_history = db.get_messages_as_conversation(key, include_ancestors=True)
+    except Exception:
+        logger.debug("failed to refresh live session history", exc_info=True)
+        return None
+
+    display_prefix = display_history[: max(0, len(display_history) - len(history))]
+    with lock:
+        if session.get("running"):
+            return None
+        if (
+            list(session.get("history") or []) != previous_history
+            or list(session.get("display_history_prefix") or []) != previous_prefix
+        ):
+            return None
+        if len(history) < len(previous_history):
+            return None
+        if len(history) == len(previous_history) and history != previous_history:
+            return None
+        if history == previous_history and display_prefix == previous_prefix:
+            return None
+        session["history"] = history
+        session["display_history_prefix"] = display_prefix
+        session["history_version"] = int(session.get("history_version", 0)) + 1
+        session["last_active"] = time.time()
+
+    messages = list(display_prefix) + list(history)
+    return {
+        "message_count": len(messages),
+        "messages": _history_to_messages(messages),
+        "running": bool(session.get("running")),
+        "session_key": _session_lookup_key(session, fallback=sid),
+        "status": _session_live_status(sid, session),
+        "updated_at": time.time(),
+    }
+
+
+def _history_refresh_loop(stop_event: threading.Event, sid: str, session: dict) -> None:
+    while not stop_event.wait(_SESSION_HISTORY_REFRESH_SECONDS):
+        if session.get("_finalized"):
+            return
+        payload = _refresh_session_history_from_db(sid, session)
+        if payload is not None:
+            _emit("session.history.updated", sid, payload)
+
+
+def _start_history_refresh_poller(sid: str, session: dict) -> threading.Event:
+    stop = threading.Event()
+    thread = threading.Thread(
+        target=_history_refresh_loop,
+        args=(stop, sid, session),
+        daemon=True,
+    )
+    thread.start()
+    return stop
 
 
 @method("session.active_list")
@@ -6961,6 +7047,8 @@ def _(rid, params: dict) -> dict:
     session, err = _sess_nowait(params, rid)
     if err:
         return err
+    sid = params.get("session_id") or ""
+    _refresh_session_history_from_db(sid, session)
     history = list(session.get("history", []))
     db = _get_db()
     if db is not None and session.get("session_key"):
