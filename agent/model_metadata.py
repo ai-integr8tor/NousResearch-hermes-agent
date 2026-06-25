@@ -53,6 +53,7 @@ _PROVIDER_PREFIXES: frozenset[str] = frozenset({
     "xiaomi",
     "arcee",
     "gmi",
+    "sakana-fugu",
     "tencent-tokenhub",
     "custom", "local",
     # Common aliases
@@ -65,6 +66,7 @@ _PROVIDER_PREFIXES: frozenset[str] = frozenset({
     "tencent", "tokenhub", "tencent-cloud", "tencentmaas",
     "arcee-ai", "arceeai",
     "gmi-cloud", "gmicloud",
+    "sakana", "fugu", "sakana-ai", "sakanaai",
     "xai", "x-ai", "x.ai", "grok",
     "nvidia", "nim", "nvidia-nim", "nemotron",
     "qwen-portal", "novita-ai", "novitaai",
@@ -246,6 +248,10 @@ DEFAULT_CONTEXT_LENGTHS = {
     "deepseek-chat": 1_000_000,
     "deepseek-reasoner": 1_000_000,
     "deepseek": 128000,
+    # Sakana Fugu — official catalog lists 1M context for Fugu/Fugu Ultra.
+    # Specific entries must come before any broad fallback.
+    "fugu-ultra": 1_000_000,
+    "fugu": 1_000_000,
     # Meta
     "llama": 131072,
     # Qwen — specific model families before the catch-all.
