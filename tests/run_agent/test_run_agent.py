@@ -125,6 +125,41 @@ def agent_with_memory_tool():
         return a
 
 
+def test_persist_user_message_override_preserves_multimodal_content(agent):
+    """Persistence override must not strip image/audio blocks before API use."""
+    multimodal_content = [
+        {"type": "text", "text": "see attached"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}},
+    ]
+    messages = [{"role": "user", "content": multimodal_content}]
+    agent._persist_user_message_idx = 0
+    agent._persist_user_message_override = "clean transcript text"
+    agent._persist_user_message_timestamp = "2026-06-18T12:00:00Z"
+
+    agent._apply_persist_user_message_override(messages)
+
+    assert messages[0]["content"] is multimodal_content
+    assert messages[0]["timestamp"] == "2026-06-18T12:00:00Z"
+
+
+def test_persist_user_message_override_rewrites_text_content(agent):
+    """Text-only turns still get the cleaner transcript override."""
+    messages = [{"role": "user", "content": "api-facing prompt"}]
+    agent._persist_user_message_idx = 0
+    agent._persist_user_message_override = "clean transcript text"
+    agent._persist_user_message_timestamp = "2026-06-18T12:00:00Z"
+
+    agent._apply_persist_user_message_override(messages)
+
+    assert messages == [
+        {
+            "role": "user",
+            "content": "clean transcript text",
+            "timestamp": "2026-06-18T12:00:00Z",
+        }
+    ]
+
+
 def test_aiagent_reuses_existing_errors_log_handler():
     """Repeated AIAgent init should not accumulate duplicate errors.log handlers."""
     root_logger = logging.getLogger()

@@ -317,6 +317,14 @@ TOOLSETS = {
         "includes": []
     },
 
+    "whoop": {
+        "description": "Read-only WHOOP profile, cycles, recovery, sleep, and workout tools",
+        "tools": [
+            "whoop_profile", "whoop_cycles", "whoop_recovery", "whoop_sleep", "whoop_workouts",
+        ],
+        "includes": []
+    },
+
 
     # Scenario-specific toolsets
     
@@ -595,8 +603,10 @@ def get_toolset(name: str) -> Optional[Dict[str, Any]]:
         return toolset if toolset else None
 
     if toolset:
+        raw_tools = toolset.get("tools", [])
+        declared_tools = raw_tools if isinstance(raw_tools, list) else []
         merged_tools = sorted(
-            set(toolset.get("tools", []))
+            set(declared_tools)
             | set(registry.get_tool_names_for_toolset(name))
         )
         return {**toolset, "tools": merged_tools}
