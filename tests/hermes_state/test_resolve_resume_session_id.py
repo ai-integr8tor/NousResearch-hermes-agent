@@ -48,9 +48,9 @@ def test_redirects_from_empty_head_to_descendant_with_messages(db):
         db.append_message("bulk", role="user", content=f"msg {i}")
 
     assert db.resolve_resume_session_id("head") == "bulk"
-
-
-def test_returns_self_when_session_has_messages(db):
+def test_returns_self_when_only_parent_has_messages(db):
+    # When a session already has messages AND no descendant has messages,
+    # it should still be returned.  The chain walk finds no better candidate.
     _make_chain(db, [("root", None), ("child", "root")])
     db.append_message("root", role="user", content="hi")
     assert db.resolve_resume_session_id("root") == "root"
@@ -138,3 +138,24 @@ def test_prefers_most_recent_child_when_fork_exists(db):
     ])
     db.append_message("newer_fork", role="user", content="x")
     assert db.resolve_resume_session_id("parent") == "newer_fork"
+
+
+def test_redirects_from_message_bearing_parent_to_child(db):
+    """Fix for problem 2: parent has messages AND child also has messages.
+
+    After context compression the parent holds old messages but the child
+    is the active continuation session.  resolve_resume_session_id should
+    prefer the latest descendant with messages, not short-circuit on the
+    parent.
+    """
+    _make_chain(db, [
+        ("original", None),
+        ("continued", "original"),
+    ])
+    # Both parent and child have messages
+    db.append_message("original", role="user", content="old msg")
+    db.append_message("original", role="assistant", content="old reply")
+    db.append_message("continued", role="user", content="new msg")
+    db.append_message("continued", role="assistant", content="new reply")
+
+    assert db.resolve_resume_session_id("original") == "continued"
