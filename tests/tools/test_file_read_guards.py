@@ -259,7 +259,7 @@ class TestFileDedup(unittest.TestCase):
         _read_tracker.clear()
         self._tmpdir = _make_safe_tempdir("hermes-dedup-")
         self._tmpfile = os.path.join(self._tmpdir, "dedup_test.txt")
-        with open(self._tmpfile, "w") as f:
+        with open(self._tmpfile, "w", encoding="utf-8") as f:
             f.write("line one\nline two\n")
 
     def tearDown(self):
@@ -371,7 +371,7 @@ class TestFileDedup(unittest.TestCase):
 
         # Modify the file — ensure mtime changes
         time.sleep(0.05)
-        with open(self._tmpfile, "w") as f:
+        with open(self._tmpfile, "w", encoding="utf-8") as f:
             f.write("changed content\n")
 
         r2 = json.loads(read_file_tool(self._tmpfile, task_id="mod"))
@@ -401,6 +401,56 @@ class TestFileDedup(unittest.TestCase):
         r2 = json.loads(read_file_tool(self._tmpfile, task_id="task_b"))
         self.assertNotEqual(r2.get("dedup"), True)
 
+    @patch("tools.file_tools._get_file_ops")
+    def test_skill_support_files_bypass_dedup(self, mock_ops):
+        """Files inside a skill directory must return verbatim content on re-read."""
+        skill_root = os.path.join(self._tmpdir, "demo-skill")
+        refs_dir = os.path.join(skill_root, "references")
+        os.makedirs(refs_dir, exist_ok=True)
+        with open(os.path.join(skill_root, "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write("---\nname: demo-skill\n---\n")
+        guide_path = os.path.join(refs_dir, "guide.md")
+        with open(guide_path, "w", encoding="utf-8") as f:
+            f.write("follow these steps\n")
+
+        mock_ops.return_value = _make_fake_ops(
+            content="follow these steps\n", file_size=19,
+        )
+
+        r1 = json.loads(read_file_tool(guide_path, task_id="skill"))
+        self.assertIn("content", r1)
+
+        r2 = json.loads(read_file_tool(guide_path, task_id="skill"))
+        self.assertIn("content", r2)
+        self.assertNotEqual(r2.get("dedup"), True)
+
+    @patch("tools.file_tools._get_file_ops")
+    def test_instruction_files_still_hit_real_read_loop_guard(self, mock_ops):
+        """Bypassing dedup for instruction files must not disable loop blocking."""
+        skill_root = os.path.join(self._tmpdir, "loop-skill")
+        os.makedirs(skill_root, exist_ok=True)
+        with open(os.path.join(skill_root, "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write("---\nname: loop-skill\n---\n")
+        guide_path = os.path.join(skill_root, "guide.md")
+        with open(guide_path, "w", encoding="utf-8") as f:
+            f.write("same instructions\n")
+
+        mock_ops.return_value = _make_fake_ops(
+            content="same instructions\n", file_size=18,
+        )
+
+        r1 = json.loads(read_file_tool(guide_path, task_id="skill-loop"))
+        r2 = json.loads(read_file_tool(guide_path, task_id="skill-loop"))
+        r3 = json.loads(read_file_tool(guide_path, task_id="skill-loop"))
+        r4 = json.loads(read_file_tool(guide_path, task_id="skill-loop"))
+
+        self.assertIn("content", r1)
+        self.assertIn("content", r2)
+        self.assertIn("content", r3)
+        self.assertIn("_warning", r3)
+        self.assertIn("error", r4)
+        self.assertIn("BLOCKED", r4["error"])
+
 
 # ---------------------------------------------------------------------------
 # Dedup stub-loop guard (issue #15759)
@@ -415,7 +465,7 @@ class TestDedupStubLoopGuard(unittest.TestCase):
         _read_tracker.clear()
         self._tmpdir = tempfile.mkdtemp()
         self._tmpfile = os.path.join(self._tmpdir, "loop_test.txt")
-        with open(self._tmpfile, "w") as f:
+        with open(self._tmpfile, "w", encoding="utf-8") as f:
             f.write("line one\nline two\n")
 
     def tearDown(self):
@@ -482,7 +532,7 @@ class TestDedupStubLoopGuard(unittest.TestCase):
 
         # File changes — mtime updates
         time.sleep(0.05)
-        with open(self._tmpfile, "w") as f:
+        with open(self._tmpfile, "w", encoding="utf-8") as f:
             f.write("brand new content\n")
 
         r4 = json.loads(read_file_tool(self._tmpfile, task_id="loop"))
@@ -561,7 +611,7 @@ class TestDedupResetOnCompression(unittest.TestCase):
         _read_tracker.clear()
         self._tmpdir = tempfile.mkdtemp()
         self._tmpfile = os.path.join(self._tmpdir, "compress_test.txt")
-        with open(self._tmpfile, "w") as f:
+        with open(self._tmpfile, "w", encoding="utf-8") as f:
             f.write("original content\n")
 
     def tearDown(self):
@@ -724,7 +774,7 @@ class TestWriteInvalidatesDedup(unittest.TestCase):
         _read_tracker.clear()
         self._tmpdir = _make_safe_tempdir("hermes-write-dedup-")
         self._tmpfile = os.path.join(self._tmpdir, "write_dedup.txt")
-        with open(self._tmpfile, "w") as f:
+        with open(self._tmpfile, "w", encoding="utf-8") as f:
             f.write("original content\n")
 
     def tearDown(self):
@@ -801,7 +851,7 @@ class TestWriteInvalidatesDedup(unittest.TestCase):
     def test_write_does_not_invalidate_other_files(self, mock_ops):
         """Writing file A should not invalidate dedup for file B."""
         other = os.path.join(self._tmpdir, "other.txt")
-        with open(other, "w") as f:
+        with open(other, "w", encoding="utf-8") as f:
             f.write("other content\n")
 
         fake = MagicMock()
