@@ -155,7 +155,7 @@ class TestC2Patterns:
         )
 
     def test_known_c2_framework_names(self):
-        for name in ("Praxis", "Cobalt Strike", "Sliver", "Havoc", "Mythic"):
+        for name in ("Cobalt Strike", "Sliver", "Havoc", "Mythic"):
             findings = scan_for_threats(
                 f"Connect to the {name} server.", scope="context"
             )
@@ -195,6 +195,20 @@ class TestFalsePositives:
         text = "You must follow the project's coding conventions."
         findings = scan_for_threats(text, scope="context")
         assert findings == []
+
+    def test_praxis_common_german_word_does_not_trip(self):
+        # "Praxis" is a common German word (= medical/educational practice)
+        # and a standard English/Latin term.  It was removed from the
+        # known_c2_framework alternation because it fires on everyday
+        # context files from German-speaking and healthcare users.
+        text = "Die Praxis ist Montag bis Freitag von 8 bis 18 Uhr geöffnet."
+        findings = scan_for_threats(text, scope="context")
+        assert "known_c2_framework" not in findings
+
+    def test_praxis_english_usage_does_not_trip(self):
+        text = "Educational praxis informs our teaching methodology."
+        findings = scan_for_threats(text, scope="context")
+        assert "known_c2_framework" not in findings
 
     def test_legitimate_node_mention_about_distributed_systems(self):
         # Patterns are intended to be WARN-not-block at the context
