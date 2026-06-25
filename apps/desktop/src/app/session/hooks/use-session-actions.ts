@@ -19,9 +19,11 @@ import {
   $currentModel,
   $currentProvider,
   $currentReasoningEffort,
+  $newChatWorkspaceTarget,
   $messages,
   $sessions,
   $yoloActive,
+  type NewChatWorkspaceTarget,
   sessionPinId,
   setActiveSessionId,
   setAwaitingResponse,
@@ -35,9 +37,11 @@ import {
   setCurrentReasoningEffort,
   setCurrentServiceTier,
   setCurrentUsage,
+  setCurrentCwdTransient,
   setFreshDraftReady,
   setIntroSeed,
   setMessages,
+  setNewChatWorkspaceTarget,
   setResumeExhaustedSessionId,
   setResumeFailedSessionId,
   setSelectedStoredSessionId,
@@ -75,6 +79,15 @@ interface SessionActionsOptions {
     updater: (state: ClientSessionState) => ClientSessionState,
     storedSessionId?: string | null
   ) => ClientSessionState
+}
+
+interface FreshSessionDraftOptions {
+  replaceRoute?: boolean
+  workspaceTarget?: NewChatWorkspaceTarget
+}
+
+function normalizeNewChatWorkspaceTarget(target: NewChatWorkspaceTarget): NewChatWorkspaceTarget {
+  return typeof target === 'string' ? target.trim() || null : target
 }
 
 function withAppendedText(message: ChatMessage, suffix: string): ChatMessage {
@@ -393,7 +406,14 @@ export function useSessionActions({
   const resumeRequestRef = useRef(0)
 
   const startFreshSessionDraft = useCallback(
-    (replaceRoute = false) => {
+    (options: boolean | FreshSessionDraftOptions = false) => {
+      const draftOptions = typeof options === 'boolean' ? { replaceRoute: options } : options
+      const replaceRoute = draftOptions.replaceRoute ?? false
+      const hasWorkspaceTarget = Object.hasOwn(draftOptions, 'workspaceTarget')
+      const workspaceTarget = hasWorkspaceTarget
+        ? normalizeNewChatWorkspaceTarget(draftOptions.workspaceTarget)
+        : undefined
+
       busyRef.current = false
       setBusy(false)
       setAwaitingResponse(false)
@@ -421,7 +441,14 @@ export function useSessionActions({
       // is cleared.
       setCurrentServiceTier('')
       setYoloActive(false)
-      setCurrentCwd(workspaceCwdForNewSession())
+      setNewChatWorkspaceTarget(hasWorkspaceTarget ? workspaceTarget : undefined)
+      if (!hasWorkspaceTarget) {
+        setCurrentCwd(workspaceCwdForNewSession())
+      } else if (workspaceTarget === null) {
+        setCurrentCwdTransient('')
+      } else if (typeof workspaceTarget === 'string') {
+        setCurrentCwd(workspaceTarget)
+      }
       setCurrentBranch('')
       // Never clear the composer here — ChatBar's per-thread draft swap owns it.
       setFreshDraftReady(true)
@@ -448,7 +475,13 @@ export function useSessionActions({
         // a backend resolves its own launch profile to None (_profile_home).
         const newChatProfile = $newChatProfile.get() ?? normalizeProfileKey($activeGatewayProfile.get())
         await ensureGatewayProfile(newChatProfile)
-        const cwd = $currentCwd.get().trim() || workspaceCwdForNewSession()
+        const workspaceTarget = $newChatWorkspaceTarget.get()
+        const cwd =
+          workspaceTarget === null
+            ? ''
+            : typeof workspaceTarget === 'string'
+              ? workspaceTarget.trim()
+              : $currentCwd.get().trim() || workspaceCwdForNewSession()
         // The composer's model/effort/fast is sticky UI state ($currentModel,
         // $currentProvider, $currentReasoningEffort, $currentFastMode). Ship it
         // with every session.create so the new chat opens on whatever the picker
@@ -497,6 +530,7 @@ export function useSessionActions({
         }
 
         setFreshDraftReady(false)
+        setNewChatWorkspaceTarget(undefined)
         setActiveSessionId(created.session_id)
         setSelectedStoredSessionId(stored)
         setSessionStartedAt(Date.now())
