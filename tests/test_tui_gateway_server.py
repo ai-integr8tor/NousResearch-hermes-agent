@@ -954,6 +954,83 @@ def test_session_resume_uses_parent_lineage_for_display(monkeypatch):
     assert captured["history_calls"] == [("tip", False), ("tip", True)]
 
 
+def test_refresh_session_history_from_db_updates_idle_live_session(monkeypatch):
+    class DbContext:
+        def __init__(self, db):
+            self.db = db
+
+        def __enter__(self):
+            return self.db
+
+        def __exit__(self, *_args):
+            return False
+
+    class FakeDB:
+        def __init__(self):
+            self.reopened = None
+
+        def reopen_session(self, target):
+            self.reopened = target
+
+        def get_messages_as_conversation(self, target, include_ancestors=False):
+            assert target == "stored-session"
+            if include_ancestors:
+                return [
+                    {"role": "user", "content": "root prompt"},
+                    {"role": "user", "content": "phone ping"},
+                    {"role": "assistant", "content": "phone pong"},
+                ]
+            return [
+                {"role": "user", "content": "phone ping"},
+                {"role": "assistant", "content": "phone pong"},
+            ]
+
+    fake_db = FakeDB()
+    monkeypatch.setattr(server, "_session_db", lambda _session: DbContext(fake_db))
+
+    session = {
+        "agent": types.SimpleNamespace(session_id="stored-session"),
+        "created_at": time.time(),
+        "display_history_prefix": [],
+        "history": [{"role": "user", "content": "old"}],
+        "history_lock": threading.Lock(),
+        "history_version": 0,
+        "running": False,
+        "session_key": "stored-session",
+    }
+
+    payload = server._refresh_session_history_from_db("runtime", session)
+
+    assert fake_db.reopened == "stored-session"
+    assert session["history"] == [
+        {"role": "user", "content": "phone ping"},
+        {"role": "assistant", "content": "phone pong"},
+    ]
+    assert session["display_history_prefix"] == [{"role": "user", "content": "root prompt"}]
+    assert session["history_version"] == 1
+    assert payload["messages"] == [
+        {"role": "user", "text": "root prompt"},
+        {"role": "user", "text": "phone ping"},
+        {"role": "assistant", "text": "phone pong"},
+    ]
+
+
+def test_refresh_session_history_from_db_skips_running_session(monkeypatch):
+    def fail_session_db(_session):
+        raise AssertionError("running sessions must not hit the database")
+
+    monkeypatch.setattr(server, "_session_db", fail_session_db)
+    session = {
+        "history": [{"role": "user", "content": "local turn"}],
+        "history_lock": threading.Lock(),
+        "running": True,
+        "session_key": "stored-session",
+    }
+
+    assert server._refresh_session_history_from_db("runtime", session) is None
+    assert session["history"] == [{"role": "user", "content": "local turn"}]
+
+
 def test_session_resume_follows_compression_tip(monkeypatch, tmp_path):
     """Resuming a rotated-out parent id must load the continuation's messages.
 

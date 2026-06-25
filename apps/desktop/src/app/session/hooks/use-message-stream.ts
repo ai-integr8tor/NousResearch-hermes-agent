@@ -11,9 +11,11 @@ import {
   type ChatMessagePart,
   chatMessageText,
   type GatewayEventPayload,
+  preserveLocalAssistantErrors,
   reasoningPart,
   renderMediaTags,
   textPart,
+  toChatMessages,
   upsertToolPart
 } from '@/lib/chat-messages'
 import { coerceGatewayText, coerceThinkingText, normalizePersonalityValue } from '@/lib/chat-runtime'
@@ -725,6 +727,27 @@ export function useMessageStream({
       const isActiveEvent = !!sessionId && sessionId === activeSessionIdRef.current
 
       if (event.type === 'gateway.ready') {
+        return
+      } else if (event.type === 'session.history.updated') {
+        if (!sessionId || !Array.isArray(payload?.messages)) {
+          return
+        }
+
+        const refreshedMessages = toChatMessages(payload.messages)
+
+        updateSessionState(sessionId, state => {
+          if (state.busy || state.awaitingResponse) {
+            return state
+          }
+
+          return {
+            ...state,
+            messages: preserveLocalAssistantErrors(refreshedMessages, state.messages)
+          }
+        })
+
+        void refreshSessions()
+
         return
       } else if (event.type === 'session.info') {
         // Apply session-scoped fields when the event targets the active

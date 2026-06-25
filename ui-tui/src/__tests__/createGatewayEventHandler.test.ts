@@ -94,6 +94,34 @@ describe('createGatewayEventHandler', () => {
     expect(getTurnState().todos).toEqual([])
   })
 
+  it('replaces the idle transcript when stored session history changes', () => {
+    const appended: Msg[] = []
+    const ctx = buildCtx(appended)
+    const onEvent = createGatewayEventHandler(ctx)
+
+    patchUiState({ busy: false, sid: 'runtime-session' })
+
+    onEvent({
+      payload: {
+        messages: [
+          { role: 'user', text: 'phone ping' },
+          { role: 'assistant', text: 'phone pong' }
+        ]
+      },
+      session_id: 'runtime-session',
+      type: 'session.history.updated'
+    } as any)
+
+    const update = ctx.transcript.setHistoryItems.mock.calls[0][0]
+    const intro: Msg = { info: { model: 'test' } as any, kind: 'intro', role: 'system', text: '' }
+
+    expect(update([intro, { role: 'user', text: 'old' }])).toEqual([
+      intro,
+      { role: 'user', text: 'phone ping' },
+      { role: 'assistant', text: 'phone pong' }
+    ])
+  })
+
   it('archives completed todos into transcript flow at end of turn', () => {
     const appended: Msg[] = []
     const todos = [{ content: 'Serve tiny latte', id: 'serve', status: 'completed' }]
