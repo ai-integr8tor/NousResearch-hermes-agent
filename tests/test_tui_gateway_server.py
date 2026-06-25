@@ -1015,6 +1015,54 @@ def test_refresh_session_history_from_db_updates_idle_live_session(monkeypatch):
     ]
 
 
+def test_refresh_session_history_from_db_keeps_longer_live_history(monkeypatch):
+    class DbContext:
+        def __init__(self, db):
+            self.db = db
+
+        def __enter__(self):
+            return self.db
+
+        def __exit__(self, *_args):
+            return False
+
+    class FakeDB:
+        def reopen_session(self, _target):
+            return None
+
+        def get_messages_as_conversation(self, target, include_ancestors=False):
+            assert target == "stored-session"
+            stored = [
+                {"role": "user", "content": "phone ping"},
+                {"role": "assistant", "content": "phone pong"},
+            ]
+            if include_ancestors:
+                return [{"role": "user", "content": "root prompt"}] + stored
+            return stored
+
+    monkeypatch.setattr(server, "_session_db", lambda _session: DbContext(FakeDB()))
+    live_history = [
+        {"role": "user", "content": "phone ping"},
+        {"role": "assistant", "content": "phone pong"},
+        {"role": "user", "content": "new live turn"},
+        {"role": "assistant", "content": "new live reply"},
+    ]
+    session = {
+        "agent": types.SimpleNamespace(session_id="stored-session"),
+        "created_at": time.time(),
+        "display_history_prefix": [{"role": "user", "content": "root prompt"}],
+        "history": list(live_history),
+        "history_lock": threading.Lock(),
+        "history_version": 7,
+        "running": False,
+        "session_key": "stored-session",
+    }
+
+    assert server._refresh_session_history_from_db("runtime", session) is None
+    assert session["history"] == live_history
+    assert session["history_version"] == 7
+
+
 def test_refresh_session_history_from_db_skips_running_session(monkeypatch):
     def fail_session_db(_session):
         raise AssertionError("running sessions must not hit the database")

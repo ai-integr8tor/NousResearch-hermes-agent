@@ -5202,6 +5202,10 @@ def _refresh_session_history_from_db(sid: str, session: dict) -> dict | None:
             or list(session.get("display_history_prefix") or []) != previous_prefix
         ):
             return None
+        if len(history) < len(previous_history):
+            return None
+        if len(history) == len(previous_history) and history != previous_history:
+            return None
         if history == previous_history and display_prefix == previous_prefix:
             return None
         session["history"] = history
