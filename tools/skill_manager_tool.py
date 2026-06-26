@@ -75,6 +75,47 @@ def _guard_agent_created_enabled() -> bool:
         return False
 
 
+def _external_dirs_readonly_enabled() -> bool:
+    """Read skills.external_dirs_readonly from config (default True).
+
+    When enabled, skill_manage rejects mutations on skills located in
+    external_dirs. The user must explicitly opt in to allow modifications
+    by setting ``skills.external_dirs_readonly: false`` in config.yaml.
+    """
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config()
+        return is_truthy_value(
+            cfg_get(cfg, "skills", "external_dirs_readonly"),
+            default=True,
+        )
+    except Exception:
+        return True  # fail-safe: default to readonly
+
+
+def _check_external_dirs_readonly(name: str, skill_dir: Path) -> Optional[str]:
+    """Return an error string if the skill is in an external dir and readonly is on.
+
+    Returns None when the mutation is allowed (either the skill is local, or
+    readonly is disabled).
+    """
+    if not _external_dirs_readonly_enabled():
+        return None
+
+    from agent.skill_utils import is_external_skill_dir
+
+    if is_external_skill_dir(skill_dir):
+        return (
+            f"Skill '{name}' is in an external directory ({skill_dir}) and "
+            f"skills.external_dirs_readonly is enabled. Skills managed by an "
+            f"external package manager should not be modified directly — changes "
+            f"will be lost on the next update. Set "
+            f"`skills.external_dirs_readonly: false` in config.yaml to allow "
+            f"modifications, or copy the skill to ~/.hermes/skills/ first."
+        )
+    return None
+
+
 def _security_scan_skill(skill_dir: Path) -> Optional[str]:
     """Scan a skill directory after write. Returns error string if blocked, else None.
 
@@ -638,6 +679,11 @@ def _edit_skill(name: str, content: str) -> Dict[str, Any]:
     if not existing:
         return {"success": False, "error": _skill_not_found_error(name)}
 
+    # External dirs readonly guard
+    guard_err = _check_external_dirs_readonly(name, existing["path"])
+    if guard_err:
+        return {"success": False, "error": guard_err}
+
     skill_md = existing["path"] / "SKILL.md"
     # Back up original content for rollback
     original_content = skill_md.read_text(encoding="utf-8") if skill_md.exists() else None
@@ -688,6 +734,11 @@ def _patch_skill(
     existing = _find_skill(name)
     if not existing:
         return {"success": False, "error": _skill_not_found_error(name)}
+
+    # External dirs readonly guard
+    guard_err = _check_external_dirs_readonly(name, existing["path"])
+    if guard_err:
+        return {"success": False, "error": guard_err}
 
     skill_dir = existing["path"]
 
@@ -784,6 +835,11 @@ def _delete_skill(name: str, absorbed_into: Optional[str] = None) -> Dict[str, A
     if not existing:
         return {"success": False, "error": _skill_not_found_error(name)}
 
+    # External dirs readonly guard
+    guard_err = _check_external_dirs_readonly(name, existing["path"])
+    if guard_err:
+        return {"success": False, "error": guard_err}
+
     pinned_err = _pinned_guard(name)
     if pinned_err:
         return {"success": False, "error": pinned_err}
@@ -859,6 +915,11 @@ def _write_file(name: str, file_path: str, file_content: str) -> Dict[str, Any]:
     if not existing:
         return {"success": False, "error": _skill_not_found_error(name, " Create it first with action='create'.")}
 
+    # External dirs readonly guard
+    guard_err = _check_external_dirs_readonly(name, existing["path"])
+    if guard_err:
+        return {"success": False, "error": guard_err}
+
     target, err = _resolve_skill_target(existing["path"], file_path)
     if err:
         return {"success": False, "error": err}
@@ -892,6 +953,11 @@ def _remove_file(name: str, file_path: str) -> Dict[str, Any]:
     existing = _find_skill(name)
     if not existing:
         return {"success": False, "error": _skill_not_found_error(name)}
+
+    # External dirs readonly guard
+    guard_err = _check_external_dirs_readonly(name, existing["path"])
+    if guard_err:
+        return {"success": False, "error": guard_err}
 
     skill_dir = existing["path"]
 
