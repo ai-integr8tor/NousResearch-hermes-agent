@@ -493,9 +493,11 @@ export interface CronJob {
   id: string
   last_error?: null | string
   last_run_at?: null | string
+  model?: null | string
   name?: null | string
   next_run_at?: null | string
   prompt?: null | string
+  provider?: null | string
   schedule?: CronJobSchedule
   schedule_display?: null | string
   script?: null | string
@@ -504,8 +506,10 @@ export interface CronJob {
 
 export interface CronJobCreatePayload {
   deliver?: string
+  model?: null | string
   name?: string
   prompt: string
+  provider?: null | string
   schedule: string
 }
 
@@ -518,8 +522,10 @@ export interface CronJobSchedule {
 export interface CronJobUpdates {
   deliver?: string
   enabled?: boolean
+  model?: null | string
   name?: string
   prompt?: string
+  provider?: null | string
   schedule?: string
 }
 

@@ -7867,6 +7867,8 @@ class CronJobCreate(BaseModel):
     name: str = ""
     deliver: str = "local"
     skills: Optional[List[str]] = None
+    model: Optional[str] = None
+    provider: Optional[str] = None
 
 
 class CronJobUpdate(BaseModel):
@@ -8039,6 +8041,8 @@ async def create_cron_job(body: CronJobCreate, profile: str = "default"):
             name=body.name,
             deliver=body.deliver,
             skills=body.skills,
+            model=body.model,
+            provider=body.provider,
         )
     except Exception as e:
         _log.exception("POST /api/cron/jobs failed")
@@ -8080,7 +8084,7 @@ async def update_cron_job(job_id: str, body: CronJobUpdate, profile: Optional[st
         raise HTTPException(status_code=404, detail="Job not found")
     try:
         job = _call_cron_for_profile(selected, "update_job", job_id, body.updates)
-    except ValueError as exc:
+    except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
