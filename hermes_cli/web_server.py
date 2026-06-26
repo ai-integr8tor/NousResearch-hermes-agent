@@ -2004,22 +2004,9 @@ async def get_status(profile: Optional[str] = None):
         if gateway_running and gateway_state is None and remote_health_body is not None:
             gateway_state = "running"
 
-        active_sessions = 0
-        try:
-            from hermes_state import SessionDB
-            db = SessionDB()
-            try:
-                sessions = db.list_sessions_rich(limit=50)
-                now = time.time()
-                active_sessions = sum(
-                    1 for s in sessions
-                    if s.get("ended_at") is None
-                    and (now - s.get("last_active", s.get("started_at", 0))) < 300
-                )
-            finally:
-                db.close()
-        except Exception:
-            pass
+        # Read-only SessionDB scan — keep off the event loop so concurrent
+        # /api/profiles/sessions work cannot stall this public liveness probe.
+        active_sessions = await asyncio.to_thread(_count_active_sessions_sync)
 
         # Busy/drainable readout (NAS lifecycle-safety gate).  active_agents is
         # the in-flight gateway-turn count the gateway now persists at every
@@ -3223,59 +3210,47 @@ async def get_sessions(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-@app.get("/api/profiles/sessions")
-async def get_profiles_sessions(
-    limit: int = 20,
-    offset: int = 0,
-    min_messages: int = 0,
-    archived: str = "exclude",
-    order: str = "recent",
-    profile: str = "all",
-    source: str = None,
-    exclude_sources: str = None,
-):
-    """Unified, read-only session list aggregated across ALL profiles.
+def _count_active_sessions_sync() -> int:
+    """Count recently-active sessions for /api/status — run via asyncio.to_thread."""
+    try:
+        from hermes_state import SessionDB
 
-    Intentionally process-light: this opens each profile's ``state.db`` directly
-    from disk — it does NOT spawn a dashboard backend per profile. Each returned
-    session is tagged with its owning ``profile`` so the desktop renders one
-    browsable list and only spins up a profile's backend when the user actually
-    interacts (sends a message). A user with a single (default) profile gets the
-    same rows as ``/api/sessions``, just tagged ``profile="default"``.
-    """
-    if archived not in ("exclude", "only", "include"):
-        raise HTTPException(status_code=400, detail="archived must be one of: exclude, only, include")
-    if order not in ("created", "recent"):
-        raise HTTPException(status_code=400, detail="order must be one of: created, recent")
-
-    from hermes_state import SessionDB
-    from hermes_cli import profiles as profiles_mod
-
-    targets: List[Tuple[str, Path]] = []
-    if profile and profile != "all":
-        name, home = _cron_profile_home(profile)
-        targets.append((name, home))
-    else:
+        db = SessionDB()
         try:
-            infos = profiles_mod.list_profiles()
-            targets = [(info.name, info.path) for info in infos]
-        except Exception:
-            _log.exception("GET /api/profiles/sessions: list_profiles failed")
-            targets = []
-        if not targets:
-            targets.append(("default", profiles_mod.get_profile_dir("default")))
+            sessions = db.list_sessions_rich(limit=50)
+            now = time.time()
+            return sum(
+                1 for s in sessions
+                if s.get("ended_at") is None
+                and (now - s.get("last_active", s.get("started_at", 0))) < 300
+            )
+        finally:
+            db.close()
+    except Exception:
+        return 0
 
-    min_message_count = max(0, min_messages)
-    archived_only = archived == "only"
-    include_archived = archived == "include"
-    # Source scoping (see /api/sessions): recents pass exclude_sources=cron,
-    # the cron-jobs section passes source=cron — two independent lists so
-    # newest cron sessions can't starve the recents page.
-    source_filter = source or None
-    exclude_list = [s for s in (exclude_sources or "").split(",") if s.strip()]
-    # Over-fetch per profile so the merged+sorted window is correct for the
-    # requested page. Capped so a huge profile can't blow up the response.
-    per_profile = min(max(limit + offset, limit), 500)
+
+def _fetch_profiles_sessions_sync(
+    targets: List[Tuple[str, Path]],
+    *,
+    source_filter: Optional[str],
+    exclude_list: List[str],
+    per_profile: int,
+    min_message_count: int,
+    include_archived: bool,
+    archived_only: bool,
+    order: str,
+    offset: int,
+    limit: int,
+) -> Dict[str, Any]:
+    """Blocking session aggregation across profiles — run via asyncio.to_thread.
+
+    Opening and scanning each profile's state.db is synchronous SQLite I/O.
+    When this ran inline inside the async handler it blocked uvicorn's single
+    event loop for several seconds, stalling /api/status, WebSocket pings, and
+    every other in-flight request (remote desktop boot + liveness probes).
+    """
+    from hermes_state import SessionDB
 
     merged: List[Dict[str, Any]] = []
     total = 0
@@ -3287,9 +3262,6 @@ async def get_profiles_sessions(
         if not db_path.exists():
             continue
         try:
-            # Read-only: this loop runs on every sidebar refresh, so it must
-            # never DDL/write-lock another profile's live DB (see SessionDB
-            # read_only docstring).
             db = SessionDB(db_path=db_path, read_only=True)
         except Exception as exc:
             errors.append({"profile": name, "error": str(exc)})
@@ -3340,6 +3312,74 @@ async def get_profiles_sessions(
         "offset": offset,
         "errors": errors,
     }
+
+
+@app.get("/api/profiles/sessions")
+async def get_profiles_sessions(
+    limit: int = 20,
+    offset: int = 0,
+    min_messages: int = 0,
+    archived: str = "exclude",
+    order: str = "recent",
+    profile: str = "all",
+    source: str = None,
+    exclude_sources: str = None,
+):
+    """Unified, read-only session list aggregated across ALL profiles.
+
+    Intentionally process-light: this opens each profile's ``state.db`` directly
+    from disk — it does NOT spawn a dashboard backend per profile. Each returned
+    session is tagged with its owning ``profile`` so the desktop renders one
+    browsable list and only spins up a profile's backend when the user actually
+    interacts (sends a message). A user with a single (default) profile gets the
+    same rows as ``/api/sessions``, just tagged ``profile="default"``.
+    """
+    if archived not in ("exclude", "only", "include"):
+        raise HTTPException(status_code=400, detail="archived must be one of: exclude, only, include")
+    if order not in ("created", "recent"):
+        raise HTTPException(status_code=400, detail="order must be one of: created, recent")
+
+    from hermes_cli import profiles as profiles_mod
+
+    targets: List[Tuple[str, Path]] = []
+    if profile and profile != "all":
+        name, home = _cron_profile_home(profile)
+        targets.append((name, home))
+    else:
+        try:
+            infos = profiles_mod.list_profiles()
+            targets = [(info.name, info.path) for info in infos]
+        except Exception:
+            _log.exception("GET /api/profiles/sessions: list_profiles failed")
+            targets = []
+        if not targets:
+            targets.append(("default", profiles_mod.get_profile_dir("default")))
+
+    min_message_count = max(0, min_messages)
+    archived_only = archived == "only"
+    include_archived = archived == "include"
+    # Source scoping (see /api/sessions): recents pass exclude_sources=cron,
+    # the cron-jobs section passes source=cron — two independent lists so
+    # newest cron sessions can't starve the recents page.
+    source_filter = source or None
+    exclude_list = [s for s in (exclude_sources or "").split(",") if s.strip()]
+    # Over-fetch per profile so the merged+sorted window is correct for the
+    # requested page. Capped so a huge profile can't blow up the response.
+    per_profile = min(max(limit + offset, limit), 500)
+
+    return await asyncio.to_thread(
+        _fetch_profiles_sessions_sync,
+        targets,
+        source_filter=source_filter,
+        exclude_list=exclude_list,
+        per_profile=per_profile,
+        min_message_count=min_message_count,
+        include_archived=include_archived,
+        archived_only=archived_only,
+        order=order,
+        offset=offset,
+        limit=limit,
+    )
 
 
 @app.get("/api/sessions/search")

@@ -5966,7 +5966,11 @@ ipcMain.handle('hermes:connection:revalidate', async () => {
 
   const base = conn.baseUrl.replace(/\/+$/, '')
   try {
-    await fetchPublicJson(`${base}/api/status`, { timeoutMs: 2_500 })
+    // Remote dashboards run a single uvicorn worker; a concurrent sidebar refresh
+    // (/api/profiles/sessions) can queue /api/status behind several seconds of
+    // SQLite I/O. A 2.5s probe falsely declares healthy remotes dead and kicks
+    // off a reconnect storm (WS code 1006, hermes:api 15s timeouts).
+    await fetchPublicJson(`${base}/api/status`, { timeoutMs: DEFAULT_FETCH_TIMEOUT_MS })
     return { ok: true, rebuilt: false }
   } catch {
     // Unreachable remote: drop the stale cache so the renderer's next reconnect
