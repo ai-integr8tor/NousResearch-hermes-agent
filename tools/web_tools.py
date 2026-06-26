@@ -1469,6 +1469,11 @@ WEB_SEARCH_SCHEMA = {
                 "minimum": 1,
                 "maximum": 100,
                 "default": 5
+            },
+            "search_engine": {
+                "type": "string",
+                "description": "Which search engine to use. \"auto\" (default) walks the fallback chain in config. An explicit engine name (e.g. \"baidu\", \"serper\") uses only that engine. Only engines that are currently configured appear in the choices.",
+                "default": "auto"
             }
         },
         "required": ["query"]
@@ -1496,7 +1501,11 @@ registry.register(
     name="web_search",
     toolset="web",
     schema=WEB_SEARCH_SCHEMA,
-    handler=lambda args, **kw: web_search_tool(args.get("query", ""), limit=args.get("limit", 5)),
+    handler=lambda args, **kw: web_search_tool(
+        args.get("query", ""),
+        limit=args.get("limit", 5),
+        search_engine=args.get("search_engine", "auto"),
+    ),
     check_fn=check_web_api_key,
     requires_env=_web_requires_env(),
     emoji="🔍",
