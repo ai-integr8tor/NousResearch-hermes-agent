@@ -261,17 +261,21 @@ def _is_backend_available(backend: str) -> bool:
 # ─── Fallback Chain & Multi-Source Search ────────────────────────────────────
 
 def _get_valid_engine_names() -> set[str]:
-    """Return the set of currently-registered search provider names.
+    """Return the set of usable search engine choices for the model.
 
-    Used by ``web_search_tool`` to validate the ``search_engine`` parameter.
-    Dynamically sourced from the provider registry so adding a new provider
-    automatically extends the valid choices — no hardcoded list.
+    Only providers where ``is_available()`` returns True are included,
+    so the model never sees engines that lack API keys.  ``"auto"`` is
+    always present — it walks the fallback chain.
     """
+    choices = {"auto"}
     try:
         from agent.web_search_registry import list_providers
-        return {p.name for p in list_providers()}
+        for p in list_providers():
+            if p.is_available():
+                choices.add(p.name)
     except Exception:
-        return set()
+        pass
+    return choices
 
 
 def _get_fallback_chain() -> list[str]:
