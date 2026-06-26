@@ -3586,13 +3586,15 @@ class AIAgent:
         return False
 
     @staticmethod
-    def _build_keepalive_http_client(base_url: str = "") -> Any:
+    def _build_keepalive_http_client(
+        base_url: str = "", follow_redirects: bool = False
+    ) -> Any:
         try:
             import httpx as _httpx
             import socket as _socket
 
             if "api.githubcopilot.com" in str(base_url or "").lower():
-                return _httpx.Client()
+                return _httpx.Client(follow_redirects=follow_redirects)
 
             _sock_opts = [(_socket.SOL_SOCKET, _socket.SO_KEEPALIVE, 1)]
             if hasattr(_socket, "TCP_KEEPIDLE"):
@@ -3609,6 +3611,7 @@ class AIAgent:
             return _httpx.Client(
                 transport=_httpx.HTTPTransport(socket_options=_sock_opts),
                 proxy=_proxy,
+                follow_redirects=follow_redirects,
             )
         except Exception:
             return None
