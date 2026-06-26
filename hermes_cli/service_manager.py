@@ -775,6 +775,41 @@ class S6ServiceManager:
             so even output that lacked a Python-logger timestamp
             (rich banners, third-party libs' raw prints) is
             correlatable in ``current``.
+
+        Multi-container shared-volume safety (issue #34457):
+        ``s6-log`` takes an *exclusive* lock on its log directory
+        (``<log_dir>/lock``) to guarantee a single writer. When two
+        containers (e.g. a gateway sidecar and a dashboard sidecar)
+        bind-mount the **same** host data volume to keep SQLite state
+        and config in sync, both run a ``gateway-default`` s6-log
+        against the *same* ``logs/gateways/default`` path. The first
+        container claims the lock; the second's ``s6-log`` dies with
+        ``unable to take lock`` and ``s6-supervise`` restarts it
+        instantly — an endless sub-second crash loop that hammers the
+        host disk.
+
+        Fix: by default, nest the log directory under a per-container
+        token so each container locks a distinct path while still
+        persisting under the shared volume. The token is the container
+        identity — ``HERMES_CONTAINER_ID`` if the operator sets one,
+        else ``$HOSTNAME`` (Docker seeds this with the unique container
+        ID by default). The resulting layout is
+        ``logs/gateways/<profile>/<container>/current``.
+
+        The token is resolved portably (the script runs under
+        ``with-contenv sh`` — dash/execline, not bash — where
+        ``$HOSTNAME`` is not guaranteed to be exported): prefer the
+        ``HERMES_CONTAINER_ID`` override, then ``$HOSTNAME`` if the
+        shell happens to export it, then the ``hostname`` command, then
+        ``/etc/hostname``. Docker populates all three of the latter with
+        the unique container ID by default.
+
+        Backwards-compat: operators who deliberately run a single
+        container (the overwhelmingly common case) and want the legacy
+        flat ``logs/gateways/<profile>/current`` path can set
+        ``HERMES_GATEWAY_LOG_PER_CONTAINER=0``. When the per-container
+        token can't be resolved (no HOSTNAME, no override) we also fall
+        back to the flat path rather than inventing an unstable token.
         """
         import shlex
         prof = shlex.quote(profile)
@@ -782,7 +817,25 @@ class S6ServiceManager:
             f"#!/command/with-contenv sh\n"
             f"# shellcheck shell=sh\n"
             f': "${{HERMES_HOME:=/opt/data}}"\n'
-            f'log_dir="$HERMES_HOME/logs/gateways/{prof}"\n'
+            f'base_dir="$HERMES_HOME/logs/gateways/{prof}"\n'
+            f'log_dir="$base_dir"\n'
+            f'# Per-container log dir avoids s6-log lock collisions when\n'
+            f'# multiple containers share one data volume (issue #34457).\n'
+            f'# Opt out with HERMES_GATEWAY_LOG_PER_CONTAINER=0.\n'
+            f'case "${{HERMES_GATEWAY_LOG_PER_CONTAINER:-1}}" in\n'
+            f'    0|false|FALSE|False|no|NO|No) ;;\n'
+            f'    *)\n'
+            f'        # POSIX sh: $HOSTNAME is not guaranteed (SC3028);\n'
+            f'        # fall back to the hostname command / /etc/hostname.\n'
+            f'        container_id="${{HERMES_CONTAINER_ID:-}}"\n'
+            f'        [ -n "$container_id" ] || container_id="${{HOSTNAME:-}}"\n'
+            f'        [ -n "$container_id" ] || container_id="$(hostname 2>/dev/null || true)"\n'
+            f'        [ -n "$container_id" ] || container_id="$(cat /etc/hostname 2>/dev/null || true)"\n'
+            f'        if [ -n "$container_id" ]; then\n'
+            f'            log_dir="$base_dir/$container_id"\n'
+            f'        fi\n'
+            f'        ;;\n'
+            f'esac\n'
             f'mkdir -p "$log_dir"\n'
             # The gateways/ parent must be chowned too (non-recursively):
             # `mkdir -p` creates it root-owned on a root-context boot, and a
@@ -802,7 +855,20 @@ class S6ServiceManager:
 
     # -- lifecycle ---------------------------------------------------------
 
-    def _run_svc(self, action_flag: str, action_label: str, name: str) -> None:
+    @staticmethod
+    def _log_service_dir(service_dir: Path) -> Path | None:
+        """Return the ``log/`` sub-service dir when the slot has a logger."""
+        log_dir = service_dir / "log"
+        return log_dir if log_dir.is_dir() else None
+
+    def _run_svc(
+        self,
+        action_flag: str,
+        action_label: str,
+        name: str,
+        *,
+        service_dir: Path | None = None,
+    ) -> None:
         """Shared lifecycle dispatch for start / stop / restart.
 
         Translates the two failure modes operators care about into
@@ -821,10 +887,13 @@ class S6ServiceManager:
         ``action_flag`` is the ``s6-svc`` flag (``-u`` / ``-d`` /
         ``-t``); ``action_label`` is the human verb (``start`` /
         ``stop`` / ``restart``) used in error messages.
+
+        ``service_dir`` overrides ``<scandir>/<name>/`` for nested
+        sub-services such as ``gateway-<profile>/log``.
         """
         import subprocess
 
-        service_dir = self.scandir / name
+        service_dir = service_dir or (self.scandir / name)
         if not service_dir.is_dir():
             # Strip the gateway- prefix back off so the message
             # matches what the user typed on the CLI (``-p <profile>``).
@@ -851,12 +920,29 @@ class S6ServiceManager:
     def start(self, name: str) -> None:
         """Bring up a registered service (``s6-svc -u``).
 
+        Also brings up the ``log/`` sub-service when present. s6
+        supervises the producer and its logger independently (issue
+        #34480), so a ``log/down`` marker written at reconcile time
+        does **not** cascade when the user later starts the gateway
+        via ``hermes gateway start`` or the ``gateway run`` supervised
+        redirect. Without explicitly starting the logger, stdout never
+        reaches s6-log → ``docker logs``.
+
         Raises:
             GatewayNotRegisteredError: no service directory for ``name``.
             S6CommandError: s6-svc exited non-zero for any other reason
                 (permission denied on the supervise FIFO, timeout, etc.).
         """
-        self._run_svc("-u", "start", name)
+        service_dir = self.scandir / name
+        self._run_svc("-u", "start", name, service_dir=service_dir)
+        log_dir = self._log_service_dir(service_dir)
+        if log_dir is not None:
+            self._run_svc(
+                "-u",
+                "start",
+                f"{name}/log",
+                service_dir=log_dir,
+            )
         _write_gateway_desired_state(name, "running")
 
     def _supervised_pid(self, name: str) -> int | None:
@@ -896,6 +982,10 @@ class S6ServiceManager:
         The marker write is best-effort — a failure only means the stop
         is treated as signal-initiated, which is the safe fallback.
 
+        Also brings down the ``log/`` sub-service when present so an
+        intentionally-stopped gateway does not leave a pointless s6-log
+        running (issue #34480).
+
         Raises:
             GatewayNotRegisteredError: no service directory for ``name``.
             S6CommandError: s6-svc exited non-zero for any other reason.
@@ -908,7 +998,16 @@ class S6ServiceManager:
                 write_planned_stop_marker(pid)
             except Exception:
                 pass
-        self._run_svc("-d", "stop", name)
+        service_dir = self.scandir / name
+        self._run_svc("-d", "stop", name, service_dir=service_dir)
+        log_dir = self._log_service_dir(service_dir)
+        if log_dir is not None:
+            self._run_svc(
+                "-d",
+                "stop",
+                f"{name}/log",
+                service_dir=log_dir,
+            )
         _write_gateway_desired_state(name, "stopped")
 
     def restart(self, name: str) -> None:

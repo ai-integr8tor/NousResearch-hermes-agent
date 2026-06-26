@@ -697,6 +697,47 @@ def test_s6_register_writes_finish_script(
     assert "125" in finish_path.read_text()
 
 
+def test_render_log_run_scopes_lock_per_container() -> None:
+    """Issue #34457: two containers sharing one data volume must not
+    collide on the same s6-log lock. The log/run script must derive a
+    per-container subdirectory (default on) so each container's
+    ``s6-log`` locks a distinct path."""
+    log_text = S6ServiceManager._render_log_run("default")
+
+    # Base path is still the documented location …
+    assert 'base_dir="$HERMES_HOME/logs/gateways/default"' in log_text
+    # … but the lock dir is nested under a per-container token by default.
+    # The token is resolved portably (POSIX sh has no guaranteed $HOSTNAME):
+    # HERMES_CONTAINER_ID → $HOSTNAME → `hostname` → /etc/hostname.
+    assert 'container_id="${HERMES_CONTAINER_ID:-}"' in log_text
+    assert 'container_id="${HOSTNAME:-}"' in log_text
+    assert "hostname 2>/dev/null" in log_text
+    assert "cat /etc/hostname 2>/dev/null" in log_text
+    assert 'log_dir="$base_dir/$container_id"' in log_text
+    # Opt-out hook is present and defaults to enabled ("1").
+    assert '"${HERMES_GATEWAY_LOG_PER_CONTAINER:-1}"' in log_text
+    # s6-log still gets the runtime-expanded $log_dir, not a hard-coded path.
+    assert 's6-log 1 n10 s1000000 T "$log_dir"' in log_text
+    assert "/opt/data/logs/gateways/default" not in log_text, (
+        "log_dir was hard-coded; must use ${HERMES_HOME} at run time"
+    )
+
+
+def test_render_log_run_per_container_opt_out_keeps_flat_path() -> None:
+    """Operators running a single container can keep the legacy flat
+    ``logs/gateways/<profile>/current`` path via
+    HERMES_GATEWAY_LOG_PER_CONTAINER=0. The script must honor the
+    opt-out branch without renaming the base directory."""
+    log_text = S6ServiceManager._render_log_run("coder")
+
+    # The opt-out case label exists and is a no-op (log_dir stays base_dir).
+    assert "0|false|FALSE|False|no|NO|No) ;;" in log_text
+    # Default log_dir is the flat base before any per-container nesting,
+    # so the opt-out path resolves to logs/gateways/coder directly.
+    assert 'log_dir="$base_dir"' in log_text
+    assert 'base_dir="$HERMES_HOME/logs/gateways/coder"' in log_text
+
+
 def test_s6_register_rejects_invalid_profile_name(s6_scandir) -> None:
     mgr = S6ServiceManager(scandir=s6_scandir)
     with pytest.raises(ValueError):
@@ -829,6 +870,36 @@ def test_s6_lifecycle_persists_default_profile_desired_state(
     mgr.start("gateway-default")
     state = json.loads((hermes_home / "gateway_state.json").read_text())
     assert state["desired_state"] == "running"
+def test_s6_start_and_stop_cascade_to_log_subservice(
+    s6_scandir, fake_subprocess_run,
+) -> None:
+    """Issue #34480: log/down at reconcile time must not strand stdout.
+
+    When a profile is registered down, container_boot also marks
+    ``log/`` down. ``hermes gateway start`` (and the ``gateway run``
+    supervised redirect) must bring the logger up alongside the
+    producer or the gateway's stdout never reaches s6-log."""
+    mgr = S6ServiceManager(scandir=s6_scandir)
+    svc_dir = s6_scandir / "gateway-default"
+    svc_dir.mkdir()
+    log_dir = svc_dir / "log"
+    log_dir.mkdir()
+    (log_dir / "down").touch()
+
+    mgr.start("gateway-default")
+    mgr.stop("gateway-default")
+
+    svc_calls = [
+        (c[1], c[2])
+        for c in fake_subprocess_run
+        if c[0] == "s6-svc"
+    ]
+    assert svc_calls == [
+        ("-u", str(svc_dir)),
+        ("-u", str(log_dir)),
+        ("-d", str(svc_dir)),
+        ("-d", str(log_dir)),
+    ]
 
 
 # ---------------------------------------------------------------------------
