@@ -99,3 +99,26 @@ class TestCodingContextBlock:
         monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
         agent = _make_agent(valid_tool_names=[], platform="cli")
         assert "coding agent" not in _stable_prompt(agent)
+
+
+def _volatile_prompt(agent):
+    with (
+        patch("run_agent.load_soul_md", return_value=""),
+        patch("run_agent.build_nous_subscription_prompt", return_value=""),
+        patch("run_agent.build_environment_hints", return_value=""),
+        patch("run_agent.build_context_files_prompt", return_value=""),
+    ):
+        return build_system_prompt_parts(agent)["volatile"]
+
+
+class TestProviderNote:
+    def test_note_present_when_provider_set(self):
+        agent = _make_agent(provider="nous", model="stepfun/step-3.5-flash")
+        volatile = _volatile_prompt(agent)
+        assert "model.provider" in volatile
+        assert "providers:" in volatile
+
+    def test_note_absent_when_no_provider(self):
+        agent = _make_agent(provider="", model="stepfun/step-3.5-flash")
+        volatile = _volatile_prompt(agent)
+        assert "model.provider" not in volatile
