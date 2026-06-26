@@ -33,6 +33,7 @@ Configuration in config.yaml::
 """
 
 import asyncio
+import ipaddress
 import json
 import logging
 import os
@@ -160,6 +161,82 @@ def _can_open_browser() -> bool:
     if os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
         return True
     return False
+
+
+def _nginx_domain_callback_url() -> str:
+    """Return the public MCP OAuth callback URL for nginx-backed deploys.
+
+    ``HERMES_NGINX_DOMAIN`` is a deployment-level hint used by hosted/headless
+    Hermes installs. When it is present, the user can complete OAuth in an
+    external browser through the reverse proxy, so MCP OAuth should advertise
+    the public callback instead of an unreachable localhost URL.
+    """
+    raw = os.environ.get("HERMES_NGINX_DOMAIN", "").strip()
+    if not raw:
+        return ""
+    if any(c in raw for c in ('"', "'", "<", ">", " ", "\n", "\r", "\t")):
+        logger.warning("Ignoring malformed HERMES_NGINX_DOMAIN value")
+        return ""
+
+    candidate = raw if "://" in raw else f"https://{raw}"
+    try:
+        parsed = urlparse(candidate)
+        # Accessing .port validates numeric port syntax and catches values like
+        # ``https://javascript:alert(1)`` after the default-scheme prefix.
+        parsed.port
+    except ValueError:
+        logger.warning("Ignoring malformed HERMES_NGINX_DOMAIN value")
+        return ""
+    if parsed.scheme != "https" or not parsed.netloc or not parsed.hostname:
+        logger.warning("Ignoring malformed HERMES_NGINX_DOMAIN value")
+        return ""
+    if parsed.username or parsed.password:
+        logger.warning("Ignoring malformed HERMES_NGINX_DOMAIN value")
+        return ""
+    if parsed.path not in {"", "/"} or parsed.params or parsed.query or parsed.fragment:
+        logger.warning("Ignoring malformed HERMES_NGINX_DOMAIN value")
+        return ""
+
+    hostname = parsed.hostname.rstrip(".").lower()
+    if hostname == "localhost" or hostname.endswith(".localhost"):
+        logger.warning("Ignoring non-public HERMES_NGINX_DOMAIN value")
+        return ""
+    try:
+        ip = ipaddress.ip_address(hostname)
+    except ValueError:
+        try:
+            legacy_ipv4 = ipaddress.ip_address(socket.inet_ntoa(socket.inet_aton(hostname)))
+        except OSError:
+            pass
+        else:
+            if not legacy_ipv4.is_global or legacy_ipv4.is_multicast:
+                logger.warning("Ignoring non-public HERMES_NGINX_DOMAIN value")
+                return ""
+    else:
+        if not ip.is_global or ip.is_multicast:
+            logger.warning("Ignoring non-public HERMES_NGINX_DOMAIN value")
+            return ""
+
+    return f"https://{parsed.netloc}/callback"
+
+
+def _oauth_callback_redirect_uri(cfg: dict) -> str:
+    """Return the redirect URI to register/advertise for this OAuth flow."""
+    public_callback = _nginx_domain_callback_url()
+    if public_callback:
+        return public_callback
+
+    port = cfg.get("_resolved_port")
+    if port is None:
+        raise ValueError(
+            "_configure_callback_port() must be called before building callback URLs"
+        )
+    return f"http://127.0.0.1:{port}/callback"
+
+
+def _can_complete_oauth_flow() -> bool:
+    """Return True when first-time OAuth can be completed by a present user."""
+    return _is_interactive() or bool(_nginx_domain_callback_url())
 
 
 def _read_json(path: Path) -> dict | None:
@@ -709,7 +786,7 @@ def _build_client_metadata(cfg: dict) -> "OAuthClientMetadata":
         )
     client_name = cfg.get("client_name", "Hermes Agent")
     scope = cfg.get("scope")
-    redirect_uri = f"http://127.0.0.1:{port}/callback"
+    redirect_uri = _oauth_callback_redirect_uri(cfg)
 
     metadata_kwargs: dict[str, Any] = {
         "client_name": client_name,
@@ -735,8 +812,7 @@ def _maybe_preregister_client(
     client_id = cfg.get("client_id")
     if not client_id:
         return
-    port = cfg["_resolved_port"]
-    redirect_uri = f"http://127.0.0.1:{port}/callback"
+    redirect_uri = _oauth_callback_redirect_uri(cfg)
 
     info_dict: dict[str, Any] = {
         "client_id": client_id,
@@ -788,7 +864,7 @@ def build_oauth_auth(
     cfg = dict(oauth_config or {})  # copy — we mutate _resolved_port
     storage = HermesTokenStorage(server_name)
 
-    if not _is_interactive() and not storage.has_cached_tokens():
+    if not _can_complete_oauth_flow() and not storage.has_cached_tokens():
         raise OAuthNonInteractiveError(
             "MCP OAuth for "
             f"'{server_name}': non-interactive environment and no cached tokens "

@@ -17,6 +17,7 @@ from tools.mcp_oauth import (
     build_oauth_auth,
     remove_oauth_tokens,
     _find_free_port,
+    _nginx_domain_callback_url,
     _can_open_browser,
     _is_interactive,
     _wait_for_callback,
@@ -543,6 +544,109 @@ def test_build_client_metadata_basic():
     assert md.client_name == "Test Client"
     assert "authorization_code" in md.grant_types
     assert "refresh_token" in md.grant_types
+
+
+def test_build_client_metadata_uses_nginx_domain_for_remote_callback(monkeypatch):
+    """HERMES_NGINX_DOMAIN makes MCP OAuth advertise a public callback URL."""
+    from types import SimpleNamespace
+    from tools import mcp_oauth
+    from tools.mcp_oauth import _build_client_metadata, _configure_callback_port
+
+    class _FakeMetadata:
+        @classmethod
+        def model_validate(cls, data):
+            return SimpleNamespace(**data)
+
+    monkeypatch.delenv("HERMES_DASHBOARD_PUBLIC_URL", raising=False)
+    monkeypatch.setenv("HERMES_NGINX_DOMAIN", "mcp.example.com")
+    monkeypatch.setattr(mcp_oauth, "OAuthClientMetadata", _FakeMetadata)
+    monkeypatch.setattr(mcp_oauth, "AnyUrl", str)
+
+    cfg = {"redirect_port": 54321}
+    _configure_callback_port(cfg)
+    md = _build_client_metadata(cfg)
+
+    assert md.redirect_uris == ["https://mcp.example.com/callback"]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "http://mcp.example.com",
+        "https://127.0.0.1",
+        "https://10.0.0.5",
+        "https://172.16.0.1",
+        "https://192.168.1.20",
+        "https://169.254.169.254",
+        "https://224.0.0.1",
+        "https://127.1",
+        "https://2130706433",
+        "https://0x7f.0.0.1",
+        "https://[::1]",
+        "https://localhost",
+        "https://mcp.example.com/path",
+        "javascript:alert(1)",
+        "mcp.example.com/callback?code=abc",
+        "mcp.example.com callback",
+    ],
+)
+def test_nginx_domain_callback_url_rejects_unsafe_values(monkeypatch, value):
+    """Remote OAuth callbacks must be HTTPS public origins, not SSRF/local targets."""
+    monkeypatch.setenv("HERMES_NGINX_DOMAIN", value)
+
+    assert _nginx_domain_callback_url() == ""
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("mcp.example.com", "https://mcp.example.com/callback"),
+        ("https://mcp.example.com/", "https://mcp.example.com/callback"),
+        ("https://8.8.8.8", "https://8.8.8.8/callback"),
+    ],
+)
+def test_nginx_domain_callback_url_accepts_https_public_origins(monkeypatch, value, expected):
+    """Valid nginx callback origins normalize to the fixed /callback endpoint."""
+    monkeypatch.setenv("HERMES_NGINX_DOMAIN", value)
+
+    assert _nginx_domain_callback_url() == expected
+
+
+def test_remote_callback_suppresses_noninteractive_cached_token_warning(tmp_path, monkeypatch, caplog):
+    """Remote callback mode is user-interactive through the browser, not a dead daemon path."""
+    from types import SimpleNamespace
+    from tools import mcp_oauth
+
+    class _FakeMetadata:
+        @classmethod
+        def model_validate(cls, data):
+            return SimpleNamespace(**data)
+
+    captured: dict = {}
+
+    class _FakeProvider:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    mock_stdin = MagicMock()
+    mock_stdin.isatty.return_value = False
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.delenv("HERMES_DASHBOARD_PUBLIC_URL", raising=False)
+    monkeypatch.setenv("HERMES_NGINX_DOMAIN", "mcp.example.com")
+    monkeypatch.setattr(mcp_oauth.sys, "stdin", mock_stdin)
+    monkeypatch.setattr(mcp_oauth, "_OAUTH_AVAILABLE", True)
+    monkeypatch.setattr(mcp_oauth, "OAuthClientProvider", _FakeProvider)
+    monkeypatch.setattr(mcp_oauth, "OAuthClientMetadata", _FakeMetadata)
+    monkeypatch.setattr(mcp_oauth, "AnyUrl", str)
+
+    import logging
+    with caplog.at_level(logging.WARNING, logger="tools.mcp_oauth"):
+        auth = build_oauth_auth("notion", "https://mcp.notion.com/mcp")
+
+    assert isinstance(auth, _FakeProvider)
+    assert captured["client_metadata"].redirect_uris == ["https://mcp.example.com/callback"]
+    assert "no cached tokens found" not in caplog.text.lower()
 
 
 def test_build_client_metadata_without_secret_is_public():

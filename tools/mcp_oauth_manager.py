@@ -515,8 +515,8 @@ class MCPOAuthManager:
             OAuthNonInteractiveError,
             _OAUTH_AVAILABLE,
             _build_client_metadata,
+            _can_complete_oauth_flow,
             _configure_callback_port,
-            _is_interactive,
             _maybe_preregister_client,
             _redirect_handler,
             _wait_for_callback,
@@ -528,7 +528,7 @@ class MCPOAuthManager:
         cfg = dict(entry.oauth_config or {})
         storage = HermesTokenStorage(server_name)
 
-        if not _is_interactive() and not storage.has_cached_tokens():
+        if not _can_complete_oauth_flow() and not storage.has_cached_tokens():
             raise OAuthNonInteractiveError(
                 "MCP OAuth for "
                 f"'{server_name}': non-interactive environment and no "
