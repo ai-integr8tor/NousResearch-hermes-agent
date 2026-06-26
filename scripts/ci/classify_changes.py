@@ -38,6 +38,10 @@ _FRONTEND = ("ui-tui/", "web/", "apps/")  # TS typecheck-matrix packages
 _ROOT_NPM = {"package.json", "package-lock.json"}  # shifts every package's tree
 _DOCKER_META = ("docker/", ".hadolint.yml", "Dockerfile") # docker setup
 _SITE = ("website/", "skills/", "optional-skills/")  # docs site + skill pages
+# Nix flake build inputs — gate the offline `nix build .#web .#tui` lane. The
+# importNpmLock build also breaks on a pruned package-lock.json (caught via the
+# frontend lane), so nix-build runs on `frontend OR nix`.
+_NIX = ("nix/", "flake.nix", "flake.lock")
 # Prose/frontend trees that can't touch Python. skills/ is excluded on purpose.
 _PY_SKIP = ("docs/", "website/") + _FRONTEND
 
@@ -77,6 +81,7 @@ def classify(files: list[str]) -> dict[str, bool]:
         "site": any(f.startswith(_SITE) for f in files),
         "scan": any(_is_scan(f) for f in files),
         "deps": any(f == "pyproject.toml" for f in files),
+        "nix": any(f.startswith(_NIX) for f in files),
         "mcp_catalog": any(_is_mcp_catalog(f) for f in files),
     }
     if not files or any(f.startswith(".github/") for f in files):
@@ -85,6 +90,7 @@ def classify(files: list[str]) -> dict[str, bool]:
         ret["frontend"] = True
         ret["site"] = True
         ret["scan"] = True
+        ret["nix"] = True
         ret["deps"] = True
 
         # explicitly skip mcp catalog here. it's not needed unless those files are modified.

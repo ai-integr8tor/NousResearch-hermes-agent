@@ -1,0 +1,36 @@
+# .github/workflows/nix-build.yml
+#
+# Offline Nix builds of the npm-bundled flake outputs (.#web, .#tui). These
+# build via `importNpmLock`, which vendors *only* what package-lock.json
+# enumerates — with no network during the build. So a lockfile that is missing
+# a platform-specific optional package (e.g. an incremental `npm install` on
+# macOS pruning the `@esbuild/<platform>` natives) fails here, even though the
+# Docker image build and `npm ci` (both networked) succeed by downloading the
+# missing binary at build time.
+#
+# This guards that class of regression: no workflow built the flake offline
+# before this job (the `nix-setup` composite existed but nothing called it), so
+# a pruned lockfile could merge green and only break downstream Nix consumers.
+#
+# Scope: `.#web` and `.#tui` are the lightweight npm bundles, and both vendor
+# from the same root package-lock.json via importNpmLock — so building them
+# exercises the exact offline path the prune breaks. `.#desktop` is omitted on
+# purpose: it depends on the full `.#default` package (the uv2nix Python venv),
+# which is far heavier than this guard needs.
+name: Nix build
+
+on:
+  workflow_call:
+
+jobs:
+  nix-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: ./.github/actions/nix-setup
+      # retry covers transient registry blips while importNpmLock fetches the
+      # npm tarballs as fixed-output derivations (same rationale as the npm ci
+      # retry in typecheck.yml).
+      - uses: ./.github/actions/retry
+        with:
+          command: nix build -L --no-link .#web .#tui
