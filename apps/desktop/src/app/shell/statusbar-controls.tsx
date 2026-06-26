@@ -63,6 +63,7 @@ export function StatusbarControls({ className, leftItems = [], items = [], ...pr
         'flex h-5 shrink-0 items-stretch justify-between gap-2 border-t border-(--ui-stroke-tertiary) bg-(--ui-sidebar-surface-background) px-1 py-0 text-(--ui-text-tertiary) [-webkit-app-region:no-drag]',
         className
       )}
+      data-statusbar
       {...props}
     >
       {/* `overflow-x-clip` (not `overflow-x-auto`) so a wide status item — for
@@ -101,7 +102,12 @@ function StatusbarItemView({ item, navigate }: { item: StatusbarItem; navigate: 
       <Tip label={item.title}>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <button className={cn(STATUSBAR_ACTION_CLASS, item.className)} disabled={item.disabled} type="button">
+            <button
+              className={cn(STATUSBAR_ACTION_CLASS, item.className)}
+              data-statusbar-id={item.id}
+              disabled={item.disabled}
+              type="button"
+            >
               {content}
             </button>
           </DropdownMenuTrigger>
@@ -160,6 +166,7 @@ function StatusbarItemView({ item, navigate }: { item: StatusbarItem; navigate: 
             'inline-flex h-full items-center gap-1 px-1.5 text-[0.6875rem] text-(--ui-text-tertiary)',
             item.className
           )}
+          data-statusbar-id={item.id}
         >
           {content}
         </div>
@@ -170,7 +177,13 @@ function StatusbarItemView({ item, navigate }: { item: StatusbarItem; navigate: 
   if (item.href || item.variant === 'link') {
     return (
       <Tip label={item.title}>
-        <a className={cn(STATUSBAR_ACTION_CLASS, item.className)} href={item.href} rel="noreferrer" target="_blank">
+        <a
+          className={cn(STATUSBAR_ACTION_CLASS, item.className)}
+          data-statusbar-id={item.id}
+          href={item.href}
+          rel="noreferrer"
+          target="_blank"
+        >
           {content}
         </a>
       </Tip>
@@ -181,6 +194,7 @@ function StatusbarItemView({ item, navigate }: { item: StatusbarItem; navigate: 
     <Tip label={item.title}>
       <button
         className={cn(STATUSBAR_ACTION_CLASS, item.className)}
+        data-statusbar-id={item.id}
         disabled={item.disabled}
         onClick={event => {
           if (item.to) {
