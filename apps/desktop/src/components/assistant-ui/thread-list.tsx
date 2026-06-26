@@ -8,6 +8,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState
 } from 'react'
@@ -16,6 +17,7 @@ import { useStickToBottom } from 'use-stick-to-bottom'
 import { useI18n } from '@/i18n'
 import { cn } from '@/lib/utils'
 import {
+  onExpandRenderBudgetRequest,
   onScrollToBottomRequest,
   onThreadEditClose,
   onThreadEditOpen,
@@ -103,7 +105,13 @@ const ThreadMessageListInner: FC<ThreadMessageListProps> = ({
   )
 
   const { t } = useI18n()
-  const groups = buildGroups(messageSignature)
+  // Memoize so the bridge handler and the budget-walk memo can rely on a
+  // stable groups reference across re-renders that don't change content.
+  // buildGroups is pure O(n) but it does a string split per row, and the
+  // bridge reads `groups.length` / per-group weights on every click — without
+  // this, those reads cross an unmemoized boundary that can drift under
+  // concurrent rendering.
+  const groups = useMemo(() => buildGroups(messageSignature), [messageSignature])
   const renderEmpty = groups.length === 0 && Boolean(emptyPlaceholder)
 
   // use-stick-to-bottom owns scrollTop (single writer): follow while locked,
@@ -118,18 +126,26 @@ const ThreadMessageListInner: FC<ThreadMessageListProps> = ({
 
   const [renderBudget, setRenderBudget] = useState(RENDER_BUDGET)
 
-  // Walk turns newest-first, summing their part weights until the budget is met;
-  // everything before that first kept turn is hidden.
-  let firstVisible = groups.length
+  // Walk turns newest-first, summing their part weights until the budget is
+  // met; everything before that first kept turn is hidden. Memoized so the
+  // bridge handler can compare against the live cutoff without re-walking
+  // every render — and so its decision is correct under content-edit shrinking,
+  // where requiredWeight may be lower than the current renderBudget but the
+  // target's firstVisible index is still past the live cutoff.
+  const firstVisible = useMemo(() => {
+    let first = groups.length
 
-  for (let i = groups.length - 1, weight = 0; i >= 0; i--) {
-    weight += groups[i].weight
-    firstVisible = i
+    for (let i = groups.length - 1, weight = 0; i >= 0; i--) {
+      weight += groups[i].weight
+      first = i
 
-    if (weight >= renderBudget) {
-      break
+      if (weight >= renderBudget) {
+        break
+      }
     }
-  }
+
+    return first
+  }, [groups, renderBudget])
 
   const hiddenCount = firstVisible
   const visibleGroups = hiddenCount > 0 ? groups.slice(hiddenCount) : groups
@@ -154,6 +170,46 @@ const ThreadMessageListInner: FC<ThreadMessageListProps> = ({
 
   // Floating jump button (outside this subtree) → return to the bottom.
   useEffect(() => onScrollToBottomRequest(() => void scrollToBottom()), [scrollToBottom])
+
+  // Long-session budget bridge: the right-edge prompt rail (thread-timeline.tsx)
+  // lists every user prompt but only the bottom RENDER_BUDGET-worth of groups
+  // is actually mounted. When the user clicks a dash whose target group was
+  // sliced off, the rail asks us to lower firstVisible to its index — we sum
+  // the weight from there to the newest group and raise renderBudget to match,
+  // then escape stick-to-bottom so the rail's manual scrollTop write sticks.
+  // Without this, scrollToPrompt silently no-ops on long sessions (issue #52816).
+  //
+  // stopScroll() always fires — even when the target is already visible (no
+  // budget raise needed), because the rail is about to write scrollTop itself
+  // and stick-to-bottom would fight that write. Same pattern as beginEditHold
+  // above (lines 164-174).
+  const expandBudgetHandlerRef = useRef<(targetFirstVisible: number) => void>(() => {})
+
+  expandBudgetHandlerRef.current = (targetFirstVisible: number) => {
+    const clamped = Math.max(0, Math.min(targetFirstVisible, Math.max(0, groups.length - 1)))
+
+    // Compare against the live cutoff (memoized above), not against the
+    // requiredWeight-vs-renderBudget test the previous version did. Under
+    // content shrinking (tool results pruned mid-session reduce old groups'
+    // weights), requiredWeight can be lower than renderBudget while the
+    // target's firstVisible is still past the cutoff — the older test would
+    // skip the setRenderBudget and leave the slice in place.
+    if (clamped < firstVisible) {
+      let requiredWeight = 0
+
+      for (let i = groups.length - 1; i >= clamped; i--) {
+        requiredWeight += groups[i].weight
+      }
+
+      setRenderBudget(requiredWeight)
+    }
+
+    stopScroll()
+  }
+
+  useEffect(() => {
+    return onExpandRenderBudgetRequest(target => expandBudgetHandlerRef.current(target))
+  }, [])
 
   const endEditHold = useCallback(() => {
     scrollRef.current?.removeAttribute('data-editing')

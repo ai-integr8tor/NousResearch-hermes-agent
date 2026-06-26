@@ -73,3 +73,32 @@ export function activeTimelineIndex(offsets: readonly (number | null)[], slack: 
 
   return firstRendered === -1 ? 0 : firstRendered
 }
+
+/**
+ * Map a user-message id to its `groups` index (the i-th user message in the
+ * session, after ThreadMessageList's budget walk packs each user with its
+ * assistant turns). Returns -1 when the id isn't a user message.
+ *
+ * The current click handler (`jumpToPrompt` in thread-timeline.tsx) uses
+ * `entries.findIndex` against the already-derived entries array instead, so
+ * this helper has no production caller at the moment — but it's retained as
+ * a defensive export for future timeline controls that may operate on raw
+ * message arrays, and the tests below lock in the colon-in-id contract so
+ * future callers don't accidentally reintroduce the joined-serialization
+ * round-trip the timeline used to do (issue #52816).
+ */
+export function userMessageIndex(messages: readonly { id: string; role: string }[], targetId: string): number {
+  let userIndex = 0
+
+  for (const message of messages) {
+    if (message.role === 'user') {
+      if (message.id === targetId) {
+        return userIndex
+      }
+
+      userIndex += 1
+    }
+  }
+
+  return -1
+}
