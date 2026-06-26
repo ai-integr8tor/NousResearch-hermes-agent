@@ -186,12 +186,10 @@ def _get_registered_backend_names() -> set[str]:
     """
     try:
         _ensure_web_plugins_loaded()
-        from agent.web_search_registry import list_provider_names
-        return set(list_provider_names())
+        from agent.web_search_registry import list_providers
+        return {p.name for p in list_providers()}
     except Exception:
         return set()
-
-
 
 def _get_search_backend() -> str:
     """Determine which backend to use for web_search specifically.
@@ -270,8 +268,8 @@ def _get_valid_engine_names() -> set[str]:
     automatically extends the valid choices — no hardcoded list.
     """
     try:
-        from agent.web_search_registry import list_provider_names
-        return set(list_provider_names())
+        from agent.web_search_registry import list_providers
+        return {p.name for p in list_providers()}
     except Exception:
         return set()
 
@@ -305,10 +303,10 @@ def _get_fallback_chain() -> list[str]:
     # The registry returns providers in registration order, which for
     # bundled plugins is the backend_candidates tuple order.
     try:
-        from agent.web_search_registry import list_provider_names
-        for name in list_provider_names():
-            if name not in chain:
-                chain.append(name)
+        from agent.web_search_registry import list_providers
+        for p in list_providers():
+            if p.name not in chain:
+                chain.append(p.name)
     except Exception:
         pass
 
