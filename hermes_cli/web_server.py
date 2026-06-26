@@ -7867,6 +7867,7 @@ class CronJobCreate(BaseModel):
     name: str = ""
     deliver: str = "local"
     skills: Optional[List[str]] = None
+    allow_silent: Optional[Any] = None
 
 
 class CronJobUpdate(BaseModel):
@@ -8030,6 +8031,8 @@ async def list_cron_job_runs(job_id: str, profile: Optional[str] = None, limit: 
 
 @app.post("/api/cron/jobs")
 async def create_cron_job(body: CronJobCreate, profile: str = "default"):
+    if body.allow_silent is not None and not isinstance(body.allow_silent, bool):
+        raise HTTPException(status_code=400, detail="allow_silent must be a boolean")
     try:
         return _call_cron_for_profile(
             profile,
@@ -8039,6 +8042,7 @@ async def create_cron_job(body: CronJobCreate, profile: str = "default"):
             name=body.name,
             deliver=body.deliver,
             skills=body.skills,
+            allow_silent=body.allow_silent,
         )
     except Exception as e:
         _log.exception("POST /api/cron/jobs failed")
@@ -8078,6 +8082,8 @@ async def update_cron_job(job_id: str, body: CronJobUpdate, profile: Optional[st
     selected = profile or _find_cron_job_profile(job_id)
     if not selected:
         raise HTTPException(status_code=404, detail="Job not found")
+    if "allow_silent" in body.updates and not isinstance(body.updates["allow_silent"], bool):
+        raise HTTPException(status_code=400, detail="allow_silent must be a boolean")
     try:
         job = _call_cron_for_profile(selected, "update_job", job_id, body.updates)
     except ValueError as exc:
