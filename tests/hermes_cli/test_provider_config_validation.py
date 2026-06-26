@@ -191,3 +191,15 @@ class TestNormalizeCustomProviderEntry:
         result = _normalize_custom_provider_entry(entry)
         assert result is not None
         assert "models" not in result
+
+    def test_type_key_accepted_without_warning(self, caplog):
+        """'type' is an informational key that should not trigger unknown-key warnings."""
+        entry = {
+            "type": "openai",
+            "base_url": "https://api.example.com/v1",
+            "api_key": "sk-test",
+        }
+        with caplog.at_level(logging.WARNING):
+            result = _normalize_custom_provider_entry(entry, provider_key="myhost")
+        assert result is not None
+        assert "unknown config keys ignored" not in caplog.text
