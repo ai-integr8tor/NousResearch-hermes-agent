@@ -11,6 +11,7 @@ import {
   getMessagingPlatforms,
   type MessagingEnvVarInfo,
   type MessagingPlatformInfo,
+  restartGateway,
   updateMessagingPlatform
 } from '@/hermes'
 import { type Translations, useI18n } from '@/i18n'
@@ -226,6 +227,9 @@ export function MessagingView({ setStatusbarItemGroup: _setStatusbarItemGroup, .
       await updateMessagingPlatform(platform.id, { env })
       setEdits(current => ({ ...current, [platform.id]: {} }))
       await refreshPlatforms()
+      // Save and restart are separate concerns: if restart fails we still keep
+      // saved credentials and surface restart status through gateway state.
+      void restartGateway()
       notify({
         kind: 'success',
         title: m.setupSaved(platform.name),
