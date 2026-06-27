@@ -433,11 +433,17 @@ class TestGeneratedSystemdUnits:
         assert self._expected_timeout_stop_sec() in unit
 
     def test_user_unit_includes_resolved_node_directory_in_path(self, monkeypatch):
+        # shutil.which("node") is no longer used to build the service PATH
+        # to avoid environment-dependent non-determinism (#46276). The node
+        # path is added deterministically by _build_service_path_dirs() when
+        # hermes_home/node/bin exists.
         monkeypatch.setattr(gateway_cli.shutil, "which", lambda cmd: "/home/test/.nvm/versions/node/v24.14.0/bin/node" if cmd == "node" else None)
 
         unit = gateway_cli.generate_systemd_unit(system=False)
 
-        assert "/home/test/.nvm/versions/node/v24.14.0/bin" in unit
+        # The nvm node path should NOT appear — only deterministic paths
+        # from _build_service_path_dirs() are included.
+        assert "/home/test/.nvm/versions/node/v24.14.0/bin" not in unit
 
     def test_user_unit_includes_wsl_windows_interop_paths(self, monkeypatch):
         monkeypatch.setattr(gateway_cli, "is_wsl", lambda: True)

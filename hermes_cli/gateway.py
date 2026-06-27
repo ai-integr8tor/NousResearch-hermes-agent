@@ -2623,12 +2623,12 @@ def generate_systemd_unit(system: bool = False, run_as_user: str | None = None) 
     detected_venv = _detect_venv_dir()
     venv_dir = str(detected_venv) if detected_venv else str(PROJECT_ROOT / "venv")
 
+    # _build_service_path_dirs() deterministically includes hermes_home/node/bin
+    # and project_root/node_modules/.bin when they exist, so avoid
+    # shutil.which("node") here — it is environment-sensitive and can
+    # produce different PATH entries across gateway/context invocations,
+    # causing per-profile user units to appear perpetually outdated (#46276).
     path_entries = _build_service_path_dirs()
-    resolved_node = shutil.which("node")
-    if resolved_node:
-        resolved_node_dir = str(Path(resolved_node).resolve().parent)
-        if resolved_node_dir not in path_entries:
-            path_entries.append(resolved_node_dir)
 
     common_bin_paths = [
         "/usr/local/sbin",
