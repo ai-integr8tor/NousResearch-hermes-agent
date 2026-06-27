@@ -113,6 +113,17 @@ _ENV_ASSIGN_RE = re.compile(
     rf"([A-Z0-9_]{{0,50}}{_SECRET_ENV_NAMES}[A-Z0-9_]{{0,50}})\s*=\s*(['\"]?)(\S+)\2",
 )
 
+# Env var names that match _SECRET_ENV_NAMES (via a substring like "AUTH")
+# but are NOT secrets — they hold filesystem paths or PIDs. Redacting them is
+# both pointless and harmful: the 1Password SSH-agent socket path contains a
+# space ("Group Containers"), and the (\S+) value capture above stops at that
+# space, swallowing the opening quote and leaving an unbalanced quote that
+# corrupts shell command quoting downstream. Exempt them by exact name match.
+_ENV_NAME_ALLOWLIST = frozenset({
+    "SSH_AUTH_SOCK",   # unix socket path to the SSH agent (e.g. 1Password)
+    "SSH_AGENT_PID",   # process id of the SSH agent
+})
+
 # JSON field patterns: "apiKey": "value", "token": "value", etc.
 _JSON_KEY_NAMES = r"(?:api_?[Kk]ey|token|secret|password|access_token|refresh_token|auth_token|bearer|secret_value|raw_secret|secret_input|key_material)"
 _JSON_FIELD_RE = re.compile(
@@ -380,6 +391,8 @@ def redact_sensitive_text(text: str, *, force: bool = False, code_file: bool = F
         if "=" in text:
             def _redact_env(m):
                 name, quote, value = m.group(1), m.group(2), m.group(3)
+                if name in _ENV_NAME_ALLOWLIST:
+                    return m.group(0)  # known non-secret (path/PID) — leave intact
                 return f"{name}={quote}{_mask_token(value)}{quote}"
             text = _ENV_ASSIGN_RE.sub(_redact_env, text)
 

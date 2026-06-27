@@ -528,3 +528,39 @@ class TestXaiToken:
     def test_prefix_visible_in_masked_output(self):
         result = redact_sensitive_text(self.KEY, force=True)
         assert result.startswith("xai-AB")
+
+
+class TestEnvNameAllowlist:
+    """SSH_AUTH_SOCK et al. match _SECRET_ENV_NAMES via the 'AUTH' substring
+    but are filesystem paths / PIDs, not secrets. They must pass through
+    untouched — critically, the 1Password socket path contains a space, and
+    redacting it corrupts shell quoting (unbalanced quote).
+    """
+
+    # The exact 1Password app-group socket path that triggered the bug.
+    OP_SOCK = (
+        '/Users/pthomas/Library/Group Containers/'
+        '2BUA8C4S2C.com.1password/t/agent.sock'
+    )
+
+    def test_ssh_auth_sock_quoted_path_with_space_untouched(self):
+        text = f'export SSH_AUTH_SOCK="{self.OP_SOCK}"'
+        result = redact_sensitive_text(text, force=True)
+        assert result == text  # no redaction, quoting intact
+        assert result.count('"') == 2  # balanced quotes preserved
+
+    def test_ssh_auth_sock_home_relative_untouched(self):
+        text = 'export SSH_AUTH_SOCK="$HOME/Library/Group Containers/x/agent.sock"'
+        result = redact_sensitive_text(text, force=True)
+        assert result == text
+
+    def test_ssh_agent_pid_untouched(self):
+        text = "SSH_AGENT_PID=12345"
+        result = redact_sensitive_text(text, force=True)
+        assert result == text
+
+    def test_real_auth_token_still_masked(self):
+        """Allowlist must not weaken genuine *AUTH* secret capture."""
+        text = "GITHUB_AUTH_TOKEN=ghp_abcdefghij1234567890"
+        result = redact_sensitive_text(text, force=True)
+        assert "ghp_abcdefghij1234567890" not in result
