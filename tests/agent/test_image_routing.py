@@ -251,6 +251,53 @@ class TestLookupSupportsVisionOverride:
         with patch("agent.models_dev.get_model_capabilities", return_value=None):
             assert _lookup_supports_vision("custom", "my-llava", {}) is None
 
+    def test_models_dev_cache_is_scoped_to_hermes_home(self, tmp_path, monkeypatch):
+        """Changing HERMES_HOME must not reuse another profile's in-memory models.dev cache."""
+        import agent.models_dev as models_dev
+
+        models_dev._models_dev_cache = {}
+        models_dev._models_dev_cache_time = 0
+        models_dev._models_dev_cache_path = None
+
+        registry_with_vision = {
+            "deepseek": {
+                "models": {
+                    "deepseek-v4-pro": {
+                        "modalities": {"input": ["text", "image"]},
+                    },
+                },
+            },
+        }
+        registry_text_only = {
+            "deepseek": {
+                "models": {
+                    "deepseek-v4-pro": {
+                        "modalities": {"input": ["text"]},
+                    },
+                },
+            },
+        }
+        responses = iter([registry_with_vision, registry_text_only])
+
+        class Response:
+            def __init__(self, data):
+                self._data = data
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self._data
+
+        monkeypatch.setattr(models_dev.requests, "get", lambda *args, **kwargs: Response(next(responses)))
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home-a"))
+        first = models_dev.get_model_capabilities("deepseek", "deepseek-v4-pro")
+        assert first is not None and first.supports_vision is True
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home-b"))
+        second = models_dev.get_model_capabilities("deepseek", "deepseek-v4-pro")
+        assert second is not None and second.supports_vision is False
+
     def test_cfg_none_falls_back_to_models_dev(self):
         # Caller didn't pass cfg at all — old call sites must still work.
         with patch("agent.models_dev.get_model_capabilities", return_value=None):
