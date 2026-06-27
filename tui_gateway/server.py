@@ -2963,6 +2963,47 @@ def _get_usage(agent) -> dict:
                 usage["dev_credits_spent_micros"] = int(spent)
         except Exception:
             pass
+    # --- quota / cost (dual-source) ---
+    try:
+        from agent.account_usage import fetch_account_usage
+        _provider = (getattr(agent, "model", None) or "").split("/")[0]
+        _base_url = getattr(agent, "base_url", None)
+        _api_key = getattr(agent, "api_key", None)
+        normalized = (_provider or "").strip().lower()
+        if normalized not in {"openai-codex", "anthropic", "openrouter", "zai", "nous"}:
+            _host = (_base_url or "").lower()
+            if "api.z.ai" in _host or "open.bigmodel.cn" in _host:
+                normalized = "zai"
+        if normalized in {"", "auto", "custom"}:
+            normalized = None
+        snap_acc = fetch_account_usage(
+            provider=normalized or _provider,
+            base_url=_base_url,
+            api_key=_api_key,
+        )
+        if snap_acc:
+            _best = max(snap_acc, key=lambda w: w.used_percent)
+            usage["quota_pct"] = round(_best.used_percent)
+            if _best.reset_at:
+                from datetime import datetime, timezone
+                _now = datetime.now(timezone.utc)
+                _reset = _best.reset_at if _best.reset_at.tzinfo else _best.reset_at.replace(tzinfo=timezone.utc)
+                _secs = max(0, (_reset - _now).total_seconds())
+                if _secs > 0:
+                    h, rem = divmod(int(_secs), 3600)
+                    m, s = divmod(rem, 60)
+                    usage["quota_reset"] = f"{h}h{m}m"
+    except Exception:
+        pass
+    # Fallback: rate-limit headers from last response
+    if "quota_pct" not in usage:
+        try:
+            from agent.rate_limit_tracker import format_rate_limit_compact
+            rl = format_rate_limit_compact()
+            if rl:
+                usage["quota_rl_text"] = rl
+        except Exception:
+            pass
     return usage
 
 

@@ -41,7 +41,7 @@ from collections import deque
 from urllib.parse import unquote, urlparse
 from contextlib import contextmanager
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -4303,6 +4303,50 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             snapshot["compressions"] = getattr(compressor, "compression_count", 0) or 0
             if context_length:
                 snapshot["context_percent"] = max(0, min(100, round((context_tokens / context_length) * 100)))
+
+        # --- quota / cost (dual-source) ---
+        try:
+            from agent.account_usage import fetch_account_usage
+            _provider = (getattr(agent, "model", None) or "").split("/")[0]
+            _base_url = getattr(agent, "base_url", None)
+            _api_key = getattr(agent, "api_key", None)
+            normalized = (_provider or "").strip().lower()
+            if normalized not in {"openai-codex", "anthropic", "openrouter", "zai", "nous"}:
+                _host = (_base_url or "").lower()
+                if "api.z.ai" in _host or "open.bigmodel.cn" in _host:
+                    normalized = "zai"
+            if normalized in {"", "auto", "custom"}:
+                normalized = None
+            snapshot_acc = fetch_account_usage(
+                provider=normalized or _provider,
+                base_url=_base_url,
+                api_key=_api_key,
+            )
+            if snapshot_acc:
+                best_w = max(snapshot_acc, key=lambda w: w.used_percent)
+                snapshot["quota_pct"] = round(best_w.used_percent)
+                if best_w.reset_at:
+                    _now = datetime.now(timezone.utc)
+                    _reset = best_w.reset_at if best_w.reset_at.tzinfo else best_w.reset_at.replace(tzinfo=timezone.utc)
+                    _secs = max(0, (_reset - _now).total_seconds())
+                    if _secs and _secs > 0:
+                        h, rem = divmod(int(_secs), 3600)
+                        m, s = divmod(rem, 60)
+                        snapshot["quota_reset"] = f"{h}h{m}m"
+                else:
+                    snapshot["quota_reset"] = "see /usage"
+        except Exception:
+            pass
+
+        # Fallback: rate-limit headers from last response
+        if "quota_pct" not in snapshot:
+            try:
+                from agent.rate_limit_tracker import format_rate_limit_compact
+                rl = format_rate_limit_compact()
+                if rl:
+                    snapshot["quota_rl_text"] = rl
+            except Exception:
+                pass
 
         return snapshot
 
