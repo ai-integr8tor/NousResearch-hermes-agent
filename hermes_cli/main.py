@@ -597,6 +597,7 @@ from hermes_cli import __version__, __release_date__
 from hermes_cli.model_setup_flows import (
     _prompt_auth_credentials_choice,
     _model_flow_openrouter,
+    _model_flow_llmgateway,
     _model_flow_nous,
     _model_flow_openai_codex,
     _model_flow_xai_oauth,
@@ -3061,6 +3062,8 @@ def select_provider_and_model(args=None):
     # Step 2: Provider-specific setup + model selection
     if selected_provider == "openrouter":
         _model_flow_openrouter(config, current_model)
+    elif selected_provider == "llmgateway":
+        _model_flow_llmgateway(config, current_model)
     elif selected_provider == "nous":
         _model_flow_nous(config, current_model, args=args)
     elif selected_provider == "openai-codex":

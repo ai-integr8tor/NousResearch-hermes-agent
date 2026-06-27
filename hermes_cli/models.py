@@ -88,6 +88,29 @@ _openrouter_catalog_cache: list[tuple[str, str]] | None = None
 
 
 
+# Fallback LLM Gateway snapshot used when the live catalog is unavailable.
+# LLM Gateway (https://llmgateway.io) is OpenAI-compatible and routes across
+# providers. Model IDs use the ``provider/model-slug`` format.
+LLMGATEWAY_MODELS: list[tuple[str, str]] = [
+    ("anthropic/claude-sonnet-4.6",          "recommended"),
+    ("anthropic/claude-opus-4.7",            ""),
+    ("anthropic/claude-opus-4.6",            ""),
+    ("anthropic/claude-haiku-4.5",           ""),
+    ("openai/gpt-5.4",                       ""),
+    ("openai/gpt-5.4-mini",                  ""),
+    ("openai/gpt-5.3-codex",                 ""),
+    ("google/gemini-3.1-pro-preview",        ""),
+    ("google/gemini-3-flash",                ""),
+    ("moonshotai/kimi-k2.6",                 ""),
+    ("zai/glm-5.1",                          ""),
+    ("minimax/minimax-m2.7",                 ""),
+    ("xai/grok-4.20",                        ""),
+    ("deepseek/deepseek-v3.2",               ""),
+]
+
+_llmgateway_catalog_cache: list[tuple[str, str]] | None = None
+
+
 def _codex_curated_models() -> list[str]:
     """Derive the openai-codex curated list from codex_models.py.
 
@@ -508,6 +531,12 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "qwen/qwen3-235b-a22b-fp8",
     ],
 }
+
+# LLM Gateway: derive the bare-model-id catalog from the curated
+# ``LLMGATEWAY_MODELS`` snapshot so both the picker (tuples with descriptions)
+# and the static fallback catalog (bare ids) stay in sync from a single
+# source of truth.
+_PROVIDER_MODELS["llmgateway"] = [mid for mid, _ in LLMGATEWAY_MODELS]
 
 # ---------------------------------------------------------------------------
 # Nous Portal free-model helper
@@ -1007,6 +1036,7 @@ CANONICAL_PROVIDERS: list[ProviderEntry] = [
     ProviderEntry("moa",            "Mixture of Agents",        "Mixture of Agents (named presets; aggregator acts after reference models)"),
     ProviderEntry("novita",         "NovitaAI",                 "NovitaAI (Cloud: Model API, Agent Sandbox, GPU Cloud)"),
     ProviderEntry("lmstudio",       "LM Studio",                "LM Studio (Local desktop app with built-in model server)"),
+    ProviderEntry("llmgateway",     "LLM Gateway",              "LLM Gateway (llmgateway.io — unified API across OpenAI, Anthropic, Google, and more)"),
     ProviderEntry("anthropic",      "Anthropic",                "Anthropic (Claude models via API key or Claude Code)"),
     ProviderEntry("openai-codex",   "OpenAI Codex",             "OpenAI Codex (Codex CLI via ChatGPT subscription or API key)"),
     ProviderEntry("openai-api",     "OpenAI API",               "OpenAI API (api.openai.com, API key)"),
@@ -1202,6 +1232,9 @@ _PROVIDER_ALIASES = {
     "zen": "opencode-zen",
     "go": "opencode-go",
     "opencode-go-sub": "opencode-go",
+    "llm-gateway": "llmgateway",
+    "llmgateway.io": "llmgateway",
+    "llm_gateway": "llmgateway",
     "kilo": "kilocode",
     "kilo-code": "kilocode",
     "kilo-gateway": "kilocode",
@@ -1411,6 +1444,79 @@ def get_curated_nous_model_ids() -> list[str]:
     if remote:
         return list(remote)
     return list(_PROVIDER_MODELS.get("nous", []))
+
+
+def _llmgateway_model_is_free(pricing: Any) -> bool:
+    """Return True if an LLM Gateway model has $0 input AND output pricing."""
+    if not isinstance(pricing, dict):
+        return False
+    try:
+        prompt = pricing.get("prompt", pricing.get("input", "0"))
+        completion = pricing.get("completion", pricing.get("output", "0"))
+        return float(prompt) == 0 and float(completion) == 0
+    except (TypeError, ValueError):
+        return False
+
+
+def fetch_llmgateway_models(
+    timeout: float = 8.0,
+    *,
+    force_refresh: bool = False,
+) -> list[tuple[str, str]]:
+    """Return the curated LLM Gateway picker list, refreshed from the live catalog when possible."""
+    global _llmgateway_catalog_cache
+
+    if _llmgateway_catalog_cache is not None and not force_refresh:
+        return list(_llmgateway_catalog_cache)
+
+    from hermes_constants import LLMGATEWAY_BASE_URL
+
+    fallback = list(LLMGATEWAY_MODELS)
+    preferred_ids = [mid for mid, _ in fallback]
+
+    try:
+        req = urllib.request.Request(
+            f"{LLMGATEWAY_BASE_URL.rstrip('/')}/models",
+            headers={"Accept": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            payload = json.loads(resp.read().decode())
+    except Exception:
+        return list(_llmgateway_catalog_cache or fallback)
+
+    live_items = payload.get("data", [])
+    if not isinstance(live_items, list):
+        return list(_llmgateway_catalog_cache or fallback)
+
+    live_by_id: dict[str, dict[str, Any]] = {}
+    for item in live_items:
+        if not isinstance(item, dict):
+            continue
+        mid = str(item.get("id") or "").strip()
+        if not mid:
+            continue
+        live_by_id[mid] = item
+
+    curated: list[tuple[str, str]] = []
+    for preferred_id in preferred_ids:
+        live_item = live_by_id.get(preferred_id)
+        if live_item is None:
+            continue
+        desc = "free" if _llmgateway_model_is_free(live_item.get("pricing")) else ""
+        curated.append((preferred_id, desc))
+
+    if not curated:
+        return list(_llmgateway_catalog_cache or fallback)
+
+    first_id, _ = curated[0]
+    curated[0] = (first_id, "recommended")
+    _llmgateway_catalog_cache = curated
+    return list(curated)
+
+
+def llmgateway_model_ids(*, force_refresh: bool = False) -> list[str]:
+    """Return just the LLM Gateway model-id strings."""
+    return [mid for mid, _ in fetch_llmgateway_models(force_refresh=force_refresh)]
 
 
 # ---------------------------------------------------------------------------
@@ -1773,7 +1879,7 @@ def _model_in_provider_catalog(name_lower: str, providers: set[str]) -> bool:
 
 
 _AGGREGATOR_PROVIDERS = frozenset(
-    {"nous", "openrouter", "copilot", "kilocode"}
+    {"nous", "openrouter", "llmgateway", "copilot", "kilocode"}
 )
 
 # Subscription/OAuth providers whose catalogs RE-EXPOSE other vendors' models
@@ -2318,6 +2424,10 @@ def provider_model_ids(provider: Optional[str], *, force_refresh: bool = False) 
                     merged_lower.add(m.lower())
             return merged
         return list(_PROVIDER_MODELS.get("anthropic", []))
+    if normalized == "llmgateway":
+        live = _fetch_llmgateway_models()
+        if live:
+            return live
     if normalized == "ollama-cloud":
         live = fetch_ollama_cloud_models(force_refresh=force_refresh)
         if live:
@@ -3477,6 +3587,31 @@ def probe_api_models(
         "suggested_base_url": alternate_base if alternate_base != normalized else None,
         "used_fallback": False,
     }
+
+
+def _fetch_llmgateway_models(timeout: float = 5.0) -> Optional[list[str]]:
+    """Fetch available model ids from the LLM Gateway ``/models`` endpoint."""
+    api_key = (
+        os.getenv("LLM_GATEWAY_API_KEY", "").strip()
+        or os.getenv("LLMGATEWAY_API_KEY", "").strip()
+    )
+    base_url = os.getenv("LLM_GATEWAY_BASE_URL", "").strip()
+    if not base_url:
+        from hermes_constants import LLMGATEWAY_BASE_URL
+        base_url = LLMGATEWAY_BASE_URL
+
+    url = base_url.rstrip("/") + "/models"
+    headers: dict[str, str] = {"Accept": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode())
+            ids = [m["id"] for m in data.get("data", []) if m.get("id")]
+            return ids or None
+    except Exception:
+        return None
 
 
 def fetch_api_models(

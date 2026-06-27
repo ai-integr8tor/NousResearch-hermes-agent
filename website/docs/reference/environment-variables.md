@@ -18,6 +18,9 @@ Hermes reads environment variables from the process environment and, for user-ma
 | `HERMES_OPENROUTER_CACHE_TTL` | Cache TTL in seconds (1-86400). Overrides `openrouter.response_cache_ttl` in config.yaml. |
 | `NOUS_BASE_URL` | Override Nous Portal base URL (rarely needed; development/testing only) |
 | `NOUS_INFERENCE_BASE_URL` | Override Nous inference endpoint directly |
+| `LLM_GATEWAY_API_KEY` | LLM Gateway API key ([llmgateway.io](https://llmgateway.io)) |
+| `LLMGATEWAY_API_KEY` | Alias for `LLM_GATEWAY_API_KEY` |
+| `LLM_GATEWAY_BASE_URL` | Override LLM Gateway base URL (default: `https://api.llmgateway.io/v1`) |
 | `OPENAI_API_KEY` | API key for custom OpenAI-compatible endpoints (used with `OPENAI_BASE_URL`) |
 | `OPENAI_BASE_URL` | Base URL for custom endpoint (VLLM, SGLang, etc.) |
 | `LM_API_KEY` | API key for LM Studio (`lmstudio` provider). Often a placeholder for local servers |

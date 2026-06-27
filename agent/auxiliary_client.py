@@ -344,6 +344,7 @@ _API_KEY_PROVIDER_AUX_MODELS_FALLBACK: Dict[str, str] = {
     "kimi-coding-cn": "kimi-k2-turbo-preview",
     "gmi": "google/gemini-3.1-flash-lite-preview",
     "anthropic": "claude-haiku-4-5-20251001",
+    "llmgateway": "google/gemini-3-flash",
     "opencode-zen": "gemini-3-flash",
     "opencode-go": "glm-5",
     "kilocode": "google/gemini-3-flash-preview",
@@ -487,6 +488,16 @@ def build_nvidia_nim_headers(base_url: str | None) -> dict:
     return {}
 
 
+
+# LLM Gateway (llmgateway.io) app attribution headers. The gateway reads
+# ``X-Source`` for dashboard attribution, analogous to OpenRouter's
+# ``HTTP-Referer`` / ``X-Title`` pair.
+from hermes_cli import __version__ as _HERMES_VERSION
+
+_LLMGATEWAY_HEADERS = {
+    "X-Source": "https://hermes-agent.nousresearch.com",
+    "User-Agent": f"HermesAgent/{_HERMES_VERSION}",
+}
 
 # Nous Portal extra_body for product attribution.
 # Callers should pass this as extra_body in chat.completions.create()

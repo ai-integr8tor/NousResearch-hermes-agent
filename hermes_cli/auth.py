@@ -358,6 +358,14 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
         api_key_env_vars=("NVIDIA_API_KEY",),
         base_url_env_var="NVIDIA_BASE_URL",
     ),
+    "llmgateway": ProviderConfig(
+        id="llmgateway",
+        name="LLM Gateway",
+        auth_type="api_key",
+        inference_base_url="https://api.llmgateway.io/v1",
+        api_key_env_vars=("LLM_GATEWAY_API_KEY", "LLMGATEWAY_API_KEY"),
+        base_url_env_var="LLM_GATEWAY_BASE_URL",
+    ),
     "opencode-zen": ProviderConfig(
         id="opencode-zen",
         name="OpenCode Zen",
@@ -1518,6 +1526,7 @@ def resolve_provider(
         "github": "copilot", "github-copilot": "copilot",
         "github-models": "copilot", "github-model": "copilot",
         "github-copilot-acp": "copilot-acp", "copilot-acp-agent": "copilot-acp",
+        "llm-gateway": "llmgateway", "llmgateway.io": "llmgateway", "llm_gateway": "llmgateway",
         "opencode": "opencode-zen", "zen": "opencode-zen",
         "qwen-portal": "qwen-oauth", "qwen-cli": "qwen-oauth", "qwen-oauth": "qwen-oauth",
         "hf": "huggingface", "hugging-face": "huggingface", "huggingface-hub": "huggingface",

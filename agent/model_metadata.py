@@ -48,7 +48,7 @@ def _resolve_requests_verify() -> bool | str:
 _PROVIDER_PREFIXES: frozenset[str] = frozenset({
     "openrouter", "nous", "openai-codex", "copilot", "copilot-acp",
     "gemini", "ollama-cloud", "zai", "kimi-coding", "kimi-coding-cn", "stepfun", "minimax", "minimax-oauth", "minimax-cn", "anthropic", "deepseek",
-    "opencode-zen", "opencode-go", "kilocode", "alibaba", "novita",
+    "opencode-zen", "opencode-go", "llmgateway", "kilocode", "alibaba", "novita",
     "qwen-oauth",
     "xiaomi",
     "arcee",
@@ -425,6 +425,8 @@ _URL_TO_PROVIDER: Dict[str, str] = {
     "dashscope-intl.aliyuncs.com": "alibaba",
     "portal.qwen.ai": "qwen-oauth",
     "openrouter.ai": "openrouter",
+    "api.llmgateway.io": "llmgateway",
+    "llmgateway.io": "llmgateway",
     "generativelanguage.googleapis.com": "gemini",
     "inference-api.nousresearch.com": "nous",
     "api.deepseek.com": "deepseek",
