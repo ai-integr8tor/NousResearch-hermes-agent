@@ -1237,6 +1237,12 @@ export interface Translations {
     images: string
     pasteImage: string
     url: string
+    attachApp: string
+    windowPickerTitle: string
+    windowPickerDesc: string
+    windowPickerEmpty: string
+    windowPickerError: string
+    windowPickerLoading: string
     promptSnippets: string
     tipPre: string
     tipPost: string
