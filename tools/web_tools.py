@@ -255,6 +255,17 @@ def _is_backend_available(backend: str) -> bool:
             return has_xai_credentials()
         except Exception:
             return False
+
+    # Generic probe for plugin-based backends — serper, baidu, bocha,
+    # qiniu-baidu, serpapi, jina, google-cse, sogou, 360-search, etc.
+    try:
+        from agent.web_search_registry import get_provider
+        provider = get_provider(backend)
+        if provider is not None:
+            return provider.is_available()
+    except Exception:
+        pass
+
     return False
 
 
