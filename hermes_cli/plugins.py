@@ -2119,10 +2119,12 @@ def get_pre_tool_call_block_message(
         fmt = getattr(_thread_tool_whitelist, "fmt", "Tool '{tool_name}' denied")
         return fmt.format(tool_name=tool_name)
 
+    hook_args = args if isinstance(args, dict) else {}
+
     hook_results = invoke_hook(
         "pre_tool_call",
         tool_name=tool_name,
-        args=args if isinstance(args, dict) else {},
+        args=hook_args,
         task_id=task_id,
         session_id=session_id,
         tool_call_id=tool_call_id,

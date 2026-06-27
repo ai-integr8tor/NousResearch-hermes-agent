@@ -587,7 +587,6 @@ class ToolRegistry:
                 return _run_async(entry.handler(args, **kwargs))
             return entry.handler(args, **kwargs)
         except Exception as e:
-            logger.exception("Tool %s dispatch error: %s", name, e)
             # Route through the sanitizer so framing tokens / CDATA / fences
             # in exception strings don't reach the model as structural noise.
             # See model_tools._sanitize_tool_error for rationale.
@@ -597,6 +596,7 @@ class ToolRegistry:
                 sanitized = _sanitize_tool_error(raw)
             except Exception:
                 sanitized = raw  # defensive: never let the sanitizer block error propagation
+            logger.error("Tool %s dispatch error: %s", name, sanitized)
             return json.dumps({"error": sanitized})
 
     # ------------------------------------------------------------------
