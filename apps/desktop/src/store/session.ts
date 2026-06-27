@@ -125,6 +125,16 @@ function updateAtom<T>(store: AppAtom<T>, next: Updater<T>) {
 export const sessionPinId = (session: Pick<SessionInfo, '_lineage_root_id' | 'id'>): string =>
   session._lineage_root_id ?? session.id
 
+/** Check if a session matches a stored id by its live id or its durable
+ *  lineage root. Auto-compression rotates a conversation's session id, so
+ *  lookups keyed on the live id would miss the record after a compression.
+ *  This helper catches both the current tip and any ancestor. */
+export const sessionMatchesStoredId = (
+  session: Pick<SessionInfo, '_lineage_root_id' | 'id'>,
+  storedSessionId: string
+): boolean =>
+  session.id === storedSessionId || session._lineage_root_id === storedSessionId
+
 /** Merge a fresh server session page into the in-memory list, keeping any
  *  row the server omitted that we still want visible — both still-"working"
  *  sessions and pinned sessions.
