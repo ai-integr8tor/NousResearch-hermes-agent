@@ -9466,6 +9466,39 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         session_entry = self.session_store.get_or_create_session(source)
         session_key = session_entry.session_key
         self._cache_session_source(session_key, source)
+        # Heal session_key -> session_id mappings that still point at a
+        # pre-compression parent on resident non-Telegram platforms
+        # (Discord/Slack/etc.): walk the compression-continuation chain forward
+        # to its tip so the next message resumes the compressed child instead of
+        # reloading the oversized parent transcript. Without this, compaction's
+        # session rotation forks the conversation on every turn — the stale
+        # parent is reloaded, re-grows past the context cap, and spawns orphan
+        # child sessions in an endless preflight-compression loop
+        # (#44004/#38763/#25921). Telegram topic lanes do their own
+        # binding-based healing below, so skip them here. get_compression_tip
+        # only follows end_reason='compression' chains and returns the input
+        # unchanged otherwise, so this is cheap and safe for fresh/branch
+        # sessions.
+        if (
+            self._session_db is not None
+            and session_entry is not None
+            and not self._is_telegram_topic_lane(source)
+        ):
+            try:
+                _tip = self._session_db.get_compression_tip(
+                    session_entry.session_id,
+                )
+            except Exception:
+                logger.debug(
+                    "compression-tip lookup failed for %s",
+                    session_entry.session_id, exc_info=True,
+                )
+                _tip = None
+            if _tip and _tip != session_entry.session_id:
+                switched = self.session_store.switch_session(session_key, _tip)
+                if switched is not None:
+                    session_entry = switched
+                    session_key = session_entry.session_key
         if self._is_telegram_topic_lane(source):
             try:
                 binding = self._session_db.get_telegram_topic_binding(
