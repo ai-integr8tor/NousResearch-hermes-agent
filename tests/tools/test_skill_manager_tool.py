@@ -395,6 +395,25 @@ class TestDeleteSkill:
         assert not (tmp_path / "narrow").exists()
         assert (tmp_path / "umbrella").exists()
 
+    def test_delete_blocks_unmanaged_runtime_reference(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes"
+        bin_dir = hermes_home / "bin"
+        bin_dir.mkdir(parents=True)
+        wrapper = bin_dir / "run_daily.sh"
+        wrapper.write_text("hermes chat -s narrow 'run brief'\n", encoding="utf-8")
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        with _skill_dir(tmp_path / "skills"):
+            _create_skill("umbrella", VALID_SKILL_CONTENT)
+            _create_skill("narrow", VALID_SKILL_CONTENT)
+            result = _delete_skill("narrow", absorbed_into="umbrella")
+
+        assert result["success"] is False
+        assert "runtime entrypoints" in result["error"]
+        assert result["runtime_references"][0]["path"] == str(wrapper)
+        assert result["runtime_references"][0]["line"] == 1
+        assert (tmp_path / "skills" / "narrow").exists()
+
     def test_delete_with_absorbed_into_empty_string_means_pruned(self, tmp_path):
         with _skill_dir(tmp_path):
             _create_skill("stale-skill", VALID_SKILL_CONTENT)
