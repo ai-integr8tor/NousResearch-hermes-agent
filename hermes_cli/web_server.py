@@ -3440,7 +3440,7 @@ async def get_profiles_sessions(
         targets.append((name, home))
     else:
         try:
-            rows = _profile_rows_cached()
+            rows = await asyncio.to_thread(_profile_rows_cached)
             targets = [
                 (str(row.get("name") or ""), Path(str(row.get("path") or "")))
                 for row in rows
@@ -8530,7 +8530,9 @@ async def instantiate_blueprint(body: AutomationBlueprintInstantiate, profile: s
         # Blueprint-created jobs deliver to the dashboard's configured target by
         # default; the form's deliver slot overrides via spec["deliver"].
         spec.pop("origin", None)
-        return _call_cron_for_profile(profile, "create_job", **spec)
+        job = _call_cron_for_profile(profile, "create_job", **spec)
+        _invalidate_cron_jobs_cache()
+        return job
     except HTTPException:
         raise
     except Exception as e:
@@ -9697,6 +9699,7 @@ async def install_skill_hub(body: SkillInstallRequest, profile: Optional[str] = 
     except Exception as exc:
         _log.exception("Failed to spawn skills install")
         raise HTTPException(status_code=500, detail=f"Failed to install skill: {exc}")
+    _invalidate_profile_list_cache()
     return {"ok": True, "pid": proc.pid, "name": "skills-install"}
 
 
@@ -9720,6 +9723,7 @@ async def uninstall_skill_hub(body: SkillUninstallRequest, profile: Optional[str
     except Exception as exc:
         _log.exception("Failed to spawn skills uninstall")
         raise HTTPException(status_code=500, detail=f"Failed to uninstall skill: {exc}")
+    _invalidate_profile_list_cache()
     return {"ok": True, "pid": proc.pid, "name": "skills-uninstall"}
 
 
@@ -10890,6 +10894,7 @@ async def create_skill(body: SkillCreate):
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error", "Failed to create skill."))
     _clear_skills_prompt_cache()
+    _invalidate_profile_list_cache()
     return result
 
 

@@ -6365,11 +6365,11 @@ async function mergeRemoteProfileSessions(searchParams, remoteProfiles) {
   const offset = Math.max(0, Number(searchParams.get('offset')) || 0)
   const order = searchParams.get('order') === 'created' ? 'started_at' : 'last_active'
 
-  const primary = await ensureBackend(null)
-  const base = await fetchJson(`${primary.baseUrl}/api/profiles/sessions?${searchParams}`, primary.token, {
-    method: 'GET',
-    timeoutMs: DEFAULT_FETCH_TIMEOUT_MS
-  }).catch(() => ({ sessions: [], total: 0, profile_totals: {} }))
+  const base = await requestJsonForProfile(null, `/api/profiles/sessions?${searchParams}`, 'GET').catch(() => ({
+    sessions: [],
+    total: 0,
+    profile_totals: {}
+  }))
 
   // Over-fetch each remote from offset 0 (limit+offset rows) so the merged window
   // is correct for this page — mirrors the primary's per-profile over-fetch.
