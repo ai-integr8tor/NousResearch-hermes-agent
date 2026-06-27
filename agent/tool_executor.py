@@ -596,7 +596,7 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                 results[index] = (function_name, function_args, result, duration, True, False, middleware_trace)
                 return
             except Exception as tool_error:
-                safe_tool_error = str(tool_error)
+                safe_tool_error = sanitize_recall_payload(str(tool_error)).strip()
                 result = f"Error executing tool '{function_name}': {safe_tool_error}"
                 logger.error(
                     "_invoke_tool raised for %s (%s): %s",
@@ -864,7 +864,7 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                     middleware_trace=list(middleware_trace),
                 )
             tool_duration = 0.0
-            safe_function_result = function_result
+            safe_function_result = sanitize_recall_payload(function_result)
         else:
             function_name, function_args, function_result, tool_duration, is_error, blocked, middleware_trace = r
 
@@ -876,7 +876,7 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                     failed=is_error,
                 )
             raw_function_result = function_result
-            safe_function_result = raw_function_result
+            safe_function_result = sanitize_recall_payload(raw_function_result)
 
             if is_error:
                 _err_text = _multimodal_text_summary(safe_function_result)
@@ -1395,7 +1395,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                 )
                 _ce_result = function_result
             except Exception as tool_error:
-                safe_tool_error = str(tool_error)
+                safe_tool_error = sanitize_recall_payload(str(tool_error)).strip()
                 function_result = json.dumps(
                     {"error": f"Context engine tool '{function_name}' failed: {safe_tool_error}"}
                 )
@@ -1442,7 +1442,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                 )
                 _mem_result = function_result
             except Exception as tool_error:
-                safe_tool_error = str(tool_error)
+                safe_tool_error = sanitize_recall_payload(str(tool_error)).strip()
                 function_result = json.dumps(
                     {"error": f"Memory tool '{function_name}' failed: {safe_tool_error}"}
                 )
@@ -1506,7 +1506,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                     pass
                 raise
             except Exception as tool_error:
-                safe_tool_error = str(tool_error)
+                safe_tool_error = sanitize_recall_payload(str(tool_error)).strip()
                 function_result = f"Error executing tool '{function_name}': {safe_tool_error}"
                 logger.error(
                     "handle_function_call raised for %s (%s): %s",
@@ -1557,7 +1557,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                     pass
                 raise
             except Exception as tool_error:
-                safe_tool_error = str(tool_error)
+                safe_tool_error = sanitize_recall_payload(str(tool_error)).strip()
                 function_result = f"Error executing tool '{function_name}': {safe_tool_error}"
                 logger.error(
                     "handle_function_call raised for %s (%s): %s",
@@ -1609,7 +1609,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                 function_result,
                 failed=_is_error_result,
             )
-        safe_function_result = function_result
+        safe_function_result = sanitize_recall_payload(function_result)
         _preview_text = _multimodal_text_summary(safe_function_result)
         result_preview = _preview_text if agent.verbose_logging else (
             _preview_text[:200] if len(_preview_text) > 200 else _preview_text

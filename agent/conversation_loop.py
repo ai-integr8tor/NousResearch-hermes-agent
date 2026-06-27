@@ -36,6 +36,7 @@ from agent.turn_context import build_turn_context
 from agent.turn_retry_state import TurnRetryState
 from agent.memory_manager import (
     build_memory_context_block,
+    strip_injected_recall_blocks,
 )
 from agent.message_sanitization import (
     close_interrupted_tool_sequence,
@@ -1932,7 +1933,9 @@ def run_conversation(
                                 _retry.restart_with_length_continuation = True
                                 break
 
-                            partial_response = agent._strip_think_blocks("".join(truncated_response_parts)).strip()
+                            partial_response = strip_injected_recall_blocks(
+                                agent._strip_think_blocks("".join(truncated_response_parts))
+                            ).strip()
                             agent._cleanup_task_resources(effective_task_id)
                             agent._persist_session(messages, conversation_history)
                             return {
@@ -2283,8 +2286,10 @@ def run_conversation(
                 # record of the half-finished reply on screen, so the next turn
                 # the model "forgets" what it just said — exactly what users hit
                 # when they stop to redirect mid-response.
-                _partial = agent._strip_think_blocks(
-                    getattr(agent, "_current_streamed_assistant_text", "") or ""
+                _partial = strip_injected_recall_blocks(
+                    agent._strip_think_blocks(
+                        getattr(agent, "_current_streamed_assistant_text", "") or ""
+                    )
                 ).strip()
                 if _partial:
                     messages.append({"role": "assistant", "content": _partial})
@@ -4812,7 +4817,9 @@ def run_conversation(
                     )
                     if agent._has_content_after_think_block(_partial_streamed):
                         _turn_exit_reason = "partial_stream_recovery"
-                        _recovered = agent._strip_think_blocks(_partial_streamed).strip()
+                        _recovered = strip_injected_recall_blocks(
+                            agent._strip_think_blocks(_partial_streamed)
+                        ).strip()
                         logger.info(
                             "Partial stream content delivered (%d chars) "
                             "— using as final response",
@@ -5111,7 +5118,9 @@ def run_conversation(
                     truncated_response_parts = []
                     length_continue_retries = 0
                 
-                final_response = agent._strip_think_blocks(final_response).strip()
+                final_response = strip_injected_recall_blocks(
+                    agent._strip_think_blocks(final_response)
+                ).strip()
                 
                 final_msg = agent._build_assistant_message(assistant_message, finish_reason)
 
