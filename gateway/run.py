@@ -16800,12 +16800,22 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             _input_toks = 0
             _output_toks = 0
             _context_length = 0
+            _cache_read_toks = 0
+            _cache_write_toks = 0
+            _estimated_cost_usd = 0.0
+            _cost_status = "unknown"
+            _cost_source = "none"
             _agent = agent_holder[0]
             if _agent and hasattr(_agent, "context_compressor"):
                 _last_prompt_toks = getattr(_agent.context_compressor, "last_prompt_tokens", 0)
-                _input_toks = getattr(_agent, "session_prompt_tokens", 0)
+                _input_toks = getattr(_agent, "session_input_tokens", 0)
                 _output_toks = getattr(_agent, "session_completion_tokens", 0)
                 _context_length = getattr(_agent.context_compressor, "context_length", 0) or 0
+                _cache_read_toks = getattr(_agent, "session_cache_read_tokens", 0)
+                _cache_write_toks = getattr(_agent, "session_cache_write_tokens", 0)
+                _estimated_cost_usd = getattr(_agent, "session_estimated_cost_usd", 0.0)
+                _cost_status = getattr(_agent, "session_cost_status", "unknown")
+                _cost_source = getattr(_agent, "session_cost_source", "none")
             _resolved_model = getattr(_agent, "model", None) if _agent else None
 
             # Sync session_id immediately after run_conversation(). Compression
@@ -16899,6 +16909,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     "output_tokens": _output_toks,
                     "model": _resolved_model,
                     "context_length": _context_length,
+                    "cache_read_tokens": _cache_read_toks,
+                    "cache_write_tokens": _cache_write_toks,
+                    "estimated_cost_usd": _estimated_cost_usd,
+                    "cost_status": _cost_status,
+                    "cost_source": _cost_source,
                 }
             
             # Scan tool results for MEDIA:<path> tags that need to be delivered
@@ -17002,6 +17017,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "session_id": effective_session_id,
                 "response_previewed": result.get("response_previewed", False),
                 "response_transformed": result.get("response_transformed", False),
+                "cache_read_tokens": _cache_read_toks,
+                "cache_write_tokens": _cache_write_toks,
+                "estimated_cost_usd": _estimated_cost_usd,
+                "cost_status": _cost_status,
+                "cost_source": _cost_source,
             }
         
         # Start progress message sender if enabled
