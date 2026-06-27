@@ -2970,11 +2970,21 @@ DEFAULT_CONFIG = {
         # every invocation (MCP backend, status, doctor, install). Set true
         # to let cua-driver use its own default (telemetry on).
         "cua_telemetry": False,
+        # Disable the cursor overlay rendered by cua-driver.  The overlay
+        # shows where agent actions land on screen but can consume
+        # significant CPU when idle (especially on Linux/WSL2 where the
+        # compositor path has no visual benefit).  cua-driver ≥ 0.6.x
+        # supports --no-overlay.
+        #   None  = auto-detect (disable on Linux/headless, enable elsewhere)
+        #   True  = always disable the overlay
+        #   False = always enable the overlay (may cause idle CPU on some
+        #           platforms — see #28152, #47032)
+        "no_overlay": None,
     },
 
 
     # Config schema version - bump this when adding new required fields
-    "_config_version": 31,
+    "_config_version": 32,
 }
 
 # =============================================================================
