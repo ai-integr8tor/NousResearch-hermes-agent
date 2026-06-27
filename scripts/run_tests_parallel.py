@@ -666,7 +666,11 @@ def main() -> int:
         our_args, pytest_passthrough = argv[:sep], argv[sep + 1 :]
     else:
         our_args, pytest_passthrough = argv, []
-    args = parser.parse_args(our_args)
+    # Use parse_known_args so that pytest flags (e.g. -q, -k, --tb=long)
+    # passed without a '--' separator are captured as unrecognized args
+    # and forwarded to pytest, instead of causing an argparse error.
+    args, remaining = parser.parse_known_args(our_args)
+    pytest_passthrough = remaining + pytest_passthrough
 
     # Parse --slice (or HERMES_TEST_SLICE) early so we can exit on bad input
     # before doing any expensive discovery.

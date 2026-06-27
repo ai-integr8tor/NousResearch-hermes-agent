@@ -19,10 +19,13 @@
 #   scripts/run_tests.sh tests/agent/               # discover only here
 #   scripts/run_tests.sh tests/agent/ tests/acp/    # multiple roots
 #   scripts/run_tests.sh tests/foo.py               # single file
-#   scripts/run_tests.sh tests/foo.py -- --tb=long  # path + pytest args
+#   scripts/run_tests.sh tests/foo.py -q            # path + pytest args
+#   scripts/run_tests.sh tests/foo.py -- --tb=long  # explicit separator (also works)
 #   scripts/run_tests.sh -- -v --tb=long            # pytest args only
 #
-# Everything after a literal '--' is passed through to each per-file
+# Pytest flags (e.g. -q, -k, --tb=long) are automatically forwarded to
+# each per-file pytest invocation. A literal '--' separator is accepted
+# but no longer required.
 # pytest invocation. Positional path arguments before '--' override
 # the default discovery root (tests/).
 
