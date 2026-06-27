@@ -20,6 +20,7 @@ from tools.environments.file_sync import (
     FileSyncManager,
     iter_sync_files,
     quoted_mkdir_command,
+    remote_parent_dir,
     quoted_rm_command,
     unique_parent_dirs,
 )
@@ -153,8 +154,8 @@ class DaytonaEnvironment(BaseEnvironment):
 
     def _daytona_upload(self, host_path: str, remote_path: str) -> None:
         """Upload a single file via Daytona SDK."""
-        parent = str(Path(remote_path).parent)
-        self._sandbox.process.exec(f"mkdir -p {parent}")
+        parent = remote_parent_dir(remote_path)
+        self._sandbox.process.exec(f"mkdir -p {shlex.quote(parent)}")
         self._sandbox.fs.upload_file(host_path, remote_path)
 
     def _daytona_bulk_upload(self, files: list[tuple[str, str]]) -> None:
