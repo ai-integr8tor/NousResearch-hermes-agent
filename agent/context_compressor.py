@@ -149,6 +149,12 @@ _SUMMARY_TOKENS_CEILING = 12_000
 # Placeholder used when pruning old tool results
 _PRUNED_TOOL_PLACEHOLDER = "[Old tool output cleared to save context space]"
 
+_TOOL_RESULT_ROLES = frozenset({"tool", "function"})
+
+
+def _is_tool_result_role(role: Any) -> bool:
+    return role in _TOOL_RESULT_ROLES
+
 # Chars per token rough estimate
 _CHARS_PER_TOKEN = 4
 # Flat token cost per attached image part.  Real cost varies by provider and
@@ -1065,7 +1071,7 @@ class ContextCompressor(ContextEngine):
         content_hashes: dict = {}  # hash -> (index, tool_call_id)
         for i in range(len(result) - 1, -1, -1):
             msg = result[i]
-            if msg.get("role") != "tool":
+            if not _is_tool_result_role(msg.get("role")):
                 continue
             content = msg.get("content") or ""
             # Multimodal content — dedupe by the text summary if available.
@@ -1088,7 +1094,7 @@ class ContextCompressor(ContextEngine):
         # Pass 2: Replace old tool results with informative summaries
         for i in range(prune_boundary):
             msg = result[i]
-            if msg.get("role") != "tool":
+            if not _is_tool_result_role(msg.get("role")):
                 continue
             content = msg.get("content", "")
             # Multimodal content (base64 screenshots etc.): strip the image
@@ -1191,7 +1197,7 @@ class ContextCompressor(ContextEngine):
             content = _MEDIA_DIRECTIVE_RE.sub("[media attachment]", content)
 
             # Tool results: keep enough content for the summarizer
-            if role == "tool":
+            if _is_tool_result_role(role):
                 tool_id = msg.get("tool_call_id", "")
                 if len(content) > self._CONTENT_MAX:
                     content = content[:self._CONTENT_HEAD] + "\n...[truncated]...\n" + content[-self._CONTENT_TAIL:]
@@ -1975,7 +1981,7 @@ This compaction should PRIORITISE preserving all information related to the focu
 
         result_call_ids: set = set()
         for msg in messages:
-            if msg.get("role") == "tool":
+            if _is_tool_result_role(msg.get("role")):
                 cid = msg.get("tool_call_id")
                 if cid:
                     result_call_ids.add(cid)
@@ -1985,7 +1991,7 @@ This compaction should PRIORITISE preserving all information related to the focu
         if orphaned_results:
             messages = [
                 m for m in messages
-                if not (m.get("role") == "tool" and m.get("tool_call_id") in orphaned_results)
+                if not (_is_tool_result_role(m.get("role")) and m.get("tool_call_id") in orphaned_results)
             ]
             if not self.quiet_mode:
                 logger.info("Compression sanitizer: removed %d orphaned tool result(s)", len(orphaned_results))
@@ -2014,10 +2020,10 @@ This compaction should PRIORITISE preserving all information related to the focu
     def _align_boundary_forward(self, messages: List[Dict[str, Any]], idx: int) -> int:
         """Push a compress-start boundary forward past any orphan tool results.
 
-        If ``messages[idx]`` is a tool result, slide forward until we hit a
-        non-tool message so we don't start the summarised region mid-group.
+        If ``messages[idx]`` is a tool/function result, slide forward until we
+        hit a non-result message so we don't start the summarised region mid-group.
         """
-        while idx < len(messages) and messages[idx].get("role") == "tool":
+        while idx < len(messages) and _is_tool_result_role(messages[idx].get("role")):
             idx += 1
         return idx
 
@@ -2077,9 +2083,9 @@ This compaction should PRIORITISE preserving all information related to the focu
         """
         if idx <= 0 or idx >= len(messages):
             return idx
-        # Walk backward past consecutive tool results
+        # Walk backward past consecutive tool/function results
         check = idx - 1
-        while check >= 0 and messages[check].get("role") == "tool":
+        while check >= 0 and _is_tool_result_role(messages[check].get("role")):
             check -= 1
         # If we landed on the parent assistant with tool_calls, pull the
         # boundary before it so the whole group gets summarised together.
@@ -2598,7 +2604,10 @@ This compaction should PRIORITISE preserving all information related to the focu
         first_tail_role = messages[compress_end].get("role", "user") if compress_end < n_messages else "user"
         # Pick a role that avoids consecutive same-role with both neighbors.
         # Priority: avoid colliding with head (already committed), then tail.
-        if last_head_role in {"assistant", "tool"}:
+        # system/developer/legacy non-result roles fall through to assistant;
+        # only assistant or tool-result-like left neighbors force a user-role
+        # summary to avoid same-role adjacency.
+        if last_head_role == "assistant" or _is_tool_result_role(last_head_role):
             summary_role = "user"
         else:
             summary_role = "assistant"
