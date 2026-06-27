@@ -210,6 +210,35 @@ source .venv/bin/activate   # or: source venv/bin/activate
 `$HOME/.hermes/hermes-agent/venv` (for worktrees that share a venv with the
 main checkout).
 
+**Python:** `>=3.11,<3.14` (pyproject.toml `requires-python`). The ceiling
+at <3.14 is load-bearing — Rust-backed transitives (pydantic-core) lack
+cp314 wheels. CI uses 3.11.
+
+## Before You Push
+
+CI runs these checks on every PR. Run them locally to avoid surprises:
+
+```bash
+# 1. Lint (blocking) — only PLW1514 (unspecified-encoding) enforced
+ruff check .
+
+# 2. Typecheck (advisory in CI, but fix warnings before PR)
+ty check
+
+# 3. Windows footguns (blocking) — catches os.kill(pid,0), os.killpg,
+#    bare open() without encoding=, signal.SIGKILL without getattr, etc.
+python scripts/check-windows-footguns.py --all
+
+# 4. Tests (blocking) — full suite with per-file subprocess isolation
+scripts/run_tests.sh
+```
+
+After changing `pyproject.toml` dependencies, regenerate the lockfile:
+```bash
+uv lock
+```
+CI has a required `uv-lockfile-check` that fails if `uv.lock` is stale.
+
 ## Project Structure
 
 File counts shift constantly — don't treat the tree below as exhaustive.
@@ -553,16 +582,22 @@ reinforced after the Mini Shai-Hulud worm campaign (May 2026).
 
 | Source type | Treatment | Example |
 |---|---|---|
-| PyPI package | `>=floor,<next_major` | `"httpx>=0.28.1,<1"` |
+| PyPI core dep | `==exact` | `"openai==2.24.0"` |
+| PyPI extra/lazy dep | `>=floor,<next_major` | `"httpx>=0.28.1,<1"` |
 | Git URL | Commit SHA | `git+https://...@<40-char-sha>` |
 | GitHub Actions | Commit SHA + comment | `uses: actions/checkout@<sha>  # v4` |
 | CI-only pip | `==exact` | `pyyaml==6.0.2` |
 
 **When adding a new dependency to `pyproject.toml`:**
-1. Pin to `>=current_version,<next_major` for post-1.0 (e.g. `>=1.5.0,<2`).
+1. Core deps (used by every session) use **exact pins**: `"package==X.Y.Z"`.
+   Extras/lazy-install deps use `>=current_version,<next_major`.
 2. For pre-1.0 packages, use `<0.(current_minor + 2)` (e.g. `>=0.29,<0.32`).
-3. Never commit a bare `>=X.Y.Z` without a ceiling — CI and reviewers will reject it.
+3. Never commit a bare `>=X.Y.Z` without a ceiling — CI's `dep-bounds` check
+   will reject it.
 4. Run `uv lock` to regenerate `uv.lock` with hashes.
+5. Scope rule: only packages used by EVERY hermes session belong in core
+   `dependencies`. Anything provider-specific belongs in an extra and gets
+   lazy-installed via `tools/lazy_deps.py`.
 
 Reference: #2810 (bounds pass), #9801 (SHA pinning + audit CI).
 
@@ -1251,7 +1286,7 @@ def profile_env(tmp_path, monkeypatch):
 
 **ALWAYS use `scripts/run_tests.sh`** — do not call `pytest` directly. The script enforces
 hermetic environment parity with CI (unset credential vars, TZ=UTC, LANG=C.UTF-8,
-`-n auto` xdist workers, in-tree subprocess-isolation plugin). Direct `pytest`
+per-file subprocess isolation via `run_tests_parallel.py`). Direct `pytest`
 on a 16+ core developer machine with API keys set diverges from CI in ways
 that have caused multiple "works locally, fails in CI" incidents (and the reverse).
 
@@ -1294,7 +1329,7 @@ Five real sources of local-vs-CI drift the script closes:
 | HOME / `~/.hermes/` | Your real config+auth.json | Temp dir per test |
 | Timezone | Local TZ (PDT etc.) | UTC |
 | Locale | Whatever is set | C.UTF-8 |
-| xdist workers | `-n auto` = all cores | `-n auto` (safe — subprocess isolation prevents cross-worker flakes) |
+| Parallelism | whatever your machine defaults to | Per-file subprocess isolation via `run_tests_parallel.py` (matches CI 6-slice matrix) |
 
 `tests/conftest.py` also enforces points 1-4 as an autouse fixture so ANY pytest
 invocation (including IDE integrations) gets hermetic behavior — but the wrapper
