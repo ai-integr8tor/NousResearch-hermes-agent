@@ -37,6 +37,11 @@ from typing import Any, Dict, Optional
 
 logger = logging.getLogger("agent.lsp.install")
 
+# Win32 CREATE_NO_WINDOW — suppress the console window that flashes when
+# we shell out to npm/pip/go (all ``.cmd``/console apps on Windows) to
+# auto-install a language server. 0 on non-Windows so the kwarg is inert.
+_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
+
 # Package-name → install-strategy hint registry.  Each entry is a
 # tuple of strategy name + package name + executable name.  When the
 # install completes, we look for the executable in
@@ -263,6 +268,7 @@ def _install_npm(
             text=True,
             timeout=300,
             stdin=subprocess.DEVNULL,
+            creationflags=_NO_WINDOW,
         )
         if proc.returncode != 0:
             logger.warning(
@@ -312,6 +318,7 @@ def _install_go(pkg: str, bin_name: str) -> Optional[str]:
             timeout=600,
             env=env,
             stdin=subprocess.DEVNULL,
+            creationflags=_NO_WINDOW,
         )
         if proc.returncode != 0:
             logger.warning(
@@ -350,6 +357,7 @@ def _install_pip(pkg: str, bin_name: str) -> Optional[str]:
             text=True,
             timeout=300,
             stdin=subprocess.DEVNULL,
+            creationflags=_NO_WINDOW,
         )
         if proc.returncode != 0:
             logger.warning(

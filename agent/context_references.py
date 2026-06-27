@@ -7,11 +7,16 @@ import mimetypes
 import os
 import re
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Awaitable, Callable
 
 from agent.model_metadata import estimate_tokens_rough
+
+# Win32 CREATE_NO_WINDOW — suppress the console flash when the windowless
+# gateway shells out to git/rg to resolve @-file references. 0 elsewhere.
+_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
 _QUOTED_REFERENCE_VALUE = r'(?:`[^`\n]+`|"[^"\n]+"|\'[^\'\n]+\')'
 REFERENCE_PATTERN = re.compile(
@@ -298,6 +303,7 @@ def _expand_git_reference(
             text=True,
             timeout=30,
             stdin=subprocess.DEVNULL,
+            creationflags=_NO_WINDOW,
         )
     except subprocess.TimeoutExpired:
         return f"{ref.raw}: git command timed out (30s)", None
@@ -491,6 +497,7 @@ def _rg_files(path: Path, cwd: Path, limit: int) -> list[Path] | None:
             text=True,
             timeout=10,
             stdin=subprocess.DEVNULL,
+            creationflags=_NO_WINDOW,
         )
     except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
         return None

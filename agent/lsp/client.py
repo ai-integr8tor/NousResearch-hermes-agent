@@ -259,8 +259,15 @@ class LSPClient:
             env.update(self._env)
 
         cmd = self._command
+        creationflags = 0
         if sys.platform == "win32":
             cmd = self._win_wrap_cmd(cmd)
+            # Suppress the cmd.exe console window that would otherwise
+            # flash every time we launch a ``.cmd``-wrapped language
+            # server (e.g. pyright-langserver.CMD). CREATE_NO_WINDOW.
+            from hermes_cli._subprocess_compat import windows_hide_flags
+
+            creationflags = windows_hide_flags()
 
         try:
             self._proc = await asyncio.create_subprocess_exec(
@@ -271,6 +278,7 @@ class LSPClient:
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
                 cwd=self._cwd,
+                creationflags=creationflags,
             )
         except FileNotFoundError as e:
             raise LSPProtocolError(

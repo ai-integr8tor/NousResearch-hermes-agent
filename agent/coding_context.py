@@ -56,6 +56,7 @@ import logging
 import os
 import re
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -149,6 +150,10 @@ _MAX_VERIFY_COMMANDS = 8
 _MAX_FACT_FILE_BYTES = 256 * 1024
 
 _GIT_TIMEOUT = 2.5
+
+# Win32 CREATE_NO_WINDOW — suppress the console flash when the windowless
+# gateway shells out to git to build per-turn coding context. 0 elsewhere.
+_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
 
 # Per-model edit-format steering. Matching the edit tool format to how a model
@@ -653,6 +658,7 @@ def _git(cwd: Path, *args: str) -> str:
             capture_output=True,
             text=True,
             timeout=_GIT_TIMEOUT,
+            creationflags=_NO_WINDOW,
         )
     except (OSError, subprocess.SubprocessError):
         return ""

@@ -29,6 +29,15 @@ logger = logging.getLogger("agent.lsp.workspace")
 # folds collapse to one entry.
 _workspace_cache: dict = {}
 
+# Cache: (start_dir, markers, excludes, ceiling) → resolved root (or None).
+# ``nearest_root`` is invoked ~5× per file write (via ``enabled_for``,
+# ``_get_or_spawn``, ``_mark_broken_for_file``, and the typescript
+# double-resolve), each time re-stat'ing up to ``markers × parents``
+# paths.  Memoizing collapses that to one walk per (dir, server-marker-set).
+# Same staleness profile as ``_workspace_cache`` — cleared on shutdown /
+# ``hermes lsp restart``.
+_root_cache: dict = {}
+
 
 def normalize_path(path: str) -> str:
     """Normalize a path for use as a stable map key.
@@ -140,6 +149,28 @@ def nearest_root(
     markers_list = list(markers)
     excludes_list = list(excludes) if excludes else []
 
+    cache_key = (
+        str(start_path),
+        tuple(markers_list),
+        tuple(excludes_list),
+        str(ceiling_path) if ceiling_path is not None else None,
+    )
+    if cache_key in _root_cache:
+        return _root_cache[cache_key]
+
+    result = _nearest_root_uncached(
+        start_path, ceiling_path, markers_list, excludes_list
+    )
+    _root_cache[cache_key] = result
+    return result
+
+
+def _nearest_root_uncached(
+    start_path: Path,
+    ceiling_path: Optional[Path],
+    markers_list: list,
+    excludes_list: list,
+) -> Optional[str]:
     cur = start_path
     # Defensive cap matching ``find_git_worktree``.  Bounded walk
     # protects against pathological inputs even though the
@@ -211,6 +242,7 @@ def clear_cache() -> None:
     up stale results from a previous session.
     """
     _workspace_cache.clear()
+    _root_cache.clear()
 
 
 __all__ = [

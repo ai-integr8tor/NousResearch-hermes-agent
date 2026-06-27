@@ -55,6 +55,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 from hermes_constants import get_hermes_home
@@ -63,6 +64,11 @@ from typing import Dict, List, Optional, Set, Tuple
 from utils import env_int
 
 logger = logging.getLogger(__name__)
+
+# Win32 CREATE_NO_WINDOW — suppress the console window that flashes when
+# the windowless gateway (pythonw.exe) shells out to git for shadow
+# checkpoints on every agent file edit. 0 on non-Windows (inert kwarg).
+_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -330,6 +336,7 @@ def _run_git(
             env=env,
             cwd=str(normalized_working_dir),
             stdin=subprocess.DEVNULL,
+            creationflags=_NO_WINDOW,
         )
         ok = result.returncode == 0
         stdout = result.stdout.strip()
@@ -450,6 +457,7 @@ def _init_store(store: Path, working_dir: str) -> Optional[str]:
             capture_output=True, text=True,
             env=init_env, timeout=_GIT_TIMEOUT,
             stdin=subprocess.DEVNULL,
+            creationflags=_NO_WINDOW,
         )
         if result.returncode != 0:
             return f"Shadow store init failed: {result.stderr.strip()}"
