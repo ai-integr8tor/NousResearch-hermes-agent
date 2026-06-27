@@ -901,6 +901,12 @@ def set_secret_capture_callback(*args, **kwargs):
     return _set_secret_capture_callback(*args, **kwargs)
 
 
+def _coerce_approval_timeout(*args, **kwargs):
+    from tools.approval import _coerce_approval_timeout as _coerce
+
+    return _coerce(*args, **kwargs)
+
+
 def _cleanup_all_browsers(*args, **kwargs):
     from tools.browser_tool import _emergency_cleanup_all_sessions
 
@@ -11106,7 +11112,11 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         import time as _time
 
         with self._approval_lock:
-            timeout = int(CLI_CONFIG.get("approvals", {}).get("timeout", 60))
+            approvals_config = CLI_CONFIG.get("approvals", {})
+            if not isinstance(approvals_config, dict):
+                approvals_config = {}
+            timeout = _coerce_approval_timeout(approvals_config.get("timeout", 60))
+            approval_deadline = _time.monotonic() + timeout
             response_queue = queue.Queue()
 
             self._approval_state = {
@@ -11116,7 +11126,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                 "selected": 0,
                 "response_queue": response_queue,
             }
-            self._approval_deadline = _time.monotonic() + timeout
+            self._approval_deadline = approval_deadline
 
             # Modal prompt — paint immediately, bypassing the throttle/resize
             # guard. A throttled paint here can be silently dropped (250ms
