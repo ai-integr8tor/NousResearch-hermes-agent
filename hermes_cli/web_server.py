@@ -9699,7 +9699,8 @@ async def install_skill_hub(body: SkillInstallRequest, profile: Optional[str] = 
     except Exception as exc:
         _log.exception("Failed to spawn skills install")
         raise HTTPException(status_code=500, detail=f"Failed to install skill: {exc}")
-    _invalidate_profile_list_cache()
+    # Async spawn: do not invalidate here — the skills tree is unchanged until
+    # the child exits. Early invalidation repopulates stale skill_count into cache.
     return {"ok": True, "pid": proc.pid, "name": "skills-install"}
 
 
@@ -9723,7 +9724,7 @@ async def uninstall_skill_hub(body: SkillUninstallRequest, profile: Optional[str
     except Exception as exc:
         _log.exception("Failed to spawn skills uninstall")
         raise HTTPException(status_code=500, detail=f"Failed to uninstall skill: {exc}")
-    _invalidate_profile_list_cache()
+    # Async spawn: same rationale as hub/install — wait for TTL or sync skill writes.
     return {"ok": True, "pid": proc.pid, "name": "skills-uninstall"}
 
 
