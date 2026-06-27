@@ -516,7 +516,13 @@ def find_alias_for_profile(profile_name: str) -> Optional[str]:
             continue
         if not is_windows and entry.suffix:
             continue
+        # Our profile wrappers are tiny scripts (~40 bytes). Skip large
+        # files so we never read/decode huge binaries that share this dir
+        # (e.g. claude, gh, agy in ~/.local/bin) just to find an alias --
+        # that was starving the dashboard asyncio event loop.
         try:
+            if entry.stat().st_size > 4096:
+                continue
             content = entry.read_text()
         except (OSError, UnicodeDecodeError):
             continue
