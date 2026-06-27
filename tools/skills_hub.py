@@ -25,7 +25,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from hermes_constants import get_hermes_home
+from hermes_constants import DynamicPath, get_hermes_home, get_skills_dir
 from agent.skill_utils import is_excluded_skill_path
 from typing import Any, Dict, List, Optional, Tuple, Union
 from urllib.parse import urljoin, urlparse, urlunparse
@@ -46,14 +46,14 @@ logger = logging.getLogger(__name__)
 # Paths
 # ---------------------------------------------------------------------------
 
-HERMES_HOME = get_hermes_home()
-SKILLS_DIR = HERMES_HOME / "skills"
-HUB_DIR = SKILLS_DIR / ".hub"
-LOCK_FILE = HUB_DIR / "lock.json"
-QUARANTINE_DIR = HUB_DIR / "quarantine"
-AUDIT_LOG = HUB_DIR / "audit.log"
-TAPS_FILE = HUB_DIR / "taps.json"
-INDEX_CACHE_DIR = HUB_DIR / "index-cache"
+HERMES_HOME = DynamicPath(get_hermes_home)
+SKILLS_DIR = DynamicPath(get_skills_dir)
+HUB_DIR = DynamicPath(lambda: get_skills_dir() / ".hub")
+LOCK_FILE = DynamicPath(lambda: get_skills_dir() / ".hub" / "lock.json")
+QUARANTINE_DIR = DynamicPath(lambda: get_skills_dir() / ".hub" / "quarantine")
+AUDIT_LOG = DynamicPath(lambda: get_skills_dir() / ".hub" / "audit.log")
+TAPS_FILE = DynamicPath(lambda: get_skills_dir() / ".hub" / "taps.json")
+INDEX_CACHE_DIR = DynamicPath(lambda: get_skills_dir() / ".hub" / "index-cache")
 
 # Cache duration for remote index fetches
 INDEX_CACHE_TTL = 3600  # 1 hour

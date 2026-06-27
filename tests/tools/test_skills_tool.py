@@ -124,6 +124,28 @@ class TestParseTags:
         assert _parse_tags([None, "", "valid"]) == ["valid"]
 
 
+class TestDynamicSkillsDirResolution:
+    def test_skills_list_follows_current_hermes_home_after_import(self, tmp_path, monkeypatch):
+        home1 = tmp_path / "home1"
+        home2 = tmp_path / "home2"
+        skills_dir1 = home1 / "skills"
+        skills_dir2 = home2 / "skills"
+        skills_dir1.mkdir(parents=True)
+        skills_dir2.mkdir(parents=True)
+        _make_skill(skills_dir1, "alpha")
+        _make_skill(skills_dir2, "beta")
+
+        monkeypatch.setenv("HERMES_HOME", str(home1))
+        first = json.loads(skills_tool_module.skills_list())
+
+        monkeypatch.setenv("HERMES_HOME", str(home2))
+        second = json.loads(skills_tool_module.skills_list())
+
+        assert [skill["name"] for skill in first["skills"]] == ["alpha"]
+        assert [skill["name"] for skill in second["skills"]] == ["beta"]
+        assert Path(os.fspath(skills_tool_module.SKILLS_DIR)) == skills_dir2
+
+
 class TestRequiredEnvironmentVariablesNormalization:
     def test_parses_new_required_environment_variables_metadata(self):
         frontmatter = {

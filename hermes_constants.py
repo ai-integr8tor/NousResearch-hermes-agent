@@ -11,6 +11,7 @@ import sys
 import sysconfig
 from contextvars import ContextVar, Token
 from pathlib import Path
+from typing import Callable
 
 
 _profile_fallback_warned: bool = False
@@ -18,6 +19,46 @@ _UNSET = object()
 _HERMES_HOME_OVERRIDE: ContextVar[str | object] = ContextVar(
     "_HERMES_HOME_OVERRIDE", default=_UNSET
 )
+
+
+class DynamicPath(os.PathLike[str]):
+    """Resolve a Path lazily against the current Hermes context.
+
+    Modules that are imported once and reused across profile switches cannot
+    safely capture ``HERMES_HOME``-derived paths at import time. This proxy
+    behaves like a ``Path`` for the operations used throughout Hermes while
+    re-resolving against the current profile context on every access.
+    """
+
+    def __init__(self, resolver: Callable[[], Path]):
+        self._resolver = resolver
+
+    def _path(self) -> Path:
+        return Path(self._resolver())
+
+    def __fspath__(self) -> str:
+        return os.fspath(self._path())
+
+    def __str__(self) -> str:
+        return str(self._path())
+
+    def __repr__(self) -> str:
+        return repr(self._path())
+
+    def __truediv__(self, other):
+        return self._path() / other
+
+    def __rtruediv__(self, other):
+        return Path(other) / self._path()
+
+    def __getattr__(self, name):
+        return getattr(self._path(), name)
+
+    def __eq__(self, other) -> bool:
+        return self._path() == other
+
+    def __hash__(self) -> int:
+        return hash(self._path())
 
 
 def set_hermes_home_override(path: str | Path | None) -> Token:
