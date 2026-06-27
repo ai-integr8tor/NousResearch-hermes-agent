@@ -9169,7 +9169,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             audio_paths = []
             for i, path in enumerate(event.media_urls):
                 mtype = event.media_types[i] if i < len(event.media_types) else ""
-                if mtype.startswith("image/") or event.message_type == MessageType.PHOTO:
+                # Telegram albums can merge photos and documents into a single
+                # MessageEvent.  In that case the aggregate event may still be
+                # PHOTO, but each attachment's MIME type remains authoritative.
+                # Do not let a PHOTO wrapper promote text/PDF/etc. attachments
+                # into native image routing, or providers reject the turn as
+                # invalid image data.
+                if mtype.startswith("image/") or (not mtype and event.message_type == MessageType.PHOTO):
                     image_paths.append(path)
                 # MessageType.AUDIO = audio file attachment (e.g. .mp3, .m4a) — never STT
                 # MessageType.VOICE = voice message (Opus/OGG) — always STT
