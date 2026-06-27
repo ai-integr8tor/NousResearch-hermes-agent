@@ -703,6 +703,7 @@ def build_anthropic_client(
     timeout: float = None,
     *,
     drop_context_1m_beta: bool = False,
+    user_agent: str | None = None,
 ):
     """Create an Anthropic client, auto-detecting setup-tokens vs API keys.
 
@@ -798,7 +799,18 @@ def build_anthropic_client(
         # don't follow Anthropic's sk-ant-* prefix convention and would be
         # misclassified as OAuth tokens.
         kwargs["api_key"] = api_key
-        if common_betas:
+        # Optional User-Agent override: some third-party endpoints sit behind
+        # Cloudflare/WAF that blocks the SDK default UA (python-httpx) with 403.
+        # Only override when explicitly configured (per-provider user_agent or
+        # HERMES_THIRD_PARTY_UA env); otherwise keep SDK default (= main behavior).
+        _tp_ua = str(user_agent or os.environ.get("HERMES_THIRD_PARTY_UA") or "")
+        _tp_ua = _tp_ua.strip()[:256].replace("\r", "").replace("\n", "")
+        if _tp_ua:
+            _tp_headers = {"User-Agent": _tp_ua}
+            if common_betas:
+                _tp_headers["anthropic-beta"] = ",".join(common_betas)
+            kwargs["default_headers"] = _tp_headers
+        elif common_betas:
             kwargs["default_headers"] = {"anthropic-beta": ",".join(common_betas)}
     elif _is_oauth_token(api_key):
         # OAuth access token / setup-token → Bearer auth + Claude Code identity.

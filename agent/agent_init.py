@@ -702,7 +702,25 @@ def init_agent(
             # the third-party identity-injection bug.
             from agent.anthropic_adapter import _is_oauth_token as _is_oat
             agent._is_anthropic_oauth = _is_oat(effective_key) if (_is_native_anthropic and isinstance(effective_key, str)) else False
-            agent._anthropic_client = build_anthropic_client(effective_key, base_url, timeout=_provider_timeout)
+            # Resolve per-provider user_agent for third-party custom endpoints
+            # (e.g. GLM Coding Plan behind Cloudflare blocking the SDK default UA).
+            _cp_user_agent = None
+            try:
+                from hermes_cli.config import get_compatible_custom_providers
+                _cps = get_compatible_custom_providers()
+                _target = (base_url or "").strip().rstrip("/")
+                if _target and isinstance(_cps, list):
+                    for _e in _cps:
+                        if isinstance(_e, dict) and (_e.get("base_url", "") or "").strip().rstrip("/") == _target:
+                            _u = str(_e.get("user_agent", "") or "").strip()
+                            if _u:
+                                _cp_user_agent = _u
+                                break
+            except Exception:
+                pass
+            agent._anthropic_client = build_anthropic_client(
+                effective_key, base_url, timeout=_provider_timeout, user_agent=_cp_user_agent,
+            )
             # No OpenAI client needed for Anthropic mode
             agent.client = None
             agent._client_kwargs = {}
