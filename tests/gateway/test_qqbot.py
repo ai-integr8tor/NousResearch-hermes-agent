@@ -1,6 +1,7 @@
 """Tests for the QQ Bot platform adapter."""
 
 import asyncio
+import logging
 import os
 from types import SimpleNamespace
 from unittest import mock
@@ -287,6 +288,12 @@ class TestDmAllowed:
         adapter = self._make_adapter(app_id="a", client_secret="b", dm_policy="allowlist", allow_from="*")
         assert adapter._is_dm_allowed("anyone") is True
 
+    def test_allowlist_no_match_logs_drop_reason(self, caplog):
+        adapter = self._make_adapter(app_id="a", client_secret="b", dm_policy="allowlist", allow_from="user1,user2")
+        with caplog.at_level(logging.INFO, logger="gateway.platforms.qqbot.adapter"):
+            assert adapter._is_dm_allowed("user3") is False
+        assert "sender not in allow_from" in caplog.text
+
 
 # ---------------------------------------------------------------------------
 # _is_group_allowed
@@ -308,6 +315,12 @@ class TestGroupAllowed:
     def test_allowlist_no_match(self):
         adapter = self._make_adapter(app_id="a", client_secret="b", group_policy="allowlist", group_allow_from="grp1")
         assert adapter._is_group_allowed("grp2", "user1") is False
+
+    def test_allowlist_no_match_logs_drop_reason(self, caplog):
+        adapter = self._make_adapter(app_id="a", client_secret="b", group_policy="allowlist", group_allow_from="grp1")
+        with caplog.at_level(logging.INFO, logger="gateway.platforms.qqbot.adapter"):
+            assert adapter._is_group_allowed("grp2", "user1") is False
+        assert "group not in group_allow_from" in caplog.text
 
 
 # ---------------------------------------------------------------------------

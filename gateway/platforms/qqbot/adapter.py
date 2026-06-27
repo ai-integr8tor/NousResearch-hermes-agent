@@ -3144,16 +3144,36 @@ class QQAdapter(BasePlatformAdapter):
 
     def _is_dm_allowed(self, user_id: str) -> bool:
         if self._dm_policy == "disabled":
+            logger.debug(
+                "[%s] DM from %s dropped: dm_policy is disabled",
+                self._log_tag, user_id,
+            )
             return False
         if self._dm_policy == "allowlist":
-            return self._entry_matches(self._allow_from, user_id)
+            if self._entry_matches(self._allow_from, user_id):
+                return True
+            logger.info(
+                "[%s] DM from %s dropped: sender not in allow_from",
+                self._log_tag, user_id,
+            )
+            return False
         return True
 
     def _is_group_allowed(self, group_id: str, user_id: str) -> bool:
         if self._group_policy == "disabled":
+            logger.debug(
+                "[%s] Group message in %s dropped: group_policy is disabled",
+                self._log_tag, group_id,
+            )
             return False
         if self._group_policy == "allowlist":
-            return self._entry_matches(self._group_allow_from, group_id)
+            if self._entry_matches(self._group_allow_from, group_id):
+                return True
+            logger.info(
+                "[%s] Group message in %s from %s dropped: group not in group_allow_from",
+                self._log_tag, group_id, user_id,
+            )
+            return False
         return True
 
     @staticmethod
