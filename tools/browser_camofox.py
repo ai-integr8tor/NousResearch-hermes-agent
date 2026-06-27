@@ -61,12 +61,23 @@ def is_camofox_mode() -> bool:
     """True when Camofox backend is configured and no CDP override is active.
 
     When the user has explicitly connected to a live Chromium-family browser via
-    ``/browser connect`` (which sets ``BROWSER_CDP_URL``), the CDP connection
-    takes priority over Camofox so the browser tools operate on the real
-    browser instead of being silently routed to the Camofox backend.
+    ``/browser connect`` (which sets ``BROWSER_CDP_URL``), or has configured a
+    persistent CDP endpoint via ``browser.cdp_url`` in config.yaml, the CDP
+    connection takes priority over Camofox so the browser tools operate on the
+    real browser instead of being silently routed to the Camofox backend.
     """
     if os.getenv("BROWSER_CDP_URL", "").strip():
         return False
+    # If browser.cdp_url is set in config.yaml, CDP takes priority over Camofox.
+    try:
+        from hermes_cli.config import read_raw_config
+
+        cfg = read_raw_config()
+        cdp_url = cfg.get("browser", {}).get("cdp_url")
+        if cdp_url and str(cdp_url).strip():
+            return False
+    except Exception:
+        pass  # Can't read config; fall through to env-var check.
     return bool(get_camofox_url())
 
 
