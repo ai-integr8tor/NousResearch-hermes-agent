@@ -79,19 +79,47 @@ class TestGenericProviderLiveCuratedMerge:
         # Curated-first: curated casing wins for models present in both.
         assert result == ["glm-5.1", "GLM-5", "glm-4.5"]
 
-    def test_empty_curated_returns_live_only(self):
-        """When no curated list exists, live is returned as-is."""
+    def test_empty_curated_returns_live_only_for_non_models_dev_preferred_provider(self):
+        """When no curated or models.dev-preferred list exists, live is returned as-is."""
         live = ["model-a", "model-b"]
         profile = self._make_profile(live)
 
         with (
             patch("providers.get_provider_profile", return_value=profile),
             patch("hermes_cli.auth.resolve_api_key_provider_credentials", return_value={"api_key": "k", "base_url": ""}),
-            patch.dict("hermes_cli.models._PROVIDER_MODELS", {"zai": []}),
+            patch.dict("hermes_cli.models._PROVIDER_MODELS", {"test-provider": []}),
         ):
-            result = provider_model_ids("zai")
+            result = provider_model_ids("test-provider")
 
         assert result == ["model-a", "model-b"]
+
+    def test_models_dev_preferred_provider_merges_models_dev_before_live(self):
+        """Fireworks should keep setup-flow models.dev entries ahead of live-only API models."""
+        live = [
+            "accounts/fireworks/models/cogito-v1-preview-llama-3b",
+            "accounts/fireworks/models/deepseek-v4-flash",
+        ]
+        models_dev = [
+            "accounts/fireworks/routers/kimi-k2p6-turbo",
+            "accounts/fireworks/models/deepseek-v4-flash",
+            "accounts/fireworks/models/qwen3p7-plus",
+        ]
+        profile = self._make_profile(live)
+
+        with (
+            patch("providers.get_provider_profile", return_value=profile),
+            patch("hermes_cli.auth.resolve_api_key_provider_credentials", return_value={"api_key": "k", "base_url": ""}),
+            patch.dict("hermes_cli.models._PROVIDER_MODELS", {"fireworks": []}),
+            patch("agent.models_dev.list_agentic_models", return_value=models_dev),
+        ):
+            result = provider_model_ids("fireworks")
+
+        assert result == [
+            "accounts/fireworks/routers/kimi-k2p6-turbo",
+            "accounts/fireworks/models/deepseek-v4-flash",
+            "accounts/fireworks/models/qwen3p7-plus",
+            "accounts/fireworks/models/cogito-v1-preview-llama-3b",
+        ]
 
     def test_live_empty_falls_back_to_curated(self):
         """When live returns nothing, curated static list is used.

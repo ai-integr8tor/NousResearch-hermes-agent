@@ -2425,6 +2425,8 @@ def provider_model_ids(provider: Optional[str], *, force_refresh: bool = False) 
                     # the top of the picker; live-only entries are appended
                     # afterwards for discovery.  (#46850)
                     curated = list(_PROVIDER_MODELS.get(normalized, []))
+                    if normalized in _MODELS_DEV_PREFERRED and not curated:
+                        curated = _merge_with_models_dev(normalized, curated)
                     if curated:
                         merged = list(curated)
                         merged_lower = {m.lower() for m in curated}
