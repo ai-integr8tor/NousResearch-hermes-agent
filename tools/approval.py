@@ -979,6 +979,7 @@ def save_permanent_allowlist(patterns: set):
 def prompt_dangerous_approval(command: str, description: str,
                               timeout_seconds: int | None = None,
                               allow_permanent: bool = True,
+                              risk_level: str = "",
                               approval_callback=None) -> str:
     """Prompt the user to approve a dangerous command (CLI only).
 
@@ -986,9 +987,14 @@ def prompt_dangerous_approval(command: str, description: str,
         allow_permanent: When False, hide the [a]lways option (used when
             tirith warnings are present, since broad permanent allowlisting
             is inappropriate for content-level security findings).
+        risk_level: Deterministic command risk ('critical'|'high'|'medium')
+            derived by the orchestration. Threaded through to the callback
+            so downstream (CLI) can tier remote approval. May be empty.
         approval_callback: Optional callback registered by the CLI for
             prompt_toolkit integration. Signature:
-            (command, description, *, allow_permanent=True) -> str.
+            (command, description, *, allow_permanent=True, risk_level="") -> str.
+            Older callbacks without a risk_level kwarg are still supported
+            via a TypeError fallback.
 
     Returns: 'once', 'session', 'always', or 'deny'
     """
@@ -997,8 +1003,15 @@ def prompt_dangerous_approval(command: str, description: str,
 
     if approval_callback is not None:
         try:
-            return approval_callback(command, description,
-                                     allow_permanent=allow_permanent)
+            try:
+                return approval_callback(command, description,
+                                         allow_permanent=allow_permanent,
+                                         risk_level=risk_level)
+            except TypeError:
+                # Older callbacks without a risk_level kwarg (e.g.
+                # delegate auto-approve, subagent callbacks).
+                return approval_callback(command, description,
+                                         allow_permanent=allow_permanent)
         except Exception as e:
             logger.error("Approval callback failed: %s", e, exc_info=True)
             return "deny"
@@ -1524,6 +1537,49 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
     return {"resolved": resolved, "choice": choice}
 
 
+def _derive_risk_level(tirith_result: dict, is_dangerous: bool,
+                       is_hardline: bool = False) -> str:
+    """Map available guard signals to critical|high|medium.
+
+    Deterministic mapping (a prompt is showing, so the floor is 'medium'):
+      - is_hardline                                  -> 'critical'
+      - any tirith finding severity == 'critical'    -> 'critical'
+      - tirith action == 'block' (non-critical)
+        OR any finding severity == 'high'            -> 'high'
+      - is_dangerous (pattern match), no escalation   -> 'high' (conservative)
+      - tirith 'warn' with only medium/low findings   -> 'medium'
+      - otherwise                                     -> 'medium'
+
+    Defensive: ``tirith_result`` may be ``{}`` or lack ``findings``; treat
+    missing signals as no tirith signal. Severities are read
+    case-insensitively.
+    """
+    if is_hardline:
+        return "critical"
+
+    tirith_result = tirith_result or {}
+    action = str(tirith_result.get("action", "") or "").lower()
+    findings = tirith_result.get("findings") or []
+    severities = {
+        str(f.get("severity", "") or "").lower()
+        for f in findings
+        if isinstance(f, dict)
+    }
+
+    if "critical" in severities:
+        return "critical"
+
+    if action == "block" or "high" in severities:
+        return "high"
+
+    if is_dangerous:
+        return "high"
+
+    # tirith 'warn' with only medium/low findings, or no signal at all:
+    # a prompt is showing, so at least medium.
+    return "medium"
+
+
 def check_all_command_guards(command: str, env_type: str,
                              approval_callback=None) -> dict:
     """Run all pre-exec security checks and return a single approval decision.
@@ -1811,8 +1867,10 @@ def check_all_command_guards(command: str, env_type: str,
         session_key=session_key,
         surface="cli",
     )
+    risk_level = _derive_risk_level(tirith_result, is_dangerous, is_hardline)
     choice = prompt_dangerous_approval(command, combined_desc,
                                        allow_permanent=not has_tirith,
+                                       risk_level=risk_level,
                                        approval_callback=approval_callback)
     _fire_approval_hook(
         "post_approval_response",
