@@ -35,6 +35,14 @@ from utils import is_truthy_value
 logger = logging.getLogger(__name__)
 
 
+def is_secure_scheme(url: str) -> bool:
+    """Return True when *url* uses HTTPS."""
+    try:
+        return urlsplit(url).scheme.lower() == "https"
+    except Exception:
+        return False
+
+
 def normalize_url_for_request(url: str) -> str:
     """Return an ASCII-safe HTTP URL for Hermes-owned URL tools.
 

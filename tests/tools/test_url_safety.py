@@ -7,6 +7,7 @@ from tools.url_safety import (
     is_safe_url,
     async_is_safe_url,
     is_always_blocked_url,
+    is_secure_scheme,
     normalize_url_for_request,
     _is_blocked_ip,
     _global_allow_private_urls,
@@ -18,6 +19,11 @@ import pytest
 
 
 class TestNormalizeUrlForRequest:
+    def test_is_secure_scheme_accepts_https_only(self):
+        assert is_secure_scheme("https://example.com") is True
+        assert is_secure_scheme("http://example.com") is False
+        assert is_secure_scheme("not a url") is False
+
     def test_percent_encodes_non_ascii_path(self):
         assert (
             normalize_url_for_request("https://wttr.in/Köln")
