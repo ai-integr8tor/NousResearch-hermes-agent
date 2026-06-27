@@ -2693,3 +2693,46 @@ class TestPreflightSentinelGuard:
         compressor.last_prompt_tokens = 50_000
         result = self._seed(compressor.last_prompt_tokens, 10_000)
         assert result == 50_000
+
+
+# ---------------------------------------------------------------------------
+# Memory context preservation after compaction
+# ---------------------------------------------------------------------------
+
+
+class TestMemoryContextPreserved:
+    """SUMMARY_PREFIX must not deprecate persistent memory (MEMORY.md, USER.md).
+
+    Regression guard for #17251: earlier versions labeled compacted content as
+    'background reference, NOT active instructions' which caused the agent to
+    ignore MEMORY.md/USER.md after compaction.
+    """
+
+    def test_summary_prefix_mentions_memory_stays_active(self):
+        """SUMMARY_PREFIX explicitly states memory remains authoritative."""
+        assert "MEMORY.md" in SUMMARY_PREFIX
+        assert "USER.md" in SUMMARY_PREFIX
+        # Must contain positive assertion (active/authoritative), not negative
+        lower = SUMMARY_PREFIX.lower()
+        assert "active" in lower or "authoritative" in lower
+
+    def test_summary_prefix_exempts_memory_from_compaction(self):
+        """SUMMARY_PREFIX explicitly exempts MEMORY.md/USER.md from deprecation.
+
+        The prefix may label compacted turns as 'background reference', but
+        it must carve out an exception so persistent memory stays active.
+        """
+        lower = SUMMARY_PREFIX.lower()
+        # Memory files are explicitly mentioned as still active
+        assert "memory.md" in lower
+        assert "user.md" in lower
+        # The exemption must be positive (active/authoritative), not just "not deprecated"
+        assert "always authoritative" in lower or "always active" in lower
+
+    def test_summary_prefix_instructs_agent_not_to_ignore_memory(self):
+        """SUMMARY_PREFIX tells agent to never deprioritize memory.
+
+        This is the key behavioral contract: after compaction, the agent
+        must still consult MEMORY.md and USER.md for context.
+        """
+        assert "never ignore" in SUMMARY_PREFIX.lower() or "never deprioritize" in SUMMARY_PREFIX.lower()
