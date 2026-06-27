@@ -2681,6 +2681,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         self._startup_restore_in_progress = False
         self._startup_restore_queue: List[MessageEvent] = []
         self._startup_restore_tasks: List[asyncio.Task] = []
+        # Tracks message IDs we've sent (for detecting replies to our own messages).
+        self._sent_message_ids: set = set()
+        # Maps a message_id -> session_key when we send a message in a session,
+        # so a reply to that message can be contextualized.
+        self._message_context_map: Dict[str, str] = {}
         # LRU cache of live SessionSources keyed by session_key. Used by
         # fallback routing paths (shutdown notifications, synthetic
         # background-process events) when the persisted origin is missing
@@ -4625,6 +4630,28 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         self._enqueue_fifo(session_key, event, adapter)
 
+    # ------------------------------------------------------------------
+    # Dialogue reply-routing helpers
+    # ------------------------------------------------------------------
+
+    def _is_our_bot_message(self, message_id: Optional[str]) -> bool:
+        """Check if a message_id was sent by our own bot."""
+        if not message_id:
+            return False
+        return message_id in self._sent_message_ids
+
+    def _resolve_reply_context(self, event: MessageEvent) -> Optional[str]:
+        """If event is a reply to one of our messages, return the target session_key."""
+        if not event.reply_to_message_id:
+            return None
+        return self._message_context_map.get(event.reply_to_message_id)
+
+    def _build_context_key(self, event: MessageEvent, session_key: str) -> str:
+        """Build a predictable context key for mapping sent message to session."""
+        platform = event.source.platform.value if event.source.platform else "unknown"
+        chat_id = event.source.chat_id or "unknown"
+        return f"{platform}:{chat_id}"
+
     async def _handle_active_session_busy_message(self, event: MessageEvent, session_key: str) -> bool:
         # --- Authorization gate (#17775) ---
         # The cold path (_handle_message) checks _is_user_authorized before
@@ -4670,7 +4697,28 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             )
             return True
 
-        # Normal busy case (agent actively running a task)
+        # --- Contextual followup detection ---
+        # If this message is a reply to one of our own bot messages within
+        # the active session, route it to _queued_events so it is processed
+        # as a distinct next turn rather than merged into the pending text
+        # slot.  This enables conversational follow-ups (e.g. user replies
+        # to a bot's question with "yes") to remain separate turns.
+        if (
+            event.reply_to_message_id
+            and self._is_our_bot_message(event.reply_to_message_id)
+            and event.message_type == MessageType.TEXT
+        ):
+            event._is_contextual_followup = True
+            logger.debug(
+                "Contextual followup detected for session %s — routing to _queued_events "
+                "(reply_to_message_id=%s)",
+                session_key,
+                event.reply_to_message_id,
+            )
+            self._queued_events.setdefault(session_key, []).append(event)
+            return True
+
+        # --- Normal busy case (agent actively running a task) ---
         adapter = self.adapters.get(event.source.platform)
         if not adapter:
             return False  # let default path handle it
