@@ -248,7 +248,8 @@ export function getSessionMessages(id: string, profile?: string | null): Promise
 
   return window.hermesDesktop.api<SessionMessagesResponse>({
     ...(profile ? { profile } : {}),
-    path: `/api/sessions/${encodeURIComponent(id)}/messages${suffix}`
+    path: `/api/sessions/${encodeURIComponent(id)}/messages${suffix}`,
+    timeoutMs: SESSION_LIST_REQUEST_TIMEOUT_MS
   })
 }
 
@@ -322,7 +323,8 @@ export function getLogs(params: {
 export function getHermesConfig(): Promise<HermesConfig> {
   return window.hermesDesktop.api<HermesConfig>({
     ...profileScoped(),
-    path: '/api/config'
+    path: '/api/config',
+    timeoutMs: SESSION_LIST_REQUEST_TIMEOUT_MS
   })
 }
 
