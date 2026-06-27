@@ -92,22 +92,58 @@ def _get_bedrock_runtime_client(region: str):
     """Get or create a cached ``bedrock-runtime`` client for the given region.
 
     Uses the default AWS credential chain (env vars → profile → instance role).
+    Respects config.yaml bedrock.profile if set.
     """
     if region not in _bedrock_runtime_client_cache:
         boto3 = _require_boto3()
-        _bedrock_runtime_client_cache[region] = boto3.client(
-            "bedrock-runtime", region_name=region,
-        )
+        # Check if a profile is configured in config.yaml
+        try:
+            from hermes_cli.config import load_config
+            bedrock_cfg = load_config().get("bedrock", {})
+            profile_name = bedrock_cfg.get("profile", "").strip()
+        except Exception:
+            profile_name = ""
+        
+        if profile_name:
+            # Use boto3.Session to respect the profile
+            session = boto3.Session(profile_name=profile_name)
+            _bedrock_runtime_client_cache[region] = session.client(
+                "bedrock-runtime", region_name=region,
+            )
+        else:
+            # Use default credential chain
+            _bedrock_runtime_client_cache[region] = boto3.client(
+                "bedrock-runtime", region_name=region,
+            )
     return _bedrock_runtime_client_cache[region]
 
 
 def _get_bedrock_control_client(region: str):
-    """Get or create a cached ``bedrock`` control-plane client for model discovery."""
+    """Get or create a cached ``bedrock`` control-plane client for model discovery.
+    
+    Respects config.yaml bedrock.profile if set.
+    """
     if region not in _bedrock_control_client_cache:
         boto3 = _require_boto3()
-        _bedrock_control_client_cache[region] = boto3.client(
-            "bedrock", region_name=region,
-        )
+        # Check if a profile is configured in config.yaml
+        try:
+            from hermes_cli.config import load_config
+            bedrock_cfg = load_config().get("bedrock", {})
+            profile_name = bedrock_cfg.get("profile", "").strip()
+        except Exception:
+            profile_name = ""
+        
+        if profile_name:
+            # Use boto3.Session to respect the profile
+            session = boto3.Session(profile_name=profile_name)
+            _bedrock_control_client_cache[region] = session.client(
+                "bedrock", region_name=region,
+            )
+        else:
+            # Use default credential chain
+            _bedrock_control_client_cache[region] = boto3.client(
+                "bedrock", region_name=region,
+            )
     return _bedrock_control_client_cache[region]
 
 
@@ -360,6 +396,7 @@ def resolve_bedrock_region(env: Optional[Dict[str, str]] = None) -> str:
       1. AWS_REGION env var
       2. AWS_DEFAULT_REGION env var
       3. boto3/botocore configured region (from ~/.aws/config or SSO profile)
+         - Respects config.yaml bedrock.profile if set
       4. us-east-1 (hard fallback)
 
     The boto3 fallback is critical for EU/AP users who configure their region
@@ -375,8 +412,23 @@ def resolve_bedrock_region(env: Optional[Dict[str, str]] = None) -> str:
     if explicit:
         return explicit
     try:
+        # Check if a profile is configured in config.yaml
+        profile_name = ""
+        try:
+            from hermes_cli.config import load_config
+            bedrock_cfg = load_config().get("bedrock", {})
+            profile_name = bedrock_cfg.get("profile", "").strip()
+        except Exception:
+            pass
+        
         import botocore.session
-        region = botocore.session.get_session().get_config_variable("region")
+        if profile_name:
+            # Create a session with the specified profile
+            session = botocore.session.Session(profile=profile_name)
+            region = session.get_config_variable("region")
+        else:
+            # Use default session
+            region = botocore.session.get_session().get_config_variable("region")
         if region:
             return region
     except Exception:

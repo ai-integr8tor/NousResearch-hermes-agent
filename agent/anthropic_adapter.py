@@ -835,6 +835,7 @@ def build_anthropic_bedrock_client(region: str):
     serves them with 1M natively.
 
     Auth uses the boto3 default credential chain (IAM roles, SSO, env vars).
+    Respects config.yaml bedrock.profile if set.
     """
     _anthropic_sdk = _get_anthropic_sdk()
     if _anthropic_sdk is None:
@@ -848,12 +849,27 @@ def build_anthropic_bedrock_client(region: str):
             "Upgrade with: pip install 'anthropic>=0.39.0'"
         )
     from httpx import Timeout
+    
+    # Check if a profile is configured in config.yaml
+    profile_name = ""
+    try:
+        from hermes_cli.config import load_config
+        bedrock_cfg = load_config().get("bedrock", {})
+        profile_name = bedrock_cfg.get("profile", "").strip()
+    except Exception:
+        pass
+    
+    client_kwargs = {
+        "aws_region": region,
+        "timeout": Timeout(timeout=900.0, connect=10.0),
+        "default_headers": {"anthropic-beta": ",".join([*_COMMON_BETAS, _CONTEXT_1M_BETA])},
+    }
+    
+    # Add profile if configured
+    if profile_name:
+        client_kwargs["aws_profile"] = profile_name
 
-    return _anthropic_sdk.AnthropicBedrock(
-        aws_region=region,
-        timeout=Timeout(timeout=900.0, connect=10.0),
-        default_headers={"anthropic-beta": ",".join([*_COMMON_BETAS, _CONTEXT_1M_BETA])},
-    )
+    return _anthropic_sdk.AnthropicBedrock(**client_kwargs)
 
 
 def _read_claude_code_credentials_from_keychain() -> Optional[Dict[str, Any]]:
