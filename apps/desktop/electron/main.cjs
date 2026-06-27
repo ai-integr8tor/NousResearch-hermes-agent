@@ -27,6 +27,7 @@ const { execFileSync, spawn } = require('node:child_process')
 const { installEmbedReferer } = require('./embed-referer.cjs')
 const { detectRemoteDisplay, isWindowsBinaryPathInWsl, isWslEnvironment } = require('./bootstrap-platform.cjs')
 const { runBootstrap } = require('./bootstrap-runner.cjs')
+const { resolveNotificationAction } = require('./notification-actions.cjs')
 const {
   buildSessionWindowUrl,
   chatWindowWebPreferences,
@@ -6434,9 +6435,9 @@ ipcMain.handle('hermes:notify', (_event, payload) => {
       mainWindow.webContents.send('hermes:focus-session', payload.sessionId)
     }
   })
-  notification.on('action', (_actionEvent, index) => {
+  notification.on('action', (actionEvent, index) => {
     if (!mainWindow || mainWindow.isDestroyed()) return
-    const action = actions[index]
+    const action = resolveNotificationAction(actions, actionEvent, index)
     if (action?.id) {
       mainWindow.webContents.send('hermes:notification-action', { sessionId: payload?.sessionId, actionId: action.id })
     }
