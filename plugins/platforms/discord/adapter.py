@@ -937,7 +937,12 @@ class DiscordAdapter(BasePlatformAdapter):
                 any(not entry.isdigit() for entry in self._allowed_user_ids)
                 or bool(self._allowed_role_ids)  # Need members intent for role lookup
             )
-            intents.voice_states = True
+            # Only request the voice state intent when Discord voice features are
+            # explicitly enabled. Some bot/app configurations connect normally
+            # with text intents but hang during gateway READY when voice_states is
+            # requested; Code Sherpa hit this after a clean restart. Text-only
+            # bots do not need the voice state event stream.
+            intents.voice_states = bool(self._voice_fx_cfg.get("enabled"))
 
             # Resolve proxy (DISCORD_PROXY > generic env vars > macOS system proxy)
             from gateway.platforms.base import resolve_proxy_url, proxy_kwargs_for_bot
