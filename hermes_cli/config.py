@@ -923,6 +923,9 @@ DEFAULT_CONFIG = {
         # budget routinely interrupted legitimate work on /restart. Raise
         # further in config.yaml if you run very-long-reasoning models.
         "restart_drain_timeout": 180,
+        # Idle TTL for cached gateway agents between messages.  0 disables
+        # idle eviction; the hard cache size cap still applies.
+        "cache_idle_ttl_seconds": 3600,
         # Max app-level retry attempts for API errors (connection drops,
         # provider timeouts, 5xx, etc.) before the agent surfaces the
         # failure.  The OpenAI SDK already does its own low-level retries
