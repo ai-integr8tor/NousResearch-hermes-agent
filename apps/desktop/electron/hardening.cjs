@@ -4,6 +4,8 @@ const path = require('node:path')
 const { fileURLToPath } = require('node:url')
 
 const DEFAULT_FETCH_TIMEOUT_MS = 15_000
+const AUDIO_TRANSCRIPTION_TIMEOUT_MS = 60_000
+const BACKEND_READY_TIMEOUT_MS = 60_000
 const DATA_URL_READ_MAX_BYTES = 16 * 1024 * 1024
 const TEXT_PREVIEW_SOURCE_MAX_BYTES = 64 * 1024 * 1024
 
@@ -20,6 +22,28 @@ function resolveTimeoutMs(timeoutMs, fallbackMs = DEFAULT_FETCH_TIMEOUT_MS) {
   }
 
   return fallback
+}
+
+function apiRequestPathname(requestPath) {
+  if (typeof requestPath !== 'string' || !requestPath.trim()) {
+    return ''
+  }
+
+  try {
+    return new URL(requestPath, 'http://hermes.local').pathname
+  } catch {
+    return requestPath.split('?')[0]
+  }
+}
+
+function defaultFetchTimeoutMsForApiPath(requestPath, fallbackMs = DEFAULT_FETCH_TIMEOUT_MS) {
+  const fallback = resolveTimeoutMs(undefined, fallbackMs)
+  return apiRequestPathname(requestPath) === '/api/audio/transcribe' ? AUDIO_TRANSCRIPTION_TIMEOUT_MS : fallback
+}
+
+function resolveApiRequestTimeoutMs(request, fallbackMs = DEFAULT_FETCH_TIMEOUT_MS) {
+  const requestObject = request && typeof request === 'object' ? request : {}
+  return resolveTimeoutMs(requestObject.timeoutMs, defaultFetchTimeoutMsForApiPath(requestObject.path, fallbackMs))
 }
 
 function encryptDesktopSecret(value, safeStorageApi) {
@@ -272,11 +296,14 @@ async function resolveReadableFileForIpc(filePath, options = {}) {
 }
 
 module.exports = {
+  AUDIO_TRANSCRIPTION_TIMEOUT_MS,
+  BACKEND_READY_TIMEOUT_MS,
   DATA_URL_READ_MAX_BYTES,
   DEFAULT_FETCH_TIMEOUT_MS,
   TEXT_PREVIEW_SOURCE_MAX_BYTES,
   encryptDesktopSecret,
   rejectUnsafePathSyntax,
+  resolveApiRequestTimeoutMs,
   resolveDirectoryForIpc,
   resolveReadableFileForIpc,
   resolveRequestedPathForIpc,

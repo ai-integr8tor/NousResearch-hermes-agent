@@ -110,10 +110,12 @@ const {
   tokenPreview
 } = require('./connection-config.cjs')
 const {
+  BACKEND_READY_TIMEOUT_MS,
   DATA_URL_READ_MAX_BYTES,
   DEFAULT_FETCH_TIMEOUT_MS,
   TEXT_PREVIEW_SOURCE_MAX_BYTES,
   encryptDesktopSecret: encryptDesktopSecretStrict,
+  resolveApiRequestTimeoutMs,
   resolveReadableFileForIpc,
   resolveRequestedPathForIpc,
   resolveTimeoutMs
@@ -3766,12 +3768,12 @@ function closePreviewWatchers() {
 }
 
 async function waitForHermes(baseUrl, token) {
-  const deadline = Date.now() + 45_000
+  const deadline = Date.now() + BACKEND_READY_TIMEOUT_MS
   let lastError = null
 
   while (Date.now() < deadline) {
     try {
-      await fetchJson(`${baseUrl}/api/status`, token)
+      await fetchJson(`${baseUrl}/api/status`, token, { timeoutMs: BACKEND_READY_TIMEOUT_MS })
       return
     } catch (error) {
       lastError = error
@@ -6392,7 +6394,7 @@ ipcMain.handle('hermes:api', async (_event, request) => {
 
   const profile = request?.profile
   const connection = await ensureBackend(profile)
-  const timeoutMs = resolveTimeoutMs(request?.timeoutMs, DEFAULT_FETCH_TIMEOUT_MS)
+  const timeoutMs = resolveApiRequestTimeoutMs(request)
   const requestPath = pathWithGlobalRemoteProfile(request.path, profile, {
     globalRemote: globalRemoteActive(),
     profileRemoteOverride: profileHasRemoteOverride(profile)
