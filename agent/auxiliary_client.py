@@ -1665,10 +1665,29 @@ def _resolve_api_key_provider() -> Tuple[Optional[OpenAI], Optional[str]]:
 
 
 
+def _read_hermes_env_value(name: str) -> str:
+    """Read a secret from Hermes .env plus process env."""
+    try:
+        from hermes_cli.config import get_env_value
+
+        val = (get_env_value(name) or "").strip()
+        if val:
+            return val
+    except Exception:
+        pass
+    return (os.getenv(name, "") or "").strip()
+
+
 def _try_openrouter(explicit_api_key: str = None, model: str = None) -> Tuple[Optional[OpenAI], Optional[str]]:
+    or_key = (explicit_api_key or "").strip() or _read_hermes_env_value("OPENROUTER_API_KEY")
+    if or_key:
+        logger.debug("Auxiliary client: OpenRouter via explicit/env key")
+        return OpenAI(api_key=or_key, base_url=OPENROUTER_BASE_URL,
+                       default_headers=build_or_headers()), model or _OPENROUTER_MODEL
+
     pool_present, entry = _select_pool_entry("openrouter")
     if pool_present:
-        or_key = explicit_api_key or _pool_runtime_api_key(entry)
+        or_key = _pool_runtime_api_key(entry)
         if not or_key:
             _mark_provider_unhealthy("openrouter", ttl=60)
             return None, None
@@ -1677,13 +1696,8 @@ def _try_openrouter(explicit_api_key: str = None, model: str = None) -> Tuple[Op
         return OpenAI(api_key=or_key, base_url=base_url,
                        default_headers=build_or_headers()), model or _OPENROUTER_MODEL
 
-    or_key = explicit_api_key or os.getenv("OPENROUTER_API_KEY")
-    if not or_key:
-        _mark_provider_unhealthy("openrouter", ttl=60)
-        return None, None
-    logger.debug("Auxiliary client: OpenRouter")
-    return OpenAI(api_key=or_key, base_url=OPENROUTER_BASE_URL,
-                   default_headers=build_or_headers()), model or _OPENROUTER_MODEL
+    _mark_provider_unhealthy("openrouter", ttl=60)
+    return None, None
 
 
 def _describe_openrouter_unavailable() -> str:
@@ -1694,7 +1708,7 @@ def _describe_openrouter_unavailable() -> str:
             return "OpenRouter credential pool has no usable entries (credentials may be exhausted)"
         if not _pool_runtime_api_key(entry):
             return "OpenRouter credential pool entry is missing a runtime API key"
-    if not str(os.getenv("OPENROUTER_API_KEY") or "").strip():
+    if not _read_hermes_env_value("OPENROUTER_API_KEY"):
         return "OPENROUTER_API_KEY not set"
     return "no usable OpenRouter credentials found"
 

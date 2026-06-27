@@ -919,6 +919,22 @@ class TestExplicitProviderRouting:
             for record in caplog.records
         )
 
+    def test_openrouter_hermes_env_key_beats_stale_pool_entry(self, monkeypatch):
+        stale_entry = SimpleNamespace(
+            id="bad123",
+            label="api-key-1",
+            runtime_api_key="insecure",
+            base_url="https://openrouter.ai/api/v1",
+        )
+        with patch("agent.auxiliary_client._select_pool_entry", return_value=(True, stale_entry)), \
+             patch("agent.auxiliary_client._read_hermes_env_value", return_value="sk-or-...-key"), \
+             patch("agent.auxiliary_client.OpenAI") as mock_openai:
+            client, model = resolve_provider_client("openrouter", model="moonshotai/kimi-k2.7-code")
+
+        assert client is mock_openai.return_value
+        assert model == "moonshotai/kimi-k2.7-code"
+        assert mock_openai.call_args.kwargs["api_key"] == "sk-or-...-key"
+
 class TestGetTextAuxiliaryClient:
     """Test the full resolution chain for get_text_auxiliary_client."""
 
