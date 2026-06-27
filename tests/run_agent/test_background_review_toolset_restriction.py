@@ -156,3 +156,140 @@ def test_background_review_agent_tools_are_limited():
     assert "delegate_task" not in expected_tools
     assert "web_search" not in expected_tools
     assert "execute_code" not in expected_tools
+
+
+def test_background_review_whitelist_excludes_memory_when_config_disabled():
+    """When memory.background_review_writes is False, the review fork's
+    whitelist must NOT include the memory tool — only skill tools.
+
+    This is the core contract of issue #42388: decouple the fork's write
+    scope from its spawn triggers so curated memory stays untouched.
+    """
+    import run_agent
+    from hermes_cli import plugins as _plugins
+
+    captured = {}
+
+    def _capture_whitelist(whitelist, deny_msg_fmt=None):
+        captured["whitelist"] = set(whitelist)
+        captured["deny_msg_fmt"] = deny_msg_fmt
+        raise RuntimeError("stop after capturing whitelist")
+
+    agent = _make_agent_stub(run_agent.AIAgent)
+
+    def _no_init(self, *args, **kwargs):
+        return None
+
+    mock_config = {"memory": {"background_review_writes": False}}
+
+    with patch.object(run_agent.AIAgent, "__init__", _no_init), \
+         patch.object(_plugins, "set_thread_tool_whitelist", _capture_whitelist), \
+         patch("threading.Thread", _SyncThread), \
+         patch("hermes_cli.config.load_config", return_value=mock_config):
+        agent._spawn_background_review(
+            messages_snapshot=[],
+            review_memory=False,
+            review_skills=True,
+        )
+
+    assert "whitelist" in captured, "set_thread_tool_whitelist was not called"
+    whitelist = captured["whitelist"]
+    # memory tool must NOT be in the whitelist
+    assert "memory" not in whitelist, (
+        "memory tool should be excluded when background_review_writes is False"
+    )
+    # skill tools must still be allowed
+    assert "skill_manage" in whitelist
+    assert "skill_view" in whitelist
+    assert "skills_list" in whitelist
+    # dangerous tools still excluded
+    assert "terminal" not in whitelist
+    assert "send_message" not in whitelist
+
+
+def test_background_review_whitelist_includes_memory_when_config_enabled():
+    """When memory.background_review_writes is True (default), the review
+    fork's whitelist must include both memory and skill tools.
+
+    This preserves the existing behavior — the default is True.
+    """
+    import run_agent
+    from hermes_cli import plugins as _plugins
+
+    captured = {}
+
+    def _capture_whitelist(whitelist, deny_msg_fmt=None):
+        captured["whitelist"] = set(whitelist)
+        raise RuntimeError("stop after capturing whitelist")
+
+    agent = _make_agent_stub(run_agent.AIAgent)
+
+    def _no_init(self, *args, **kwargs):
+        return None
+
+    # Explicitly set to True (same as default)
+    mock_config = {"memory": {"background_review_writes": True}}
+
+    with patch.object(run_agent.AIAgent, "__init__", _no_init), \
+         patch.object(_plugins, "set_thread_tool_whitelist", _capture_whitelist), \
+         patch("threading.Thread", _SyncThread), \
+         patch("hermes_cli.config.load_config", return_value=mock_config):
+        agent._spawn_background_review(
+            messages_snapshot=[],
+            review_memory=True,
+            review_skills=False,
+        )
+
+    assert "whitelist" in captured
+    whitelist = captured["whitelist"]
+    # memory tool must be in the whitelist (default behavior)
+    assert "memory" in whitelist
+    assert "skill_manage" in whitelist
+
+
+def test_background_review_prompt_adapts_when_memory_disabled():
+    """When memory writes are disabled, the run_conversation prompt must
+    mention 'skill management tools only', not 'memory and skill'.
+    """
+    import run_agent
+    from hermes_cli import plugins as _plugins
+
+    captured = {}
+
+    def _capture_whitelist(whitelist, deny_msg_fmt=None):
+        captured["deny_msg_fmt"] = deny_msg_fmt
+        # Don't raise — let execution continue to run_conversation
+
+    agent = _make_agent_stub(run_agent.AIAgent)
+
+    def _no_init(self, *args, **kwargs):
+        return None
+
+    def _capture_run_conv(self, user_message=None, **kwargs):
+        captured["user_message"] = user_message
+        raise RuntimeError("stop after capturing prompt")
+
+    mock_config = {"memory": {"background_review_writes": False}}
+
+    with patch.object(run_agent.AIAgent, "__init__", _no_init), \
+         patch.object(_plugins, "set_thread_tool_whitelist", _capture_whitelist), \
+         patch.object(run_agent.AIAgent, "run_conversation", _capture_run_conv), \
+         patch("threading.Thread", _SyncThread), \
+         patch("hermes_cli.config.load_config", return_value=mock_config):
+        agent._spawn_background_review(
+            messages_snapshot=[],
+            review_memory=False,
+            review_skills=True,
+        )
+
+    assert "user_message" in captured
+    msg = captured["user_message"]
+    assert "skill management tools only" in msg, (
+        f"Prompt should mention skill-only tools, got: {msg[:200]}"
+    )
+    assert "memory and skill" not in msg, (
+        f"Prompt should NOT mention memory tools when disabled, got: {msg[:200]}"
+    )
+    # deny_msg_fmt should also reflect the restriction
+    fmt = captured.get("deny_msg_fmt", "")
+    assert "skill management tools only" in fmt

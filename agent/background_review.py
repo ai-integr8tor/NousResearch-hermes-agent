@@ -725,18 +725,42 @@ def _run_review_in_thread(
                 clear_thread_tool_whitelist,
             )
 
+            # Check if memory writes are allowed in the background review fork.
+            # When memory.background_review_writes is False, the fork can only
+            # use skill tools — built-in memory (MEMORY.md / USER.md) stays
+            # curated and untouched by autonomous review.  See issue #42388.
+            _allow_memory_writes = True
+            try:
+                from hermes_cli.config import load_config
+                _mem_cfg = load_config().get("memory", {})
+                if isinstance(_mem_cfg, dict):
+                    _allow_memory_writes = bool(
+                        _mem_cfg.get("background_review_writes", True)
+                    )
+            except Exception:
+                pass
+
+            _review_toolsets = ["skills"]
+            if _allow_memory_writes:
+                _review_toolsets = ["memory", "skills"]
+
             review_whitelist = {
                 t["function"]["name"]
                 for t in get_tool_definitions(
-                    enabled_toolsets=["memory", "skills"],
+                    enabled_toolsets=_review_toolsets,
                     quiet_mode=True,
                 )
             }
+            _tool_desc = (
+                "memory and skill management tools"
+                if _allow_memory_writes
+                else "skill management tools only (memory writes disabled by config)"
+            )
             set_thread_tool_whitelist(
                 review_whitelist,
                 deny_msg_fmt=(
                     "Background review denied non-whitelisted tool: "
-                    "{tool_name}. Only memory/skill tools are allowed."
+                    "{tool_name}. Only " + _tool_desc + " are allowed."
                 ),
             )
             try:
@@ -750,8 +774,8 @@ def _run_review_in_thread(
                 review_agent.run_conversation(
                     user_message=(
                         prompt
-                        + "\n\nYou can only call memory and skill "
-                        "management tools. Other tools will be denied "
+                        + "\n\nYou can only call " + _tool_desc + ". "
+                        "Other tools will be denied "
                         "at runtime — do not attempt them."
                     ),
                     conversation_history=_review_history,

@@ -2021,6 +2021,12 @@ DEFAULT_CONFIG = {
         # "hindsight", "holographic", "retaindb", "byterover".
         # Only ONE external provider is allowed at a time.
         "provider": "",
+        # When False, the background-review fork (skill self-improvement)
+        # cannot write to built-in memory (MEMORY.md / USER.md).  This
+        # decouples the fork's *write scope* from its *spawn triggers* so
+        # users who want curated memory + autonomous skill improvement
+        # can get that combination.  Default True preserves current behavior.
+        "background_review_writes": True,
     },
 
     # Subagent delegation — override the provider:model used by delegate_task

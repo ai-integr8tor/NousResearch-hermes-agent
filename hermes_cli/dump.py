@@ -213,6 +213,7 @@ def _config_overrides(config: dict) -> dict[str, str]:
         ("display", "skin"),
         ("display", "show_reasoning"),
         ("privacy", "redact_pii"),
+        ("memory", "background_review_writes"),
         ("tts", "provider"),
     ]
 
