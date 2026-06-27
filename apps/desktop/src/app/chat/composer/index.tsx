@@ -103,8 +103,8 @@ import {
   composerPlainText,
   deleteChipBeforeCaret,
   deleteSelectionInEditor,
-  insertPlainTextAtCaret,
   normalizeComposerEditorDom,
+  pastePlainTextIntoEditor,
   placeCaretEnd,
   refChipElement,
   renderComposerContents,
@@ -813,7 +813,11 @@ export function ChatBar({
     }
 
     event.preventDefault()
-    insertPlainTextAtCaret(event.currentTarget, pastedText)
+    // Route through the helper so typical pastes go via execCommand and
+    // participate in Chromium's contentEditable undo stack — Cmd+Z then reverts
+    // the paste instead of skipping over it. See rich-editor.ts for the
+    // threshold rationale (PR #45812).
+    pastePlainTextIntoEditor(event.currentTarget, pastedText)
     flushEditorToDraft(event.currentTarget)
   }
 
