@@ -24,7 +24,7 @@ import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { Typography } from "@nous-research/ui/ui/components/typography/index";
-import { HERMES_BASE_PATH, buildWsAuthParam } from "@/lib/api";
+import { HERMES_BASE_PATH, authedFetch, buildWsAuthParam } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { Copy, PanelRight, RotateCcw, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -120,6 +120,102 @@ function terminalFontSizeForWidth(layoutWidthPx: number): number {
 
 function terminalLineHeightForWidth(layoutWidthPx: number): number {
   return layoutWidthPx < 1024 ? 1.02 : 1.15;
+}
+
+interface ChatImageUploadResponse {
+  ok: boolean;
+  path: string;
+  name: string;
+  bytes: number;
+  mime_type: string;
+}
+
+function imageFileKey(file: File): string {
+  return `${file.name}\0${file.type}\0${file.size}\0${file.lastModified}`;
+}
+
+function addImageFile(files: File[], seen: Set<string>, file: File | null) {
+  if (!file || !file.type.startsWith("image/")) return;
+  const key = imageFileKey(file);
+  if (seen.has(key)) return;
+  seen.add(key);
+  files.push(file);
+}
+
+function imageFilesFromTransfer(data: DataTransfer | null): File[] {
+  if (!data) return [];
+  const files: File[] = [];
+  const seen = new Set<string>();
+
+  if (data.items?.length) {
+    for (const item of Array.from(data.items)) {
+      if (item.kind === "file" && item.type.startsWith("image/")) {
+        addImageFile(files, seen, item.getAsFile());
+      }
+    }
+  }
+
+  if (data.files?.length) {
+    for (const file of Array.from(data.files)) {
+      addImageFile(files, seen, file);
+    }
+  }
+
+  return files;
+}
+
+function transferMayContainImage(data: DataTransfer | null): boolean {
+  if (!data) return false;
+  if (data.items?.length) {
+    return Array.from(data.items).some(
+      (item) =>
+        item.kind === "file" &&
+        (!item.type || item.type.startsWith("image/")),
+    );
+  }
+  return Array.from(data.files ?? []).some((file) =>
+    file.type.startsWith("image/"),
+  );
+}
+
+function fileToDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error ?? new Error("image read failed"));
+    reader.onload = () => {
+      const result = reader.result;
+      if (typeof result === "string") {
+        resolve(result);
+      } else {
+        reject(new Error("image read failed"));
+      }
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+async function uploadChatImage(file: File, profile: string): Promise<ChatImageUploadResponse> {
+  const dataUrl = await fileToDataUrl(file);
+  const qs = profile ? `?profile=${encodeURIComponent(profile)}` : "";
+  const res = await authedFetch(`/api/chat/image-upload${qs}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      data_url: dataUrl,
+      filename: file.name || "clipboard.png",
+    }),
+  });
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => res.statusText);
+    throw new Error(text || `HTTP ${res.status}`);
+  }
+
+  const uploaded = (await res.json()) as ChatImageUploadResponse;
+  if (!uploaded?.path) {
+    throw new Error("image upload did not return a path");
+  }
+  return uploaded;
 }
 
 export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
@@ -518,6 +614,53 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       return true;
     });
 
+    let imageUploadDisposed = false;
+    const pasteDelay = () =>
+      new Promise<void>((resolve) => window.setTimeout(resolve, 40));
+    const reportImageUploadError = (err: unknown) => {
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn("[dashboard chat] image upload failed:", message);
+      setBanner(`Image upload failed: ${message}`);
+    };
+    const uploadAndPasteImages = (files: File[]) => {
+      void (async () => {
+        for (const file of files) {
+          const uploaded = await uploadChatImage(file, scopedProfile);
+          if (imageUploadDisposed) return;
+          term.paste(JSON.stringify(uploaded.path));
+          await pasteDelay();
+        }
+        term.focus();
+      })().catch(reportImageUploadError);
+    };
+    const handleBrowserPaste = (ev: ClipboardEvent) => {
+      const files = imageFilesFromTransfer(ev.clipboardData);
+      if (!files.length) return;
+
+      ev.preventDefault();
+      ev.stopPropagation();
+      uploadAndPasteImages(files);
+    };
+    const handleBrowserDragOver = (ev: DragEvent) => {
+      if (!transferMayContainImage(ev.dataTransfer)) return;
+
+      ev.preventDefault();
+      if (ev.dataTransfer) {
+        ev.dataTransfer.dropEffect = "copy";
+      }
+    };
+    const handleBrowserDrop = (ev: DragEvent) => {
+      const files = imageFilesFromTransfer(ev.dataTransfer);
+      if (!files.length) return;
+
+      ev.preventDefault();
+      ev.stopPropagation();
+      uploadAndPasteImages(files);
+    };
+    host.addEventListener("paste", handleBrowserPaste, { capture: true });
+    host.addEventListener("dragover", handleBrowserDragOver, { capture: true });
+    host.addEventListener("drop", handleBrowserDrop, { capture: true });
+
     const fit = new FitAddon();
     fitRef.current = fit;
     term.loadAddon(fit);
@@ -835,6 +978,10 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     return () => {
       unmounting = true;
       syncMetricsRef.current = null;
+      imageUploadDisposed = true;
+      host.removeEventListener("paste", handleBrowserPaste, true);
+      host.removeEventListener("dragover", handleBrowserDragOver, true);
+      host.removeEventListener("drop", handleBrowserDrop, true);
       onDataDisposable?.dispose();
       onResizeDisposable?.dispose();
       if (metricsDebounce) clearTimeout(metricsDebounce);
