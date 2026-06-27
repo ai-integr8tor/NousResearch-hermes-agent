@@ -713,6 +713,7 @@ export function DesktopController() {
   })
 
   const {
+    abandonCurrentSessionForNewChat,
     archiveSession,
     branchCurrentSession,
     branchStoredSession,
@@ -742,7 +743,7 @@ export function DesktopController() {
   // Single global listener for every rebindable hotkey (incl. profile switching)
   // plus the on-screen keybind editor's capture mode.
   useKeybinds({
-    startFreshSession: startFreshSessionDraft,
+    startFreshSession: abandonCurrentSessionForNewChat,
     toggleCommandCenter,
     toggleSelectedPin
   })
@@ -928,7 +929,7 @@ export function DesktopController() {
     requestGateway,
     resumeStoredSession: resumeSession,
     selectedStoredSessionIdRef,
-    startFreshSessionDraft,
+    startFreshSessionDraft: abandonCurrentSessionForNewChat,
     sttEnabled,
     updateSessionState
   })
