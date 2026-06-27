@@ -49,7 +49,7 @@ def _getenv(name: str, default: str = "") -> str:
 
 
 def _normalize_custom_provider_name(value: str) -> str:
-    return value.strip().lower().replace(" ", "-")
+    return value.strip().lower().replace("_", "-").replace(" ", "-")
 
 
 def _loopback_hostname(host: str) -> bool:
