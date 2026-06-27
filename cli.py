@@ -38,6 +38,65 @@ import time
 import uuid
 import textwrap
 from collections import deque
+
+# --- quota snapshot cache (avoids HTTP on every status-bar tick) ---
+_quota_cache: Optional[Dict[str, Any]] = None
+_quota_cache_ts: float = 0
+QUOTA_CACHE_TTL = 60  # seconds — refresh quota once per minute
+
+def _get_quota_snapshot(agent) -> Dict[str, Any]:
+    """Fetch provider quota with a TTL cache to avoid blocking the render loop."""
+    global _quota_cache, _quota_cache_ts
+    now = time.monotonic()
+    if _quota_cache is not None and (now - _quota_cache_ts) < QUOTA_CACHE_TTL:
+        return _quota_cache
+    result: Dict[str, Any] = {}
+    try:
+        from agent.account_usage import fetch_account_usage
+        _provider = (getattr(agent, "model", None) or "").split("/")[0]
+        _base_url = getattr(agent, "base_url", None)
+        _api_key = getattr(agent, "api_key", None)
+        normalized = (_provider or "").strip().lower()
+        if normalized not in {"openai-codex", "anthropic", "openrouter", "zai", "nous"}:
+            _host = (_base_url or "").lower()
+            if "api.z.ai" in _host or "open.bigmodel.cn" in _host:
+                normalized = "zai"
+        if normalized in {"", "auto", "custom"}:
+            normalized = None
+        snap_acc = fetch_account_usage(
+            provider=normalized or _provider,
+            base_url=_base_url,
+            api_key=_api_key,
+        )
+        if snap_acc:
+            best_w = max(snap_acc, key=lambda w: w.used_percent)
+            result["quota_pct"] = round(best_w.used_percent)
+            if best_w.reset_at:
+                from datetime import datetime, timezone
+                _now = datetime.now(timezone.utc)
+                _reset = best_w.reset_at if best_w.reset_at.tzinfo else best_w.reset_at.replace(tzinfo=timezone.utc)
+                _secs = max(0, (_reset - _now).total_seconds())
+                if _secs > 0:
+                    h, rem = divmod(int(_secs), 3600)
+                    m, s = divmod(rem, 60)
+                    result["quota_reset"] = f"{h}h{m}m"
+            else:
+                result["quota_reset"] = "see /usage"
+    except Exception:
+        pass
+    # Fallback: rate-limit headers from last response
+    if "quota_pct" not in result:
+        try:
+            from agent.rate_limit_tracker import format_rate_limit_compact
+            rl = format_rate_limit_compact()
+            if rl:
+                result["quota_rl_text"] = rl
+        except Exception:
+            pass
+    _quota_cache = result
+    _quota_cache_ts = now
+    return result
+
 from urllib.parse import unquote, urlparse
 from contextlib import contextmanager
 from pathlib import Path
@@ -4304,49 +4363,11 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             if context_length:
                 snapshot["context_percent"] = max(0, min(100, round((context_tokens / context_length) * 100)))
 
-        # --- quota / cost (dual-source) ---
+        # --- quota / cost (cached, avoids HTTP on every tick) ---
         try:
-            from agent.account_usage import fetch_account_usage
-            _provider = (getattr(agent, "model", None) or "").split("/")[0]
-            _base_url = getattr(agent, "base_url", None)
-            _api_key = getattr(agent, "api_key", None)
-            normalized = (_provider or "").strip().lower()
-            if normalized not in {"openai-codex", "anthropic", "openrouter", "zai", "nous"}:
-                _host = (_base_url or "").lower()
-                if "api.z.ai" in _host or "open.bigmodel.cn" in _host:
-                    normalized = "zai"
-            if normalized in {"", "auto", "custom"}:
-                normalized = None
-            snapshot_acc = fetch_account_usage(
-                provider=normalized or _provider,
-                base_url=_base_url,
-                api_key=_api_key,
-            )
-            if snapshot_acc:
-                best_w = max(snapshot_acc, key=lambda w: w.used_percent)
-                snapshot["quota_pct"] = round(best_w.used_percent)
-                if best_w.reset_at:
-                    _now = datetime.now(timezone.utc)
-                    _reset = best_w.reset_at if best_w.reset_at.tzinfo else best_w.reset_at.replace(tzinfo=timezone.utc)
-                    _secs = max(0, (_reset - _now).total_seconds())
-                    if _secs and _secs > 0:
-                        h, rem = divmod(int(_secs), 3600)
-                        m, s = divmod(rem, 60)
-                        snapshot["quota_reset"] = f"{h}h{m}m"
-                else:
-                    snapshot["quota_reset"] = "see /usage"
+            snapshot.update(_get_quota_snapshot(agent))
         except Exception:
             pass
-
-        # Fallback: rate-limit headers from last response
-        if "quota_pct" not in snapshot:
-            try:
-                from agent.rate_limit_tracker import format_rate_limit_compact
-                rl = format_rate_limit_compact()
-                if rl:
-                    snapshot["quota_rl_text"] = rl
-            except Exception:
-                pass
 
         return snapshot
 
