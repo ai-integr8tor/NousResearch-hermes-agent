@@ -695,6 +695,9 @@ class TestClassifyApiError:
         assert result.should_compress is False
         # Must NOT be routed into credential rotation like a billing error.
         assert result.should_rotate_credential is False
+        # Failover-eligible: a wedged local memory wall recovers via a roomier
+        # provider once retries are exhausted, not by hammering the same server.
+        assert result.should_fallback is True
 
     def test_400_prefill_memory_code_reworded_message_is_overloaded(self):
         # Direct (non-proxied) connection: the message is reworded with NO
@@ -720,6 +723,7 @@ class TestClassifyApiError:
         assert result.reason == FailoverReason.overloaded
         assert result.retryable is True
         assert result.should_compress is False
+        assert result.should_fallback is True
 
     def test_no_status_prefill_memory_code_is_overloaded(self):
         # Streaming / no-status path carrying only the structured code (message

@@ -1074,6 +1074,13 @@ def _classify_400(
         return result_fn(
             FailoverReason.overloaded,
             retryable=True,
+            # A local-inference memory wall stays wedged until the server is
+            # restarted, so the durable recovery is failing over to a roomier
+            # provider once the primary's retries are exhausted.  Mark it
+            # failover-eligible for diagnostic consistency with the other
+            # recoverable reasons (auth/billing/rate_limit) — the exhaustion
+            # path already activates the fallback chain.
+            should_fallback=True,
         )
 
     # Context overflow from 400
@@ -1264,6 +1271,10 @@ def _classify_by_message(
         return result_fn(
             FailoverReason.overloaded,
             retryable=True,
+            # Failover-eligible for the same reason as the 400/error-code site
+            # above: a wedged local-inference memory wall recovers by switching
+            # to a roomier provider, not by retrying the same server forever.
+            should_fallback=True,
         )
 
     # Usage-limit patterns need the same disambiguation as 402: some providers
