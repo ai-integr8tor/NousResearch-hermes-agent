@@ -260,13 +260,14 @@ def apply_llm_request_middleware(
         )
 
     original_request = _safe_copy(request)
-    current_request = _safe_copy(original_request)
+    safe_original_request = sanitize_recall_payload(_safe_copy(original_request))
+    current_request = _safe_copy(safe_original_request)
     trace: List[Dict[str, Any]] = []
 
     for result in _invoke_middleware(
         LLM_REQUEST_MIDDLEWARE,
         request=current_request,
-        original_request=original_request,
+        original_request=safe_original_request,
         **context,
     ):
         if not isinstance(result, dict):
@@ -278,8 +279,8 @@ def apply_llm_request_middleware(
         trace.append(_trace_entry(result))
 
     return RequestMiddlewareResult(
-        payload=_restore_sanitized_payload(request, original_request, current_request),
-        original_payload=original_request,
+        payload=_restore_sanitized_payload(request, safe_original_request, current_request),
+        original_payload=safe_original_request,
         changed=bool(trace),
         trace=trace,
     )
@@ -304,14 +305,15 @@ def apply_tool_request_middleware(
         )
 
     original_args = _safe_copy(args)
-    current_args = _safe_copy(original_args)
+    safe_original_args = sanitize_recall_payload(_safe_copy(original_args))
+    current_args = _safe_copy(safe_original_args)
     trace: List[Dict[str, Any]] = []
 
     for result in _invoke_middleware(
         TOOL_REQUEST_MIDDLEWARE,
         tool_name=tool_name,
         args=current_args,
-        original_args=original_args,
+        original_args=safe_original_args,
         **context,
     ):
         if not isinstance(result, dict):
@@ -323,8 +325,8 @@ def apply_tool_request_middleware(
         trace.append(_trace_entry(result))
 
     return RequestMiddlewareResult(
-        payload=_restore_sanitized_payload(args, original_args, current_args),
-        original_payload=original_args,
+        payload=_restore_sanitized_payload(args, safe_original_args, current_args),
+        original_payload=safe_original_args,
         changed=bool(trace),
         trace=trace,
     )
@@ -348,8 +350,8 @@ def run_llm_execution_middleware(
     if not callbacks:
         return next_call(request)
     original_request = context.pop("original_request", request)
-    safe_request = _safe_copy(request)
-    safe_original_request = _safe_copy(original_request)
+    safe_request = sanitize_recall_payload(_safe_copy(request))
+    safe_original_request = sanitize_recall_payload(_safe_copy(original_request))
     exposed_results: Dict[int, tuple[Any, Any]] = {}
 
     def _terminal_call(next_request: Dict[str, Any]) -> Any:
@@ -394,8 +396,8 @@ def run_tool_execution_middleware(
     if not callbacks:
         return next_call(args)
     original_args = context.pop("original_args", args)
-    safe_args = _safe_copy(args)
-    safe_original_args = _safe_copy(original_args)
+    safe_args = sanitize_recall_payload(_safe_copy(args))
+    safe_original_args = sanitize_recall_payload(_safe_copy(original_args))
     exposed_results: Dict[int, tuple[Any, Any]] = {}
 
     def _terminal_call(next_args: Dict[str, Any]) -> Any:
