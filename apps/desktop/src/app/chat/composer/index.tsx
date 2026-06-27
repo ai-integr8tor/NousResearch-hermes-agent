@@ -103,7 +103,7 @@ import {
   composerPlainText,
   deleteChipBeforeCaret,
   deleteSelectionInEditor,
-  insertPlainTextAtCaret,
+  insertPastedTextAtCaret,
   normalizeComposerEditorDom,
   placeCaretEnd,
   refChipElement,
@@ -813,7 +813,7 @@ export function ChatBar({
     }
 
     event.preventDefault()
-    insertPlainTextAtCaret(event.currentTarget, pastedText)
+    insertPastedTextAtCaret(event.currentTarget, pastedText)
     flushEditorToDraft(event.currentTarget)
   }
 
