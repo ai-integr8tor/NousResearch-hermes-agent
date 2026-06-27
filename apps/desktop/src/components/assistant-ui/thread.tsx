@@ -1287,6 +1287,7 @@ const UserEditComposer: FC<UserEditComposerProps> = ({ cwd, gateway, sessionId }
   const editorRef = useRef<HTMLDivElement | null>(null)
   const draftRef = useRef(draft)
   const dragDepthRef = useRef(0)
+  const composingRef = useRef(false)
   const [dragActive, setDragActive] = useState(false)
   const [trigger, setTrigger] = useState<TriggerState | null>(null)
   const [triggerActive, setTriggerActive] = useState(0)
@@ -1678,6 +1679,12 @@ const UserEditComposer: FC<UserEditComposerProps> = ({ cwd, gateway, sessionId }
       editor.replaceChildren()
     }
 
+    // IME composition input events carry uncommitted preedit text. Match the
+    // main composer: wait for compositionend to flush the finalized text.
+    if (composingRef.current) {
+      return
+    }
+
     syncDraftFromEditor(editor)
     window.setTimeout(refreshTrigger, 0)
   }
@@ -1731,6 +1738,12 @@ const UserEditComposer: FC<UserEditComposerProps> = ({ cwd, gateway, sessionId }
   )
 
   const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    // While composing CJK text, Enter confirms the IME candidate instead of
+    // submitting the edited message. The main composer has the same guard.
+    if (composingRef.current || event.nativeEvent.isComposing) {
+      return
+    }
+
     if (trigger && triggerItems.length > 0) {
       if (event.key === 'ArrowDown') {
         event.preventDefault()
@@ -1844,6 +1857,14 @@ const UserEditComposer: FC<UserEditComposerProps> = ({ cwd, gateway, sessionId }
               data-placeholder={copy.editMessage}
               data-slot={RICH_INPUT_SLOT}
               onBlur={() => window.setTimeout(closeTrigger, 80)}
+              onCompositionEnd={event => {
+                composingRef.current = false
+                syncDraftFromEditor(event.currentTarget)
+                window.setTimeout(refreshTrigger, 0)
+              }}
+              onCompositionStart={() => {
+                composingRef.current = true
+              }}
               onDragOver={handleDragOver}
               onDrop={handleDrop}
               onFocus={() => markActiveComposer('edit')}

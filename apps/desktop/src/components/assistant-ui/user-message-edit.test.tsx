@@ -7,7 +7,7 @@ import { ExportedMessageRepository } from '@assistant-ui/core/internal'
 // mode (titlebar -webkit-app-region:drag swallowing clicks on *stuck* sticky
 // bubbles) is not reproducible in jsdom — see USER_BUBBLE_BASE_CLASS's no-drag
 // carve-out in thread.tsx.
-import { AssistantRuntimeProvider, type ThreadMessage, useExternalStoreRuntime } from '@assistant-ui/react'
+import { type AppendMessage, AssistantRuntimeProvider, type ThreadMessage, useExternalStoreRuntime } from '@assistant-ui/react'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 
@@ -24,6 +24,7 @@ class TestResizeObserver {
 }
 
 vi.stubGlobal('ResizeObserver', TestResizeObserver)
+vi.stubGlobal('CSS', { ...(globalThis.CSS ?? {}), escape: (value: string) => String(value) })
 vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) =>
   window.setTimeout(() => callback(performance.now()), 0)
 )
@@ -78,7 +79,9 @@ function assistantMessage(): ThreadMessage {
 }
 
 // Mirrors chat/index.tsx: incremental runtime + messageRepository + onEdit.
-function IncrementalHarness({ onEdit }: { onEdit: () => Promise<void> }) {
+type EditHandler = (message: AppendMessage) => Promise<void>
+
+function IncrementalHarness({ onEdit }: { onEdit: EditHandler }) {
   const repository = ExportedMessageRepository.fromArray([userMessage(), assistantMessage()])
 
   const runtime = useIncrementalExternalStoreRuntime<ThreadMessage>({
@@ -99,7 +102,7 @@ function IncrementalHarness({ onEdit }: { onEdit: () => Promise<void> }) {
 }
 
 // Control: stock external store runtime.
-function StockHarness({ onEdit }: { onEdit: () => Promise<void> }) {
+function StockHarness({ onEdit }: { onEdit: EditHandler }) {
   const runtime = useExternalStoreRuntime<ThreadMessage>({
     messages: [userMessage(), assistantMessage()],
     isRunning: false,
@@ -137,5 +140,34 @@ describe('click-to-edit user message', () => {
     await waitFor(() => {
       expect(container.querySelector('[data-slot="aui_edit-composer-root"]')).toBeTruthy()
     })
+  })
+
+  it('does not submit while Enter is confirming IME composition', async () => {
+    const onEdit = vi.fn(async (_message: AppendMessage) => {})
+
+    render(<IncrementalHarness onEdit={onEdit} />)
+
+    const bubble = await screen.findByRole('button', { name: 'Edit message' })
+
+    fireEvent.click(bubble)
+
+    const editor = await screen.findByRole('textbox', { name: 'Edit message' })
+
+    fireEvent.compositionStart(editor)
+    editor.textContent = 'こんにちは'
+    fireEvent.input(editor)
+    fireEvent.keyDown(editor, { key: 'Enter' })
+
+    await new Promise(resolve => window.setTimeout(resolve, 0))
+    expect(onEdit).not.toHaveBeenCalled()
+
+    fireEvent.compositionEnd(editor)
+    fireEvent.keyDown(editor, { key: 'Enter' })
+
+    await waitFor(() => {
+      expect(onEdit).toHaveBeenCalledTimes(1)
+    })
+
+    expect(onEdit.mock.calls[0]?.[0].content).toEqual([{ type: 'text', text: 'こんにちは' }])
   })
 })
