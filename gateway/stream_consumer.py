@@ -436,12 +436,36 @@ class GatewayStreamConsumer:
                     self._in_think_block = True
                     buf = buf[best_idx + best_len:]
                 else:
-                    # No opening tag — check for a partial tag at the tail
+                    # No opening tag — check for a partial tag at the tail,
+                    # but ONLY if the partial match starts at a block
+                    # boundary (start of text or after a newline).  Without
+                    # this guard a bare '<' in prose like "x < 5" is held
+                    # back indefinitely because it matches the prefix of
+                    # every think tag.  (#48869)
                     held_back = 0
                     for tag in self._OPEN_THINK_TAGS:
                         for i in range(1, len(tag)):
                             if buf.endswith(tag[:i]) and i > held_back:
-                                held_back = i
+                                # Find where this partial match starts
+                                match_start = len(buf) - i
+                                if match_start == 0:
+                                    is_boundary = (
+                                        not self._accumulated
+                                        or self._accumulated.endswith("\n")
+                                    )
+                                else:
+                                    preceding = buf[:match_start]
+                                    last_nl = preceding.rfind("\n")
+                                    if last_nl == -1:
+                                        is_boundary = (
+                                            (not self._accumulated
+                                             or self._accumulated.endswith("\n"))
+                                            and preceding.strip() == ""
+                                        )
+                                    else:
+                                        is_boundary = preceding[last_nl + 1:].strip() == ""
+                                if is_boundary:
+                                    held_back = i
                     if held_back:
                         self._accumulated += buf[:-held_back]
                         self._think_buffer = buf[-held_back:]
