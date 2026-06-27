@@ -1940,6 +1940,40 @@ This compaction should PRIORITISE preserving all information related to the focu
                 return idx, cls._strip_summary_prefix(_content_text_for_contains(content))
         return None, ""
 
+    @classmethod
+    def _strip_context_summary_handoff_message(
+        cls,
+        message: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """Drop old handoff-only messages, or unwrap a merged handoff prefix.
+
+        Re-compression carries old handoff content through ``_previous_summary``.
+        Keeping the old handoff message in protected head/tail as well creates
+        duplicate ``[CONTEXT COMPACTION]`` blocks that grow every cycle.
+        """
+        if not isinstance(message, dict):
+            return message
+
+        content = message.get("content")
+        is_summary = (
+            cls._is_context_summary_content(content)
+            or cls._has_compressed_summary_metadata(message)
+        )
+        if not is_summary:
+            return message.copy()
+
+        if isinstance(content, str):
+            marker_idx = content.find(_SUMMARY_END_MARKER)
+            if marker_idx >= 0:
+                remainder = content[marker_idx + len(_SUMMARY_END_MARKER):].lstrip()
+                if remainder:
+                    unwrapped = message.copy()
+                    unwrapped["content"] = remainder
+                    unwrapped.pop(COMPRESSED_SUMMARY_METADATA_KEY, None)
+                    return unwrapped
+
+        return None
+
     # ------------------------------------------------------------------
     # Tool-call / tool-result pair integrity helpers
     # ------------------------------------------------------------------
@@ -2577,7 +2611,12 @@ This compaction should PRIORITISE preserving all information related to the focu
                         existing,
                         "\n\n" + _compression_note if isinstance(existing, str) and existing else _compression_note,
                     )
-            compressed.append(msg)
+                compressed.append(msg)
+                continue
+
+            stripped = self._strip_context_summary_handoff_message(msg)
+            if stripped is not None:
+                compressed.append(stripped)
 
         # If LLM summary failed, insert a deterministic fallback so the model
         # gets at least locally recoverable continuity anchors instead of a
@@ -2594,8 +2633,14 @@ This compaction should PRIORITISE preserving all information related to the focu
             )
 
         _merge_summary_into_tail = False
-        last_head_role = messages[compress_start - 1].get("role", "user") if compress_start > 0 else "user"
-        first_tail_role = messages[compress_end].get("role", "user") if compress_end < n_messages else "user"
+        tail_messages: List[Dict[str, Any]] = []
+        for i in range(compress_end, n_messages):
+            stripped = self._strip_context_summary_handoff_message(messages[i])
+            if stripped is not None:
+                tail_messages.append(stripped)
+
+        last_head_role = compressed[-1].get("role", "user") if compressed else "user"
+        first_tail_role = tail_messages[0].get("role", "user") if tail_messages else None
         # Pick a role that avoids consecutive same-role with both neighbors.
         # Priority: avoid colliding with head (already committed), then tail.
         if last_head_role in {"assistant", "tool"}:
@@ -2604,7 +2649,7 @@ This compaction should PRIORITISE preserving all information related to the focu
             summary_role = "assistant"
         # If the chosen role collides with the tail AND flipping wouldn't
         # collide with the head, flip it.
-        if summary_role == first_tail_role:
+        if first_tail_role and summary_role == first_tail_role:
             flipped = "assistant" if summary_role == "user" else "user"
             if flipped != last_head_role:
                 summary_role = flipped
@@ -2613,7 +2658,7 @@ This compaction should PRIORITISE preserving all information related to the focu
                 # (e.g. head=assistant, tail=user — neither role works).
                 # Merge the summary into the first tail message instead
                 # of inserting a standalone message that breaks alternation.
-                _merge_summary_into_tail = True
+                _merge_summary_into_tail = bool(tail_messages)
 
         # When the summary lands as a standalone role="user" message,
         # weak models read the verbatim "## Active Task" quote of a past
@@ -2632,9 +2677,8 @@ This compaction should PRIORITISE preserving all information related to the focu
                 COMPRESSED_SUMMARY_METADATA_KEY: True,
             })
 
-        for i in range(compress_end, n_messages):
-            msg = messages[i].copy()
-            if _merge_summary_into_tail and i == compress_end:
+        for tail_idx, msg in enumerate(tail_messages):
+            if _merge_summary_into_tail and tail_idx == 0:
                 merged_prefix = summary + "\n\n" + _SUMMARY_END_MARKER + "\n\n"
                 msg["content"] = _append_text_to_content(
                     msg.get("content"),

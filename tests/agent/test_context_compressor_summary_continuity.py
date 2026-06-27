@@ -2,7 +2,12 @@
 
 from unittest.mock import MagicMock, patch
 
-from agent.context_compressor import ContextCompressor, SUMMARY_PREFIX
+from agent.context_compressor import (
+    COMPRESSED_SUMMARY_METADATA_KEY,
+    ContextCompressor,
+    SUMMARY_PREFIX,
+    _SUMMARY_END_MARKER,
+)
 
 
 def _compressor() -> ContextCompressor:
@@ -85,3 +90,41 @@ def test_handoff_in_protected_head_populates_previous_summary_before_update():
     assert compressor._previous_summary == old_summary
     assert seen_turns
     assert all(old_summary not in str(msg.get("content", "")) for msg in seen_turns)
+
+
+def test_recompression_drops_prior_protected_handoff_from_output():
+    """Repeated compression must not preserve stale handoff bubbles forever."""
+    compressor = _compressor()
+    old_summary = "DUPLICATE-HANDOFF-BODY unique old facts"
+
+    with patch.object(
+        compressor,
+        "_generate_summary",
+        return_value=ContextCompressor._with_summary_prefix(
+            "updated summary with old facts folded in"
+        ),
+    ):
+        result = compressor.compress(_messages_with_handoff(old_summary))
+
+    contents = [str(msg.get("content", "")) for msg in result]
+    joined = "\n".join(contents)
+    assert old_summary not in joined
+    assert joined.count(SUMMARY_PREFIX) == 1
+    assert "updated summary with old facts folded in" in joined
+
+
+def test_merged_handoff_prefix_is_unwrapped_without_dropping_tail_text():
+    """Cleanup should remove summary prefix metadata but preserve real content."""
+    message = {
+        "role": "user",
+        "content": (
+            f"{SUMMARY_PREFIX}\nold summary\n\n"
+            f"{_SUMMARY_END_MARKER}\n\n"
+            "real tail message"
+        ),
+        COMPRESSED_SUMMARY_METADATA_KEY: True,
+    }
+
+    result = ContextCompressor._strip_context_summary_handoff_message(message)
+
+    assert result == {"role": "user", "content": "real tail message"}
