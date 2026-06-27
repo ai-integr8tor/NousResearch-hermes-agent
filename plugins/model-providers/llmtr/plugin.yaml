@@ -1,0 +1,5 @@
+name: llmtr-provider
+kind: model-provider
+version: 1.0.0
+description: LLMTR — Türkiye-based OpenAI-compatible AI gateway (provider/model routing across 198+ models)
+author: LLMTR
