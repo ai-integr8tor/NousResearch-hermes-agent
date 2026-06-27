@@ -238,6 +238,54 @@ def test_plugin_pre_tool_block_wins_without_counting_as_toolguard_block():
     assert agent._tool_guardrails.before_call("web_search", args).action == "allow"
 
 
+def test_concurrent_pre_tool_block_receives_gateway_session_key_from_agent():
+    agent = _make_agent("web_search")
+    agent._gateway_session_key = "gateway-session"
+    args = {"query": "same"}
+    tc = _mock_tool_call("web_search", json.dumps(args), "c-concurrent-session")
+    msg = SimpleNamespace(content="", tool_calls=[tc])
+    messages = []
+    captured = []
+
+    def fake_block_message(*call_args, **kwargs):
+        captured.append((call_args, kwargs))
+        return None
+
+    with (
+        patch("hermes_cli.plugins.get_pre_tool_call_block_message", side_effect=fake_block_message),
+        patch("run_agent.handle_function_call", return_value=json.dumps({"ok": True})),
+    ):
+        agent._execute_tool_calls_concurrent(msg, messages, "task-1")
+
+    assert len(captured) == 1
+    assert captured[0][1]["gateway_session_key"] == "gateway-session"
+    assert captured[0][1]["tool_call_id"] == "c-concurrent-session"
+
+
+def test_sequential_pre_tool_block_receives_gateway_session_key_from_agent():
+    agent = _make_agent("web_search")
+    agent._gateway_session_key = "gateway-session"
+    args = {"query": "same"}
+    tc = _mock_tool_call("web_search", json.dumps(args), "c-sequential-session")
+    msg = SimpleNamespace(content="", tool_calls=[tc])
+    messages = []
+    captured = []
+
+    def fake_block_message(*call_args, **kwargs):
+        captured.append((call_args, kwargs))
+        return None
+
+    with (
+        patch("hermes_cli.plugins.get_pre_tool_call_block_message", side_effect=fake_block_message),
+        patch("run_agent.handle_function_call", return_value=json.dumps({"ok": True})),
+    ):
+        agent._execute_tool_calls_sequential(msg, messages, "task-1")
+
+    assert len(captured) == 1
+    assert captured[0][1]["gateway_session_key"] == "gateway-session"
+    assert captured[0][1]["tool_call_id"] == "c-sequential-session"
+
+
 def test_default_run_conversation_warns_without_guardrail_halt():
     agent = _make_agent("web_search", max_iterations=10)
     same_args = {"query": "same"}

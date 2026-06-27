@@ -469,6 +469,10 @@ class PluginContext:
         """Register a slash command (e.g. ``/lcm``) available in CLI and gateway sessions.
 
         The handler signature is ``fn(raw_args: str) -> str | None``.
+        Handlers may also accept optional context keyword arguments such as
+        ``session_id`` or ``**kwargs`` — Hermes passes these automatically
+        when the handler signature accepts them.  Legacy handlers that take
+        only ``raw_args`` continue to work without modification.
         It may also be an async callable — the gateway dispatch handles both.
 
         Unlike ``register_cli_command()`` (which creates ``hermes <subcommand>``
@@ -1910,9 +1914,10 @@ def get_pre_tool_call_block_message(
     task_id: str = "",
     session_id: str = "",
     tool_call_id: str = "",
-    turn_id: str = "",
+turn_id: str = "",
     api_request_id: str = "",
     middleware_trace: Optional[List[Dict[str, Any]]] = None,
+gateway_session_key: str = "",
 ) -> Optional[str]:
     """Check ``pre_tool_call`` hooks for a blocking directive.
 
@@ -1937,9 +1942,10 @@ def get_pre_tool_call_block_message(
         task_id=task_id,
         session_id=session_id,
         tool_call_id=tool_call_id,
-        turn_id=turn_id,
+turn_id=turn_id,
         api_request_id=api_request_id,
         middleware_trace=list(middleware_trace or []),
+gateway_session_key=gateway_session_key,
     )
 
     for result in hook_results:
@@ -1973,6 +1979,41 @@ def get_plugin_command_handler(name: str) -> Optional[Callable]:
     """Return the handler for a plugin-registered slash command, or ``None``."""
     entry = _ensure_plugins_discovered()._plugin_commands.get(name)
     return entry["handler"] if entry else None
+
+
+def call_plugin_command_handler(
+    handler: Callable,
+    raw_args: str,
+    **context: Any,
+) -> Any:
+    """Invoke a plugin slash-command handler, passing context kwargs when accepted.
+
+    Hermes dispatch sites call this instead of invoking the handler directly so
+    that ``session_id`` (and future context values) reach plugins that opt in
+    while legacy handlers that only accept ``raw_args`` keep working.
+
+    Uses :func:`inspect.signature` to decide whether the handler accepts extra
+    keyword arguments. A broad ``TypeError`` fallback is intentionally avoided
+    because it would mask real errors raised inside the handler body.
+    """
+    try:
+        sig = inspect.signature(handler)
+    except (ValueError, TypeError):
+        return handler(raw_args)
+
+    accepts_kwargs = any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+    )
+    if accepts_kwargs:
+        return handler(raw_args, **context)
+
+    accepted_context = {
+        name: value for name, value in context.items() if name in sig.parameters
+    }
+    if accepted_context:
+        return handler(raw_args, **accepted_context)
+
+    return handler(raw_args)
 
 
 _PLUGIN_COMMAND_AWAIT_TIMEOUT_SECS = 30.0

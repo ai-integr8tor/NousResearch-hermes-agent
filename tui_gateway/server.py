@@ -698,6 +698,14 @@ def _close_sessions_for_transport(
     return reaped, detached
 
 
+def _session_context_id(session: dict | None) -> str:
+    """Return the live agent session id, falling back to the TUI session key."""
+    if not session:
+        return ""
+    agent = session.get("agent")
+    return getattr(agent, "session_id", None) or session.get("session_key", "") or ""
+
+
 def _shutdown_sessions() -> None:
     with _sessions_lock:
         sids = list(_sessions)
@@ -11184,13 +11192,20 @@ def _(rid, params: dict) -> dict:
 
     try:
         from hermes_cli.plugins import (
+            call_plugin_command_handler,
             get_plugin_command_handler,
             resolve_plugin_command_result,
         )
 
         handler = get_plugin_command_handler(name)
         if handler:
-            result = resolve_plugin_command_result(handler(arg))
+            result = resolve_plugin_command_result(
+                call_plugin_command_handler(
+                    handler,
+                    arg,
+                    session_id=_session_context_id(session),
+                )
+            )
             return _ok(rid, {"type": "plugin", "output": str(result or "")})
     except Exception:
         pass
@@ -12365,9 +12380,11 @@ def _(rid, params: dict) -> dict:
 
     plugin_handler = None
     resolve_plugin_command_result = None
+    call_plugin_command_handler = None
     if _cmd_base:
         try:
             from hermes_cli.plugins import (
+                call_plugin_command_handler,
                 get_plugin_command_handler,
                 resolve_plugin_command_result,
             )
@@ -12376,10 +12393,17 @@ def _(rid, params: dict) -> dict:
         except Exception:
             plugin_handler = None
             resolve_plugin_command_result = None
+            call_plugin_command_handler = None
 
-    if plugin_handler and resolve_plugin_command_result:
+    if plugin_handler and resolve_plugin_command_result and call_plugin_command_handler:
         try:
-            result = resolve_plugin_command_result(plugin_handler(_cmd_arg))
+            result = resolve_plugin_command_result(
+                call_plugin_command_handler(
+                    plugin_handler,
+                    _cmd_arg,
+                    session_id=_session_context_id(session),
+                )
+            )
             return _ok(rid, {"output": str(result or "(no output)")})
         except Exception as e:
             return _ok(rid, {"output": f"Plugin command error: {e}"})

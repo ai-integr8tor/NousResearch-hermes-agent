@@ -15,6 +15,8 @@ from hermes_cli.plugins import (
     PluginContext,
     PluginManager,
     PluginManifest,
+    call_plugin_command_handler,
+    get_plugin_manager,
     get_plugin_command_handler,
     get_plugin_commands,
     get_pre_tool_call_block_message,
@@ -817,6 +819,26 @@ class TestPluginHooks:
 class TestPreToolCallBlocking:
     """Tests for the pre_tool_call block directive helper."""
 
+    def test_hook_receives_session_context(self, monkeypatch):
+        captured = {}
+
+        def fake_invoke(hook_name, **kwargs):
+            captured.update(kwargs)
+            return []
+
+        monkeypatch.setattr("hermes_cli.plugins.invoke_hook", fake_invoke)
+
+        assert get_pre_tool_call_block_message(
+            "todo",
+            {},
+            task_id="t1",
+            session_id="agent-session",
+            gateway_session_key="gateway-session",
+        ) is None
+
+        assert captured["session_id"] == "agent-session"
+        assert captured["gateway_session_key"] == "gateway-session"
+
     def test_block_message_returned_for_valid_directive(self, monkeypatch):
         monkeypatch.setattr(
             "hermes_cli.plugins.invoke_hook",
@@ -856,6 +878,48 @@ class TestPreToolCallBlocking:
             ],
         )
         assert get_pre_tool_call_block_message("terminal", {}) == "first blocker"
+
+
+class TestPluginCommandHandlerContext:
+    """Tests for plugin command handler context dispatch."""
+
+    def test_legacy_handler_receives_only_raw_args(self):
+        def handler(raw_args):
+            return raw_args
+
+        assert call_plugin_command_handler(
+            handler,
+            "status",
+            session_id="agent-session",
+        ) == "status"
+
+    def test_matching_context_kwargs_are_passed(self):
+        def handler(raw_args, *, session_id=""):
+            return f"{raw_args}:{session_id}"
+
+        assert call_plugin_command_handler(
+            handler,
+            "status",
+            session_id="agent-session",
+            ignored="value",
+        ) == "status:agent-session"
+
+    def test_var_kwargs_receive_all_context(self):
+        def handler(raw_args, **kwargs):
+            return raw_args, kwargs
+
+        raw_args, kwargs = call_plugin_command_handler(
+            handler,
+            "status",
+            session_id="agent-session",
+            gateway_session_key="gateway-session",
+        )
+
+        assert raw_args == "status"
+        assert kwargs == {
+            "session_id": "agent-session",
+            "gateway_session_key": "gateway-session",
+        }
 
 
 class TestThreadToolWhitelist:
