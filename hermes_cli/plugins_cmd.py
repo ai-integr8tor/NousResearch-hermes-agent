@@ -796,6 +796,8 @@ def cmd_enable(name: str) -> None:
         disabled.discard(bare)
     _save_enabled_set(enabled)
     _save_disabled_set(disabled)
+    # Keep platform_toolsets in sync so the agent sees the plugin's tools.
+    _toggle_plugin_toolset(key, enable=True)
     console.print(
         f"[green]✓[/green] Plugin [bold]{key}[/bold] enabled. "
         "Takes effect on next session."
@@ -828,6 +830,8 @@ def cmd_disable(name: str) -> None:
     disabled.add(key)
     _save_enabled_set(enabled)
     _save_disabled_set(disabled)
+    # Keep platform_toolsets in sync so the agent stops seeing the plugin's tools.
+    _toggle_plugin_toolset(key, enable=False)
     console.print(
         f"[yellow]\u2298[/yellow] Plugin [bold]{key}[/bold] disabled. "
         "Takes effect on next session."
