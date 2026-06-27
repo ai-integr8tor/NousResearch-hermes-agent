@@ -84,6 +84,7 @@ const sidebars: SidebarsConfig = {
             'user-guide/features/cron',
             'reference/automation-blueprints-catalog',
             'user-guide/features/delegation',
+            'user-guide/features/business-agent-evaluation',
             'user-guide/features/kanban',
             'user-guide/features/codex-app-server-runtime',
             'user-guide/features/kanban-tutorial',
