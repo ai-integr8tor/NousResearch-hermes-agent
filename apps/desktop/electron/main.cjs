@@ -4896,7 +4896,8 @@ async function fetchJsonForProfile(profile, path) {
 async function requestJsonForProfile(profile, path, method, body) {
   const conn = await ensureBackend(profile)
   const url = `${conn.baseUrl}${path}`
-  const opts = { method, body, timeoutMs: DEFAULT_FETCH_TIMEOUT_MS }
+  const defaultTimeoutMs = conn.mode === 'remote' ? REMOTE_API_DEFAULT_TIMEOUT_MS : DEFAULT_FETCH_TIMEOUT_MS
+  const opts = { method, body, timeoutMs: defaultTimeoutMs }
   return conn.authMode === 'oauth' ? fetchJsonViaOauthSession(url, opts) : fetchJson(url, conn.token, opts)
 }
 

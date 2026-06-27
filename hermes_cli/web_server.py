@@ -3434,20 +3434,29 @@ async def get_profiles_sessions(
     if order not in ("created", "recent"):
         raise HTTPException(status_code=400, detail="order must be one of: created, recent")
 
-    from hermes_cli import profiles as profiles_mod
-
     targets: List[Tuple[str, Path]] = []
     if profile and profile != "all":
         name, home = _cron_profile_home(profile)
         targets.append((name, home))
     else:
         try:
-            infos = profiles_mod.list_profiles()
-            targets = [(info.name, info.path) for info in infos]
+            rows = _profile_rows_cached()
+            targets = [
+                (str(row.get("name") or ""), Path(str(row.get("path") or "")))
+                for row in rows
+                if row.get("name") and row.get("path")
+            ]
         except Exception:
-            _log.exception("GET /api/profiles/sessions: list_profiles failed")
-            targets = []
+            from hermes_cli import profiles as profiles_mod
+            _log.exception("GET /api/profiles/sessions: cached profile enumeration failed")
+            targets = _fallback_profile_dicts(profiles_mod)
+            targets = [
+                (str(row.get("name") or ""), Path(str(row.get("path") or "")))
+                for row in targets
+                if row.get("name") and row.get("path")
+            ]
         if not targets:
+            from hermes_cli import profiles as profiles_mod
             targets.append(("default", profiles_mod.get_profile_dir("default")))
 
     min_message_count = max(0, min_messages)
@@ -10623,6 +10632,7 @@ async def update_profile_description_endpoint(name: str, body: ProfileDescriptio
     except Exception as e:
         _log.exception("PUT /api/profiles/%s/description failed", name)
         raise HTTPException(status_code=500, detail=str(e))
+    _invalidate_profile_list_cache()
     return {"ok": True, "description": text, "description_auto": False}
 
 
@@ -10643,6 +10653,7 @@ async def update_profile_model_endpoint(name: str, body: ProfileModelUpdate):
     except Exception as e:
         _log.exception("PUT /api/profiles/%s/model failed", name)
         raise HTTPException(status_code=500, detail=str(e))
+    _invalidate_profile_list_cache()
     return {"ok": True, "provider": provider, "model": model}
 
 
@@ -10663,6 +10674,8 @@ async def describe_profile_auto_endpoint(name: str, body: ProfileDescribeAuto):
     except Exception as e:
         _log.exception("POST /api/profiles/%s/describe-auto failed", name)
         raise HTTPException(status_code=500, detail=str(e))
+    if outcome.ok:
+        _invalidate_profile_list_cache()
     return {
         "ok": bool(outcome.ok),
         "reason": outcome.reason,
