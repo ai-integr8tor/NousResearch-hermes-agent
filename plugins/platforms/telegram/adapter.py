@@ -5621,8 +5621,8 @@ class TelegramAdapter(BasePlatformAdapter):
 
         When non-empty, group/supergroup messages from other topics are
         silently ignored. DMs are never filtered by topic. Telegram may omit
-        ``message_thread_id`` for the forum General topic, so ``None`` is
-        treated as topic ``1`` for matching purposes.
+        ``message_thread_id`` for topic messages, so missing thread ids are
+        resolved by :meth:`_telegram_effective_topic_id` before matching.
         """
         raw = self.config.extra.get("allowed_topics")
         if raw is None:
@@ -5630,6 +5630,37 @@ class TelegramAdapter(BasePlatformAdapter):
         if isinstance(raw, list):
             return {str(part).strip() for part in raw if str(part).strip()}
         return {part.strip() for part in str(raw).split(",") if part.strip()}
+
+    def _telegram_effective_topic_id(self, message: Message) -> Optional[str]:
+        """Return the forum topic id used for inbound Telegram routing gates.
+
+        When Telegram omits ``message_thread_id`` in the configured home forum
+        topic, keep inbound routing tied to that home topic. Other missing
+        group thread ids continue to map to the General topic.
+        """
+        thread_id = getattr(message, "message_thread_id", None)
+        if thread_id is not None:
+            return str(thread_id)
+
+        chat = getattr(message, "chat", None)
+        if chat is None:
+            return None
+
+        chat_type = str(getattr(chat, "type", "")).split(".")[-1].lower()
+        if chat_type not in {"group", "supergroup"}:
+            return None
+
+        if getattr(chat, "is_forum", False) is True:
+            home_channel = getattr(self.config, "home_channel", None)
+            if (
+                home_channel is not None
+                and normalize_telegram_chat_id(getattr(home_channel, "chat_id", None))
+                == normalize_telegram_chat_id(getattr(chat, "id", None))
+                and getattr(home_channel, "thread_id", None)
+            ):
+                return str(home_channel.thread_id)
+
+        return self._GENERAL_TOPIC_THREAD_ID
 
     def _telegram_ignored_threads(self) -> set[int]:
         raw = self.config.extra.get("ignored_threads")
@@ -5875,7 +5906,7 @@ class TelegramAdapter(BasePlatformAdapter):
         thread_id = getattr(message, "message_thread_id", None)
         allowed_topics = self._telegram_allowed_topics()
         if allowed_topics:
-            topic_id = str(thread_id) if thread_id is not None else self._GENERAL_TOPIC_THREAD_ID
+            topic_id = self._telegram_effective_topic_id(message)
             if topic_id not in allowed_topics:
                 return False
 
@@ -6188,7 +6219,7 @@ class TelegramAdapter(BasePlatformAdapter):
         thread_id = getattr(message, "message_thread_id", None)
         allowed_topics = self._telegram_allowed_topics()
         if allowed_topics:
-            topic_id = str(thread_id) if thread_id is not None else self._GENERAL_TOPIC_THREAD_ID
+            topic_id = self._telegram_effective_topic_id(message)
             if topic_id not in allowed_topics:
                 return False
 
@@ -7076,11 +7107,12 @@ class TelegramAdapter(BasePlatformAdapter):
                 thread_id_str = str(thread_id_raw)
             elif chat_type == "dm" and is_topic_message:
                 thread_id_str = str(thread_id_raw)
-        # For forum groups without an explicit topic, default to the
-        # General-topic id so the gateway routes back to the General topic
-        # rather than dropping into the bot's main channel (#22423).
+        # For forum groups without an explicit topic, route back to the
+        # configured home topic when it matches this chat; otherwise default to
+        # the General topic rather than dropping into the bot's main channel
+        # (#22423, #52635).
         if chat_type == "group" and thread_id_str is None and is_forum_group:
-            thread_id_str = self._GENERAL_TOPIC_THREAD_ID
+            thread_id_str = self._telegram_effective_topic_id(message)
         chat_topic = None
         topic_skill = None
 

@@ -3,7 +3,7 @@ import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
-from gateway.config import Platform, PlatformConfig, load_gateway_config
+from gateway.config import HomeChannel, Platform, PlatformConfig, load_gateway_config
 from gateway.platforms.base import MessageType
 from gateway.session import SessionSource
 
@@ -619,6 +619,27 @@ def test_allowed_topics_treat_missing_thread_as_general_topic():
 
     assert adapter._should_process_message(_group_message("hello", thread_id=None)) is True
     assert adapter._should_process_message(_group_message("hello", thread_id=8)) is False
+
+
+def test_env_allowed_topics_uses_configured_home_thread_when_forum_update_omits_thread(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_ALLOWED_TOPICS", "846")
+    monkeypatch.setenv("TELEGRAM_REQUIRE_MENTION", "false")
+
+    adapter = _make_adapter()
+    adapter.config.extra.pop("allowed_topics", None)
+    adapter.config.extra.pop("require_mention", None)
+    adapter.config.home_channel = HomeChannel(
+        platform=Platform.TELEGRAM,
+        chat_id="-1003946573900",
+        name="Work",
+        thread_id="846",
+    )
+    msg = _group_message("hello", chat_id=-1003946573900, thread_id=None)
+    msg.chat.is_forum = True
+
+    assert adapter._should_process_message(msg) is True
+    event = adapter._build_message_event(msg, MessageType.TEXT, update_id=1005)
+    assert event.source.thread_id == "846"
 
 
 def test_regex_mention_patterns_allow_custom_wake_words():
