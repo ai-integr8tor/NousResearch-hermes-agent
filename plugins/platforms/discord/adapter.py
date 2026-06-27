@@ -20,6 +20,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import unicodedata
 from collections import defaultdict
 from contextlib import suppress
 from typing import Callable, Dict, List, Optional, Any, Tuple
@@ -177,6 +178,156 @@ def _find_discord_windows_bundled_opus(discord_module: Any = None) -> Optional[s
     if bundled.is_file():
         return str(bundled)
     return None
+
+
+_TABLE_SEPARATOR_RE = re.compile(
+    r"^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*){0,}\|?\s*$"
+)
+
+
+def _is_table_row(line: str) -> bool:
+    stripped = line.strip()
+    return bool(stripped) and "|" in stripped and not _TABLE_SEPARATOR_RE.match(stripped)
+
+
+def _split_markdown_table_row(line: str) -> list[str]:
+    stripped = line.strip()
+    if stripped.startswith("|"):
+        stripped = stripped[1:]
+    if stripped.endswith("|"):
+        stripped = stripped[:-1]
+    return [cell.strip() for cell in stripped.split("|")]
+
+
+def _strip_cell_formatting(cell: str) -> str:
+    cell = re.sub(r"\*{1,3}(.*?)\*{1,3}", r"\1", cell)
+    cell = re.sub(r"(?<!\w)_(?!_)(.*?)(?<!_)_(?!\w)", r"\1", cell)
+    cell = re.sub(r"(?<!\w)__(.*?\s.*?)__(?!\w)", r"\1", cell)
+    cell = re.sub(r"~~(.*?)~~", r"\1", cell)
+    return cell.strip()
+
+
+def _display_width(text: str) -> int:
+    width = 0
+    for ch in text:
+        width += 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+    return width
+
+
+def _render_table_block_for_discord(table_block: list[str]) -> str:
+    if len(table_block) < 2:
+        return "\n".join(table_block)
+
+    headers = _split_markdown_table_row(table_block[0])
+    if not headers:
+        return "\n".join(table_block)
+    headers = [_strip_cell_formatting(header) for header in headers]
+
+    rows: list[list[str]] = [headers]
+    for row_line in table_block[2:]:
+        cells = _split_markdown_table_row(row_line)
+        if not cells:
+            continue
+        cells = [_strip_cell_formatting(cell) for cell in cells]
+        while len(cells) < len(headers):
+            cells.append("")
+        rows.append(cells[: len(headers)])
+
+    col_widths = [0] * len(headers)
+    for row in rows:
+        for idx, cell in enumerate(row):
+            col_widths[idx] = max(col_widths[idx], _display_width(cell))
+
+    def _fmt_row(cells: list[str]) -> str:
+        parts = []
+        for cell, width in zip(cells, col_widths):
+            parts.append(f" {cell}{' ' * (width - _display_width(cell))} ")
+        return "|" + "|".join(parts) + "|"
+
+    sep = "|" + "|".join("-" * (width + 2) for width in col_widths) + "|"
+    rendered = [sep, _fmt_row(rows[0]), sep]
+    rendered.extend(_fmt_row(row) for row in rows[1:])
+    rendered.append(sep)
+    return "```\n" + "\n".join(rendered) + "\n```"
+
+
+def _render_table_compact(table_block: list[str]) -> str:
+    if len(table_block) < 2:
+        return "\n".join(table_block)
+
+    headers = _split_markdown_table_row(table_block[0])
+    if not headers:
+        return "\n".join(table_block)
+    headers = [_strip_cell_formatting(header) for header in headers]
+
+    rows = []
+    for row_line in table_block[2:]:
+        cells = _split_markdown_table_row(row_line)
+        if not cells:
+            continue
+        cells = [_strip_cell_formatting(cell) for cell in cells]
+        while len(cells) < len(headers):
+            cells.append("")
+        parts = [f"{header}: {cell}" for header, cell in zip(headers, cells) if cell]
+        rows.append("  ·  ".join(parts))
+
+    return "\n".join(rows) if rows else "\n".join(table_block)
+
+
+def _wrap_markdown_tables_for_discord(text: str, budget: int | None = None) -> str:
+    if "|" not in text or "-" not in text:
+        return text
+
+    def _convert(src: str, use_compact: bool) -> str:
+        lines = src.split("\n")
+        out: list[str] = []
+        in_fence = False
+        idx = 0
+        while idx < len(lines):
+            line = lines[idx]
+            if line.lstrip().startswith("```"):
+                in_fence = not in_fence
+                out.append(line)
+                idx += 1
+                continue
+            if in_fence:
+                out.append(line)
+                idx += 1
+                continue
+
+            if (
+                "|" in line
+                and idx + 1 < len(lines)
+                and "|" in lines[idx + 1]
+                and _TABLE_SEPARATOR_RE.match(lines[idx + 1])
+            ):
+                table_block = [line, lines[idx + 1]]
+                next_idx = idx + 2
+                while next_idx < len(lines) and _is_table_row(lines[next_idx]):
+                    if (
+                        next_idx + 1 < len(lines)
+                        and _TABLE_SEPARATOR_RE.match(lines[next_idx + 1])
+                    ):
+                        break
+                    table_block.append(lines[next_idx])
+                    next_idx += 1
+                out.append(
+                    _render_table_compact(table_block)
+                    if use_compact
+                    else _render_table_block_for_discord(table_block)
+                )
+                idx = next_idx
+                continue
+
+            out.append(line)
+            idx += 1
+
+        return "\n".join(out)
+
+    result = _convert(text, use_compact=False)
+    if budget is not None and len(result) > budget:
+        result = _convert(text, use_compact=True)
+    return result
 
 
 class _DiscordNonConversationalMessageTracker:
@@ -1044,7 +1195,7 @@ class DiscordAdapter(BasePlatformAdapter):
                     ):
                         return
                     _role_authorized = bool(getattr(self, "_allowed_role_ids", set()))
-                
+
                 # Multi-agent filtering: if the message mentions specific bots
                 # but NOT this bot, the sender is talking to another agent —
                 # stay silent.  Messages with no bot mentions (general chat)
@@ -1727,6 +1878,7 @@ class DiscordAdapter(BasePlatformAdapter):
 
             # Format and split message if needed
             formatted = self.format_message(content)
+            formatted = _wrap_markdown_tables_for_discord(formatted)
             chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)
 
             message_ids = []
@@ -1810,6 +1962,7 @@ class DiscordAdapter(BasePlatformAdapter):
         # module — no cross-module import needed.
 
         formatted = self.format_message(content)
+        formatted = _wrap_markdown_tables_for_discord(formatted)
         chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)
 
         thread_name = _derive_forum_thread_name(content)
@@ -1930,6 +2083,11 @@ class DiscordAdapter(BasePlatformAdapter):
                 channel = await self._client.fetch_channel(int(chat_id))
             msg = await channel.fetch_message(int(message_id))
             formatted = self.format_message(content)
+            if finalize:
+                formatted = _wrap_markdown_tables_for_discord(
+                    formatted,
+                    budget=self.MAX_MESSAGE_LENGTH,
+                )
             if len(formatted) > self.MAX_MESSAGE_LENGTH:
                 formatted = formatted[:self.MAX_MESSAGE_LENGTH - 3] + "..."
             await msg.edit(content=formatted)
