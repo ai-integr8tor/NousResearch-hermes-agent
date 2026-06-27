@@ -1167,6 +1167,7 @@ class DiscordAdapter(BasePlatformAdapter):
     async def disconnect(self) -> None:
         """Disconnect from Discord."""
         self._disconnecting = True
+        await self._cancel_typing_tasks(reason="disconnect")
         # Cancel the bot task before closing the client.  If connect() timed out
         # and returned False, the background client.start() task may still be
         # running; calling client.close() alone is not enough to stop it because
@@ -1202,6 +1203,46 @@ class DiscordAdapter(BasePlatformAdapter):
         self._release_platform_lock()
 
         logger.info("[%s] Disconnected", self.name)
+
+    async def cancel_background_tasks(self) -> None:
+        """Cancel Discord-specific background loops plus base tasks."""
+        await self._cancel_typing_tasks(reason="shutdown")
+        await super().cancel_background_tasks()
+
+    async def _cancel_typing_tasks(self, reason: str = "cleanup") -> None:
+        """Cancel all persistent typing loops owned by this adapter.
+
+        Discord keeps typing indicators alive with per-channel background tasks.
+        Those tasks are not part of BasePlatformAdapter's message-processing
+        task registry, so shutdown/restart must drain them explicitly.
+        """
+        tasks = [(chat_id, task) for chat_id, task in self._typing_tasks.items()]
+        if not tasks:
+            return
+
+        self._typing_tasks.clear()
+        live_tasks = [task for _, task in tasks if not task.done()]
+        for task in live_tasks:
+            task.cancel()
+
+        if live_tasks:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*live_tasks, return_exceptions=True),
+                    timeout=2.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "[%s] %d Discord typing task(s) did not exit within 2s during %s",
+                    self.name,
+                    len([task for task in live_tasks if not task.done()]),
+                    reason,
+                )
+
+        logger.debug(
+            "[%s] Cleared %d Discord typing task(s) during %s",
+            self.name, len(tasks), reason,
+        )
 
     def _command_sync_state_path(self) -> _Path:
         from hermes_constants import get_hermes_home
@@ -3243,6 +3284,20 @@ class DiscordAdapter(BasePlatformAdapter):
             logger.error("[%s] Failed to send document, falling back to base adapter: %s", self.name, e, exc_info=True)
             return await super().send_document(chat_id, file_path, caption, file_name, reply_to, metadata=metadata)
 
+    def _typing_task_chat_id(self, chat_id: str, metadata=None) -> str:
+        """Resolve the persistent typing task key for a chat.
+
+        Discord thread replies need to stop the typing loop by thread id,
+        not by the parent channel id. The gateway already forwards thread
+        metadata for Discord turns, so we use it here when present.
+        """
+        thread_id = None
+        if isinstance(metadata, dict):
+            thread_id = metadata.get("thread_id")
+        elif metadata is not None:
+            thread_id = getattr(metadata, "thread_id", None)
+        return str(thread_id or chat_id)
+
     async def send_typing(self, chat_id: str, metadata=None) -> None:
         """Start a persistent typing indicator for a channel.
 
@@ -3258,8 +3313,9 @@ class DiscordAdapter(BasePlatformAdapter):
         """
         if not self._client:
             return
+        task_chat_id = self._typing_task_chat_id(chat_id, metadata)
         # Don't start a duplicate loop
-        if chat_id in self._typing_tasks:
+        if task_chat_id in self._typing_tasks:
             return
 
         async def _typing_loop() -> None:
@@ -3268,7 +3324,7 @@ class DiscordAdapter(BasePlatformAdapter):
                     try:
                         route = discord.http.Route(
                             "POST", "/channels/{channel_id}/typing",
-                            channel_id=chat_id,
+                            channel_id=task_chat_id,
                         )
                         await self._client.http.request(route)
                     except asyncio.CancelledError:
@@ -3279,12 +3335,12 @@ class DiscordAdapter(BasePlatformAdapter):
                         if retry_after is not None:
                             logger.warning(
                                 "Typing indicator rate-limited for %s; retrying in %.1fs",
-                                chat_id, retry_after,
+                                task_chat_id, retry_after,
                             )
                         else:
                             logger.debug(
                                 "Discord typing indicator failed for %s: %s",
-                                chat_id, e,
+                                task_chat_id, e,
                             )
                             return
                         await asyncio.sleep(retry_after)
@@ -3293,13 +3349,14 @@ class DiscordAdapter(BasePlatformAdapter):
             except asyncio.CancelledError:
                 pass
             finally:
-                self._typing_tasks.pop(chat_id, None)
+                self._typing_tasks.pop(task_chat_id, None)
 
-        self._typing_tasks[chat_id] = asyncio.create_task(_typing_loop())
+        self._typing_tasks[task_chat_id] = asyncio.create_task(_typing_loop())
 
-    async def stop_typing(self, chat_id: str) -> None:
+    async def stop_typing(self, chat_id: str, metadata=None) -> None:
         """Stop the persistent typing indicator for a channel."""
-        task = self._typing_tasks.pop(chat_id, None)
+        task_chat_id = self._typing_task_chat_id(chat_id, metadata)
+        task = self._typing_tasks.pop(task_chat_id, None)
         if task:
             task.cancel()
             try:

@@ -10208,7 +10208,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             try:
                 _typing_adapter = self.adapters.get(source.platform)
                 if _typing_adapter and hasattr(_typing_adapter, "stop_typing"):
-                    await _typing_adapter.stop_typing(source.chat_id)
+                    _typing_meta = self._thread_metadata_for_source(source) if source.platform == Platform.DISCORD else None
+                    await _typing_adapter.stop_typing(source.chat_id, metadata=_typing_meta)
             except Exception:
                 pass
 
@@ -10713,7 +10714,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             try:
                 _err_adapter = self.adapters.get(source.platform)
                 if _err_adapter and hasattr(_err_adapter, "stop_typing"):
-                    await _err_adapter.stop_typing(source.chat_id)
+                    _err_meta = self._thread_metadata_for_source(source) if source.platform == Platform.DISCORD else None
+                    await _err_adapter.stop_typing(source.chat_id, metadata=_err_meta)
             except Exception:
                 pass
             logger.exception("Agent error in session %s", session_key)
@@ -14434,7 +14436,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         self._invalidate_session_run_generation(session_key, reason=invalidation_reason)
         adapter = self.adapters.get(source.platform)
         if adapter and hasattr(adapter, "interrupt_session_activity"):
-            await adapter.interrupt_session_activity(session_key, source.chat_id)
+            _interrupt_meta = self._thread_metadata_for_source(source)
+            await adapter.interrupt_session_activity(session_key, source.chat_id, metadata=_interrupt_meta)
         if adapter and hasattr(adapter, "get_pending_message"):
             adapter.get_pending_message(session_key)  # consume and discard
         self._pending_messages.pop(session_key, None)

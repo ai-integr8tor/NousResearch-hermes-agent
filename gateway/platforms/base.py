@@ -2944,7 +2944,7 @@ class BasePlatformAdapter(ABC):
         """
         pass
 
-    async def stop_typing(self, chat_id: str) -> None:
+    async def stop_typing(self, chat_id: str, metadata=None) -> None:
         """Stop a persistent typing indicator (if the platform uses one).
 
         Override in subclasses that start background typing loops.
@@ -3562,7 +3562,7 @@ class BasePlatformAdapter(ABC):
             # Cancelling _keep_typing alone won't clean that up.
             if hasattr(self, "stop_typing"):
                 try:
-                    await self.stop_typing(chat_id)
+                    await self.stop_typing(chat_id, metadata=metadata)
                 except Exception:
                     pass
             self._typing_paused.discard(chat_id)
@@ -3574,6 +3574,7 @@ class BasePlatformAdapter(ABC):
         *,
         timeout: float = 0.5,
         stop_attempts: int = 2,
+        metadata=None,
     ) -> None:
         """Stop the refresh task and platform typing state as one operation."""
         self._typing_paused.add(chat_id)
@@ -3591,7 +3592,7 @@ class BasePlatformAdapter(ABC):
             attempts = max(1, stop_attempts)
             for attempt in range(attempts):
                 try:
-                    await self.stop_typing(chat_id)
+                    await self.stop_typing(chat_id, metadata=metadata)
                 except Exception:
                     pass
                 if attempt < attempts - 1:
@@ -3611,14 +3612,14 @@ class BasePlatformAdapter(ABC):
         """Resume typing indicator for a chat after approval resolves."""
         self._typing_paused.discard(chat_id)
 
-    async def interrupt_session_activity(self, session_key: str, chat_id: str) -> None:
+    async def interrupt_session_activity(self, session_key: str, chat_id: str, metadata=None) -> None:
         """Signal the active session loop to stop and clear typing immediately."""
         if session_key:
             interrupt_event = self._active_sessions.get(session_key)
             if interrupt_event is not None:
                 interrupt_event.set()
         try:
-            await self.stop_typing(chat_id)
+            await self.stop_typing(chat_id, metadata=metadata)
         except Exception:
             pass
 
@@ -4540,6 +4541,7 @@ class BasePlatformAdapter(ABC):
             await self._stop_typing_refresh(
                 event.source.chat_id,
                 typing_task,
+                metadata=_thread_metadata,
             )
         
         try:
@@ -4961,6 +4963,7 @@ class BasePlatformAdapter(ABC):
                 event.source.chat_id,
                 None,
                 stop_attempts=1,
+                metadata=_thread_metadata,
             )
             # Final drain/release boundary: force-flush any timer that missed
             # the in-band drain before deciding whether the guard can clear.
