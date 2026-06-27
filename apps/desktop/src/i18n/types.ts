@@ -1245,6 +1245,8 @@ export interface Translations {
     windowPickerLoading: string
     windowPreviewLive: string
     windowPreviewUnavailable: string
+    dockControlling: (app: string) => string
+    dockUndock: string
     promptSnippets: string
     tipPre: string
     tipPost: string
