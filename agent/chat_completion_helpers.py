@@ -2717,7 +2717,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                 role="assistant", content=_partial_text, tool_calls=None,
                 reasoning_content=None,
             )
-            return SimpleNamespace(
+            _stub_kwargs = dict(
                 id=PARTIAL_STREAM_STUB_ID,
                 model=getattr(agent, "model", "unknown"),
                 choices=[SimpleNamespace(
@@ -2726,6 +2726,19 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                 usage=None,
                 _dropped_tool_names=_partial_names or None,
             )
+            # In anthropic_messages mode the AnthropicTransport validator
+            # checks response.content (a list of content blocks).  The
+            # OpenAI-shaped stub only has choices[].message.content, so
+            # validate_response fails and the conversation loop retries
+            # the same unrecoverable error up to 10x.  Attach a
+            # minimal content list so the stub passes validation and
+            # normalize_response can extract the recovered text.  See
+            # GH-45908.
+            if getattr(agent, "api_mode", None) == "anthropic_messages":
+                _stub_kwargs["content"] = [
+                    SimpleNamespace(type="text", text=_partial_text or ""),
+                ]
+            return SimpleNamespace(**_stub_kwargs)
         raise result["error"]
     return result["response"]
 
