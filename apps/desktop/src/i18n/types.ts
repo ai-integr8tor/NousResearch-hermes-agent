@@ -1023,6 +1023,8 @@ export interface Translations {
     nav: Record<string, string>
     searchAria: string
     searchPlaceholder: string
+    refresh: string
+    refreshing: string
     clearSearch: string
     noMatch: (query: string) => string
     results: string
