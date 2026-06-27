@@ -38,6 +38,7 @@ import time
 import uuid
 import textwrap
 from collections import deque
+from typing import Dict, Optional, Any
 
 # --- quota snapshot cache (avoids HTTP on every status-bar tick) ---
 _quota_cache: Optional[Dict[str, Any]] = None
@@ -101,7 +102,7 @@ from urllib.parse import unquote, urlparse
 from contextlib import contextmanager
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import List, Dict, Any, Optional
+from typing import List
 
 logger = logging.getLogger(__name__)
 
@@ -4828,6 +4829,16 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             bg_subagent_count = snapshot.get("active_background_subagents", 0)
             if bg_subagent_count:
                 parts.append(f"⛓ {bg_subagent_count}")
+            # Quota / cost indicator (cached fetch, may be absent)
+            quota_label = None
+            qp = snapshot.get("quota_pct")
+            if qp is not None:
+                qr = snapshot.get("quota_reset", "")
+                quota_label = f"💰 {qp}%{(' ' + qr) if qr else ''}"
+            elif snapshot.get("quota_rl_text"):
+                quota_label = f"💰 {snapshot['quota_rl_text']}"
+            if quota_label:
+                parts.append(quota_label)
             parts.append(duration_label)
             prompt_elapsed = snapshot.get("prompt_elapsed")
             if prompt_elapsed:
@@ -4896,6 +4907,14 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                         ("class:status-bar-dim", " · "),
                         ("class:status-bar-dim", duration_label),
                     ])
+                    # Quota (compact view — percentage only)
+                    qp = snapshot.get("quota_pct")
+                    if qp is not None:
+                        frags.append(("class:status-bar-dim", " · "))
+                        frags.append((self._status_bar_context_style(qp), f"💰{qp}%"))
+                    elif snapshot.get("quota_rl_text"):
+                        frags.append(("class:status-bar-dim", " · "))
+                        frags.append(("class:status-bar-dim", f"💰{snapshot['quota_rl_text']}"))
                     if yolo_active:
                         frags.append(("class:status-bar-dim", " · "))
                         frags.append(("class:status-bar-yolo", "⚠ YOLO"))
@@ -4939,6 +4958,18 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                         ("class:status-bar-dim", " │ "),
                         ("class:status-bar-dim", duration_label),
                     ])
+                    # Quota / cost indicator (cached fetch, may be absent)
+                    qp = snapshot.get("quota_pct")
+                    if qp is not None:
+                        _q_style = self._status_bar_context_style(qp)
+                        qr = snapshot.get("quota_reset", "")
+                        frags.append(("class:status-bar-dim", " │ "))
+                        frags.append((_q_style, f"💰 {qp}%"))
+                        if qr:
+                            frags.append(("class:status-bar-dim", f" {qr}"))
+                    elif snapshot.get("quota_rl_text"):
+                        frags.append(("class:status-bar-dim", " │ "))
+                        frags.append(("class:status-bar-dim", f"💰 {snapshot['quota_rl_text']}"))
                     # Position 7: per-prompt elapsed timer (live or frozen)
                     prompt_elapsed = snapshot.get("prompt_elapsed")
                     if prompt_elapsed:
