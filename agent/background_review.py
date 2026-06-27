@@ -358,6 +358,18 @@ _COMBINED_REVIEW_PROMPT = (
 )
 
 
+def _builtin_memory_available(agent: Any) -> bool:
+    """True only when the built-in MEMORY.md / USER.md store is usable.
+
+    When a memory provider has replaced the built-in store, ``_memory_store`` is
+    ``None`` and the ``memory`` tool returns "Memory is not available" (see the
+    ``store is None`` guard in ``tools/memory_tool.py``). In that case the
+    background review's memory arm can only fail, so the review should run
+    skill-only rather than prompt for and whitelist a dead tool.
+    """
+    return bool(getattr(agent, "_memory_enabled", False)) and \
+        getattr(agent, "_memory_store", None) is not None
+
 
 def summarize_background_review_actions(
     review_messages: List[Dict],
@@ -725,10 +737,18 @@ def _run_review_in_thread(
                 clear_thread_tool_whitelist,
             )
 
+            # Only offer the built-in `memory` tool when its store is live. When a
+            # memory provider has replaced the built-in store the tool is dead
+            # (returns "Memory is not available"), so the review runs skill-only:
+            # keep the dead tool out of the whitelist, the deny message, and the
+            # prompt suffix. The memory-available path is unchanged.
+            _mem_ok = _builtin_memory_available(agent)
+            _deny_kinds = "memory/skill" if _mem_ok else "skill"
+            _allowed_kinds = "memory and skill" if _mem_ok else "skill"
             review_whitelist = {
                 t["function"]["name"]
                 for t in get_tool_definitions(
-                    enabled_toolsets=["memory", "skills"],
+                    enabled_toolsets=(["memory", "skills"] if _mem_ok else ["skills"]),
                     quiet_mode=True,
                 )
             }
@@ -736,7 +756,7 @@ def _run_review_in_thread(
                 review_whitelist,
                 deny_msg_fmt=(
                     "Background review denied non-whitelisted tool: "
-                    "{tool_name}. Only memory/skill tools are allowed."
+                    "{tool_name}. Only " + _deny_kinds + " tools are allowed."
                 ),
             )
             try:
@@ -750,7 +770,7 @@ def _run_review_in_thread(
                 review_agent.run_conversation(
                     user_message=(
                         prompt
-                        + "\n\nYou can only call memory and skill "
+                        + "\n\nYou can only call " + _allowed_kinds + " "
                         "management tools. Other tools will be denied "
                         "at runtime — do not attempt them."
                     ),
@@ -848,6 +868,15 @@ def spawn_background_review_thread(
     owns the actual ``threading.Thread`` construction so test-level patches
     of ``run_agent.threading.Thread`` keep working.
     """
+    # If the built-in memory store is disabled (e.g. a memory provider has
+    # replaced it), the memory arm can only fail — drop it. A memory-only trigger
+    # then has nothing to do, so skip the fork entirely; a combined trigger
+    # degrades to a skill-only review.
+    if review_memory and not _builtin_memory_available(agent):
+        review_memory = False
+        if not review_skills:
+            return (lambda: None), ""
+
     # Pick the right prompt based on which triggers fired.  Allow per-agent
     # override (the prompts moved to module-level constants but old code paths
     # that set agent._MEMORY_REVIEW_PROMPT etc. directly keep working).
