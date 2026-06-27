@@ -1285,6 +1285,7 @@ const UserEditComposer: FC<UserEditComposerProps> = ({ cwd, gateway, sessionId }
   const draft = useAuiState(s => s.composer.text)
   const rootRef = useRef<HTMLDivElement | null>(null)
   const editorRef = useRef<HTMLDivElement | null>(null)
+  const initialDraftRef = useRef(draft)
   const draftRef = useRef(draft)
   const dragDepthRef = useRef(0)
   const [dragActive, setDragActive] = useState(false)
@@ -1723,11 +1724,19 @@ const UserEditComposer: FC<UserEditComposerProps> = ({ cwd, gateway, sessionId }
           return
         }
 
+        const editor = editorRef.current
+
+        if (editor && syncDraftFromEditor(editor) !== initialDraftRef.current) {
+          closeTrigger()
+
+          return
+        }
+
         closeTrigger()
         aui.composer().cancel()
       }, 80)
     },
-    [aui, closeTrigger, submitting]
+    [aui, closeTrigger, submitting, syncDraftFromEditor]
   )
 
   const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {

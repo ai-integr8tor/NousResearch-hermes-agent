@@ -8,8 +8,8 @@ import { ExportedMessageRepository } from '@assistant-ui/core/internal'
 // bubbles) is not reproducible in jsdom — see USER_BUBBLE_BASE_CLASS's no-drag
 // carve-out in thread.tsx.
 import { AssistantRuntimeProvider, type ThreadMessage, useExternalStoreRuntime } from '@assistant-ui/react'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { describe, expect, it, vi } from 'vitest'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { useIncrementalExternalStoreRuntime } from '@/lib/incremental-external-store-runtime'
 
@@ -30,6 +30,10 @@ vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) =>
 vi.stubGlobal('cancelAnimationFrame', (id: number) => window.clearTimeout(id))
 
 Element.prototype.scrollTo = function scrollTo() {}
+
+afterEach(() => {
+  cleanup()
+})
 
 function stubOffsetDimension(
   prop: 'offsetHeight' | 'offsetWidth',
@@ -125,6 +129,24 @@ describe('click-to-edit user message', () => {
     await waitFor(() => {
       expect(container.querySelector('[data-slot="aui_edit-composer-root"]')).toBeTruthy()
     })
+  })
+
+  it('keeps a dirty inline edit open when focus leaves the composer', async () => {
+    const { container } = render(<IncrementalHarness onEdit={async () => {}} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit message' }))
+
+    const editor = await screen.findByRole('textbox', { name: 'Edit message' })
+    const editedText = 'edited draft that must not be discarded'
+
+    editor.textContent = editedText
+    fireEvent.input(editor)
+    fireEvent.blur(editor, { relatedTarget: document.body })
+
+    await new Promise(resolve => window.setTimeout(resolve, 120))
+
+    expect(container.querySelector('[data-slot="aui_edit-composer-root"]')).toBeTruthy()
+    expect((await screen.findByRole('textbox', { name: 'Edit message' })).textContent).toBe(editedText)
   })
 
   it('opens the edit composer with the stock runtime', async () => {
