@@ -19,8 +19,10 @@ Improvements over v2:
 import hashlib
 import json
 import logging
+import os
 import re
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from agent.auxiliary_client import call_llm, _is_connection_error, aux_interrupt_protection
@@ -1691,6 +1693,8 @@ This compaction should PRIORITISE preserving all information related to the focu
             summary = redact_sensitive_text(content.strip())
             # Store for iterative updates on next compaction
             self._previous_summary = summary
+            # Persist to disk for cross-session context
+            self._persist_summary(summary)
             self._summary_failure_cooldown_until = 0.0
             self._summary_model_fallen_back = False
             self._last_summary_error = None
@@ -2368,6 +2372,57 @@ This compaction should PRIORITISE preserving all information related to the focu
     # ------------------------------------------------------------------
     # Main compression entry point
     # ------------------------------------------------------------------
+
+
+    # --- Session checkpoint persistence (cross-session context) ---
+    _SESSION_CHECKPOINT_DIR = None
+
+    @classmethod
+    def _get_checkpoint_dir(cls):
+        """Return the session checkpoint directory, creating it if needed."""
+        if cls._SESSION_CHECKPOINT_DIR is None:
+            from hermes_constants import get_hermes_home
+            cls._SESSION_CHECKPOINT_DIR = get_hermes_home() / "session-checkpoints"
+            cls._SESSION_CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+        return cls._SESSION_CHECKPOINT_DIR
+
+    def _persist_summary(self, summary: str) -> None:
+        """Persist compaction summary to disk for cross-session context.
+
+        Writes the structured summary (without the SUMMARY_PREFIX header) to
+        ``<hermes_home>/session-checkpoints/latest.md`` so the next session
+        can inject it into the system prompt as background context.
+        """
+        try:
+            cp_dir = self._get_checkpoint_dir()
+            clean = summary
+            if clean.startswith(SUMMARY_PREFIX):
+                clean = clean[len(SUMMARY_PREFIX):].lstrip("\n")
+            if clean.startswith(LEGACY_SUMMARY_PREFIX):
+                clean = clean[len(LEGACY_SUMMARY_PREFIX):].lstrip("\n")
+            target = cp_dir / "latest.md"
+            target.write_text(clean, encoding="utf-8")
+            logger.info("Session checkpoint persisted to %s (%d chars)", target, len(clean))
+        except Exception as exc:
+            logger.warning("Failed to persist session checkpoint: %s", exc)
+
+    @staticmethod
+    def load_latest_checkpoint():
+        """Load the most recent session checkpoint from disk.
+
+        Returns the summary text (without prefix) or None if not available.
+        Called during system prompt construction to inject cross-session context.
+        """
+        try:
+            from hermes_constants import get_hermes_home
+            cp_file = get_hermes_home() / "session-checkpoints" / "latest.md"
+            if cp_file.exists():
+                text = cp_file.read_text(encoding="utf-8").strip()
+                if text:
+                    return text
+        except Exception:
+            pass
+        return None
 
     def compress(self, messages: List[Dict[str, Any]], current_tokens: int = None, focus_topic: str = None, force: bool = False) -> List[Dict[str, Any]]:
         """Compress conversation messages by summarizing middle turns.

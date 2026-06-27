@@ -443,6 +443,22 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
         except Exception:
             pass
 
+    # Session checkpoint -- inject the most recent compaction summary
+    # from the previous session as background context.
+    try:
+        from agent.context_compressor import ContextCompressor
+        _checkpoint_text = ContextCompressor.load_latest_checkpoint()
+        if _checkpoint_text:
+            volatile_parts.append(
+                "## Previous Session Context (auto-loaded checkpoint)\n"
+                "The following is a structured summary from the most recent "
+                "session. Use it to resume context -- do NOT re-do completed "
+                "work.\n\n"
+                + _checkpoint_text
+            )
+    except Exception:
+        pass
+
     from hermes_time import now as _hermes_now
     now = _hermes_now()
     # Date-only (not minute-precision) so the system prompt is byte-stable
