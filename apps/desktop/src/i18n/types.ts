@@ -1243,6 +1243,8 @@ export interface Translations {
     windowPickerEmpty: string
     windowPickerError: string
     windowPickerLoading: string
+    windowPreviewLive: string
+    windowPreviewUnavailable: string
     promptSnippets: string
     tipPre: string
     tipPost: string
