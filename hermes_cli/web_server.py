@@ -81,7 +81,7 @@ from gateway.status import (
     parse_active_agents,
     read_runtime_status,
 )
-from utils import env_var_enabled
+from utils import env_positive_int, env_var_enabled
 
 try:
     from fastapi import (
@@ -1116,7 +1116,25 @@ _FS_READDIR_HIDDEN = {
     "target",
     "venv",
 }
-_FS_DATA_URL_MAX_BYTES = 16 * 1024 * 1024
+_DEFAULT_DASHBOARD_WS_MAX_SIZE_BYTES = 16 * 1024 * 1024
+_DEFAULT_FS_DATA_URL_MAX_BYTES = 16 * 1024 * 1024
+
+
+def _resolve_fs_data_url_max_bytes() -> int:
+    return env_positive_int(
+        "HERMES_FS_DATA_URL_MAX_BYTES",
+        _DEFAULT_FS_DATA_URL_MAX_BYTES,
+    )
+
+
+def _resolve_dashboard_ws_max_size_bytes() -> int:
+    return env_positive_int(
+        "HERMES_DASHBOARD_WS_MAX_SIZE_BYTES",
+        _DEFAULT_DASHBOARD_WS_MAX_SIZE_BYTES,
+    )
+
+
+_FS_DATA_URL_MAX_BYTES = _resolve_fs_data_url_max_bytes()
 _FS_TEXT_SOURCE_MAX_BYTES = 64 * 1024 * 1024
 _FS_TEXT_PREVIEW_MAX_BYTES = 512 * 1024
 # Upper bound for the in-app spot editor's save. The editor only opens
@@ -13664,6 +13682,7 @@ def start_server(
         # timeout, keeping it warm.
         ws_ping_interval=20.0,
         ws_ping_timeout=20.0,
+        ws_max_size=_resolve_dashboard_ws_max_size_bytes(),
     )
     server = uvicorn.Server(config)
 
