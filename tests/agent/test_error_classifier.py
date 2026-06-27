@@ -746,6 +746,34 @@ class TestClassifyApiError:
         assert result.retryable is True
         assert result.should_compress is False
 
+    def test_400_litellm_proxy_flattened_memory_guard_is_overloaded(self):
+        # Proxy-flattened transport shape (real oMLX-behind-LiteLLM capture from
+        # issue #52261): LiteLLM collapses the structured body into a single
+        # "OpenAIException - <message>" string and DROPS the ``code``, so the
+        # error-code guard cannot fire — only the message substring survives.
+        # On clean main this 400 matched the bare "reduce context length"
+        # overflow pattern and misclassified as context_overflow (→ compress →
+        # wedge-loop reset).  The message-pattern memory guard ("memory guard",
+        # "dynamic ceiling", "prefill would require") must catch it even with no
+        # status code or structured code to lean on.
+        e = MockAPIError(
+            "litellm.BadRequestError: OpenAIException - oMLX prefill memory "
+            "guard rejected this prompt: Prefill would require ~13.87 GB peak "
+            "(current 13.46 GB + KV+SDPA 419.28 MB) but dynamic ceiling is "
+            "13.50 GB. Raise custom_ceiling_bytes in admin Memory settings, or "
+            "reduce context length.",
+            status_code=400,
+        )
+        result = classify_api_error(
+            e, provider="custom", model="omlx-chat",
+            approx_tokens=5700, context_length=64000,
+        )
+        assert result.reason == FailoverReason.overloaded
+        assert result.retryable is True
+        # Must NOT enter the compress-and-shrink loop a context_overflow would.
+        assert result.should_compress is False
+        assert result.should_fallback is True
+
     def test_genuine_billing_credit_limit_still_billing(self):
         # NEGATIVE/invariant guard: a real billing exhaustion message must STILL
         # classify as billing — proves the memory-guard reorder in
