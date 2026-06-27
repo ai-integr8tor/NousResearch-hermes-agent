@@ -613,6 +613,7 @@ from hermes_cli.model_setup_flows import (
     _model_flow_bedrock,
     _model_flow_api_key_provider,
     _model_flow_anthropic,
+    _model_flow_xiaomi,
 )
 logger = logging.getLogger(__name__)
 
@@ -3101,6 +3102,8 @@ def select_provider_and_model(args=None):
         _model_flow_bedrock(config, current_model)
     elif selected_provider == "azure-foundry":
         _model_flow_azure_foundry(config, current_model)
+    elif selected_provider == "xiaomi":
+        _model_flow_xiaomi(config, current_model)
     elif selected_provider in {
         "openai-api",
         "gemini",
@@ -3115,7 +3118,6 @@ def select_provider_and_model(args=None):
         "opencode-go",
         "alibaba",
         "huggingface",
-        "xiaomi",
         "arcee",
         "gmi",
         "nvidia",
