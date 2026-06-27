@@ -10,6 +10,7 @@ so CLI and messaging platforms behave identically.
 
 import importlib
 import sys
+import time
 import types
 from datetime import datetime
 from types import SimpleNamespace
@@ -591,6 +592,201 @@ async def test_session_hygiene_preserves_transcript_when_in_place_configured_but
     # The config says in_place=True, but the DB write failed (no session_db)
     # so _last_compaction_in_place is False. Transcript must NOT be rewritten.
     runner.session_store.rewrite_transcript.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_session_hygiene_skips_compression_during_failure_cooldown(monkeypatch, tmp_path):
+    """After a hygiene compression failure, the next message should not block
+    on the same doomed auxiliary compression path again until cooldown expires."""
+    fake_dotenv = types.ModuleType("dotenv")
+    fake_dotenv.load_dotenv = lambda *args, **kwargs: None
+    monkeypatch.setitem(sys.modules, "dotenv", fake_dotenv)
+
+    class ShouldNotRunCompressAgent:
+        last_instance = None
+
+        def __init__(self, **kwargs):
+            type(self).last_instance = self
+            self.session_id = kwargs.get("session_id", "fake-session")
+            self.shutdown_memory_provider = MagicMock()
+            self.close = MagicMock()
+
+        def _compress_context(self, messages, *_args, **_kwargs):
+            raise AssertionError("compression should be skipped during cooldown")
+
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = ShouldNotRunCompressAgent
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+
+    gateway_run = importlib.import_module("gateway.run")
+    GatewayRunner = gateway_run.GatewayRunner
+
+    runner = object.__new__(GatewayRunner)
+    runner.config = GatewayConfig(
+        platforms={Platform.TELEGRAM: PlatformConfig(enabled=True, token="fake-token")}
+    )
+    runner.adapters = {Platform.TELEGRAM: HygieneCaptureAdapter()}
+    runner._voice_mode = {}
+    runner.hooks = SimpleNamespace(emit=AsyncMock(), loaded_hooks=False)
+    runner.session_store = MagicMock()
+    runner.session_store.get_or_create_session.return_value = SessionEntry(
+        session_key="agent:main:telegram:dm:12345",
+        session_id="sess-1",
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        platform=Platform.TELEGRAM,
+        chat_type="dm",
+    )
+    runner.session_store.load_transcript.return_value = _make_history(6, content_size=400)
+    runner.session_store.has_any_sessions.return_value = True
+    runner.session_store.rewrite_transcript = MagicMock()
+    runner.session_store.append_to_transcript = MagicMock()
+    runner._running_agents = {}
+    runner._pending_messages = {}
+    runner._pending_approvals = {}
+    runner._session_db = None
+    runner._hygiene_compression_failure_cooldowns = {"sess-1": time.time() + 300}
+    runner._is_user_authorized = lambda _source: True
+    runner._set_session_env = lambda _context: None
+    runner._run_agent = AsyncMock(
+        return_value={
+            "final_response": "ok",
+            "messages": [],
+            "tools": [],
+            "history_offset": 0,
+            "last_prompt_tokens": 0,
+        }
+    )
+
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "fake"})
+    monkeypatch.setattr(
+        "agent.model_metadata.get_model_context_length",
+        lambda *_args, **_kwargs: 100,
+    )
+
+    event = MessageEvent(
+        text="hello",
+        source=SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="12345",
+            chat_type="dm",
+            user_id="12345",
+        ),
+        message_id="1",
+    )
+
+    result = await runner._handle_message(event)
+
+    assert result == "ok"
+    assert ShouldNotRunCompressAgent.last_instance is None
+    runner._run_agent.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_session_hygiene_timeout_continues_to_agent_and_sets_cooldown(monkeypatch, tmp_path):
+    """A slow auxiliary compression call must not make the gateway appear stuck.
+    Hygiene should time out, warn, set a cooldown, and continue to the agent."""
+    fake_dotenv = types.ModuleType("dotenv")
+    fake_dotenv.load_dotenv = lambda *args, **kwargs: None
+    monkeypatch.setitem(sys.modules, "dotenv", fake_dotenv)
+
+    class SlowCompressAgent:
+        last_instance = None
+
+        def __init__(self, **kwargs):
+            self.session_id = kwargs.get("session_id", "fake-session")
+            self.shutdown_memory_provider = MagicMock()
+            self.close = MagicMock()
+            type(self).last_instance = self
+
+        def _compress_context(self, messages, *_args, **_kwargs):
+            time.sleep(0.2)
+            return ([{"role": "assistant", "content": "too late"}], None)
+
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = SlowCompressAgent
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(
+        "compression:\n"
+        "  enabled: true\n"
+        "  hygiene_timeout_seconds: 0.01\n"
+        "  hygiene_failure_cooldown_seconds: 120\n"
+    )
+
+    gateway_run = importlib.import_module("gateway.run")
+    GatewayRunner = gateway_run.GatewayRunner
+
+    adapter = HygieneCaptureAdapter()
+    runner = object.__new__(GatewayRunner)
+    runner.config = GatewayConfig(
+        platforms={Platform.TELEGRAM: PlatformConfig(enabled=True, token="fake-token")}
+    )
+    runner.adapters = {Platform.TELEGRAM: adapter}
+    runner._voice_mode = {}
+    runner.hooks = SimpleNamespace(emit=AsyncMock(), loaded_hooks=False)
+    runner.session_store = MagicMock()
+    runner.session_store.get_or_create_session.return_value = SessionEntry(
+        session_key="agent:main:telegram:dm:12345",
+        session_id="sess-timeout",
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        platform=Platform.TELEGRAM,
+        chat_type="dm",
+    )
+    runner.session_store.load_transcript.return_value = _make_history(6, content_size=400)
+    runner.session_store.has_any_sessions.return_value = True
+    runner.session_store.rewrite_transcript = MagicMock()
+    runner.session_store.append_to_transcript = MagicMock()
+    runner._running_agents = {}
+    runner._pending_messages = {}
+    runner._pending_approvals = {}
+    runner._session_db = None
+    runner._is_user_authorized = lambda _source: True
+    runner._set_session_env = lambda _context: None
+    runner._run_agent = AsyncMock(
+        return_value={
+            "final_response": "ok",
+            "messages": [],
+            "tools": [],
+            "history_offset": 0,
+            "last_prompt_tokens": 0,
+        }
+    )
+
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "fake"})
+    monkeypatch.setattr(
+        "agent.model_metadata.get_model_context_length",
+        lambda *_args, **_kwargs: 100,
+    )
+
+    event = MessageEvent(
+        text="hello",
+        source=SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="12345",
+            chat_type="dm",
+            user_id="12345",
+        ),
+        message_id="1",
+    )
+
+    started = time.monotonic()
+    result = await runner._handle_message(event)
+    elapsed = time.monotonic() - started
+
+    assert result == "ok"
+    assert elapsed < 0.15
+    assert runner._run_agent.await_count == 1
+    assert runner._hygiene_compression_failure_cooldowns["sess-timeout"] > time.time()
+    timeout_warnings = [s for s in adapter.sent if "Context compression timed out" in s["content"]]
+    assert len(timeout_warnings) == 1
+    # The timed-out worker may still be finishing in the thread pool, so the
+    # gateway must not close its resources from underneath it.
+    SlowCompressAgent.last_instance.close.assert_not_called()
 
 
 @pytest.mark.asyncio
