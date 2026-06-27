@@ -1908,6 +1908,70 @@ async def fs_default_cwd():
     return {"cwd": cwd, "branch": _fs_git_branch(cwd)}
 
 
+def _read_status_gateway_runtime_sync(
+    gateway_running: bool,
+    gateway_pid,
+    remote_health_body: dict | None,
+) -> Dict[str, Any]:
+    """Blocking gateway runtime reads for /api/status — run via asyncio.to_thread."""
+    gateway_state = None
+    gateway_platforms: dict = {}
+    gateway_exit_reason = None
+    gateway_updated_at = None
+    configured_gateway_platforms: set[str] | None = None
+    try:
+        from gateway.config import load_gateway_config
+
+        gateway_config = load_gateway_config()
+        configured_gateway_platforms = {
+            platform.value for platform in gateway_config.get_connected_platforms()
+        }
+    except Exception:
+        configured_gateway_platforms = None
+
+    local_runtime = read_runtime_status()
+    runtime = local_runtime
+    if runtime is None and remote_health_body and remote_health_body.get("gateway_state"):
+        runtime = remote_health_body
+    if not gateway_running and local_runtime is not None:
+        runtime_pid = get_runtime_status_running_pid(local_runtime)
+        if runtime_pid is not None:
+            gateway_running = True
+            gateway_pid = runtime_pid
+
+    if runtime:
+        gateway_state = runtime.get("gateway_state")
+        gateway_platforms = runtime.get("platforms") or {}
+        if configured_gateway_platforms is not None:
+            gateway_platforms = {
+                key: value
+                for key, value in gateway_platforms.items()
+                if key in configured_gateway_platforms
+            }
+        gateway_exit_reason = runtime.get("exit_reason")
+        gateway_updated_at = runtime.get("updated_at")
+        if not gateway_running:
+            gateway_state = gateway_state if gateway_state in {"stopped", "startup_failed"} else "stopped"
+            gateway_platforms = {}
+        elif gateway_running and remote_health_body is not None:
+            if gateway_state in {None, "stopped"}:
+                gateway_state = "running"
+
+    if gateway_running and gateway_state is None and remote_health_body is not None:
+        gateway_state = "running"
+
+    return {
+        "gateway_running": gateway_running,
+        "gateway_pid": gateway_pid,
+        "gateway_state": gateway_state,
+        "gateway_platforms": gateway_platforms,
+        "gateway_exit_reason": gateway_exit_reason,
+        "gateway_updated_at": gateway_updated_at,
+        "runtime": runtime,
+        "configured_gateway_platforms": configured_gateway_platforms,
+    }
+
+
 @app.get("/api/status")
 async def get_status(profile: Optional[str] = None):
     status_scope = None
@@ -1926,7 +1990,7 @@ async def get_status(profile: Optional[str] = None):
         status_scope.__enter__()
 
     try:
-        current_ver, latest_ver = check_config_version()
+        current_ver, latest_ver = await asyncio.to_thread(check_config_version)
         # --- Gateway liveness detection ---
         # Try local PID check first (same-host).  If that fails and a remote
         # GATEWAY_HEALTH_URL is configured, probe the gateway over HTTP so the
@@ -1951,58 +2015,20 @@ async def get_status(profile: Optional[str] = None):
         gateway_exit_reason = None
         gateway_updated_at = None
         configured_gateway_platforms: set[str] | None = None
-        try:
-            from gateway.config import load_gateway_config
-
-            gateway_config = load_gateway_config()
-            configured_gateway_platforms = {
-                platform.value for platform in gateway_config.get_connected_platforms()
-            }
-        except Exception:
-            configured_gateway_platforms = None
-
-        # Prefer the detailed health endpoint response (has full state) when the
-        # local runtime status file is absent or stale (cross-container).
-        local_runtime = read_runtime_status()
-        runtime = local_runtime
-        if runtime is None and remote_health_body and remote_health_body.get("gateway_state"):
-            runtime = remote_health_body
-        # The runtime-status PID fallback validates liveness with a local
-        # os.kill() probe, so it must only run against the LOCAL status file —
-        # never the remote health body, whose PID belongs to another host and
-        # is display-only. (Running os.kill on a remote PID is both wrong and
-        # trips the test live-system guard.)
-        if not gateway_running and local_runtime is not None:
-            runtime_pid = get_runtime_status_running_pid(local_runtime)
-            if runtime_pid is not None:
-                gateway_running = True
-                gateway_pid = runtime_pid
-
-        if runtime:
-            gateway_state = runtime.get("gateway_state")
-            gateway_platforms = runtime.get("platforms") or {}
-            if configured_gateway_platforms is not None:
-                gateway_platforms = {
-                    key: value
-                    for key, value in gateway_platforms.items()
-                    if key in configured_gateway_platforms
-                }
-            gateway_exit_reason = runtime.get("exit_reason")
-            gateway_updated_at = runtime.get("updated_at")
-            if not gateway_running:
-                gateway_state = gateway_state if gateway_state in {"stopped", "startup_failed"} else "stopped"
-                gateway_platforms = {}
-            elif gateway_running and remote_health_body is not None:
-                # The health probe confirmed the gateway is alive, but the local
-                # runtime status file may be stale (cross-container).  Override
-                # stopped/None state so the dashboard shows the correct badge.
-                if gateway_state in {None, "stopped"}:
-                    gateway_state = "running"
-
-        # If there was no runtime info at all but the health probe confirmed alive,
-        # ensure we still report the gateway as running (no shared volume scenario).
-        if gateway_running and gateway_state is None and remote_health_body is not None:
-            gateway_state = "running"
+        runtime_bundle = await asyncio.to_thread(
+            _read_status_gateway_runtime_sync,
+            gateway_running,
+            gateway_pid,
+            remote_health_body,
+        )
+        gateway_running = runtime_bundle["gateway_running"]
+        gateway_pid = runtime_bundle["gateway_pid"]
+        gateway_state = runtime_bundle["gateway_state"]
+        gateway_platforms = runtime_bundle["gateway_platforms"]
+        gateway_exit_reason = runtime_bundle["gateway_exit_reason"]
+        gateway_updated_at = runtime_bundle["gateway_updated_at"]
+        runtime = runtime_bundle["runtime"]
+        configured_gateway_platforms = runtime_bundle["configured_gateway_platforms"]
 
         # Read-only SessionDB scan — keep off the event loop so concurrent
         # /api/profiles/sessions work cannot stall this public liveness probe.
@@ -3121,6 +3147,65 @@ async def get_action_status(name: str, lines: int = 200):
     }
 
 
+class _SessionNotFoundError(Exception):
+    """Raised by sync session DB helpers; mapped to HTTP 404 in async handlers."""
+
+
+def _get_sessions_sync(
+    *,
+    limit: int,
+    offset: int,
+    min_messages: int,
+    archived: str,
+    order: str,
+    source: Optional[str],
+    exclude_sources: Optional[str],
+    cwd_prefix: Optional[str],
+    profile: Optional[str],
+    profile_name: Optional[str],
+) -> Dict[str, Any]:
+    """Blocking session list — run via asyncio.to_thread."""
+    db = _open_session_db_for_profile(profile)
+    try:
+        min_message_count = max(0, min_messages)
+        archived_only = archived == "only"
+        include_archived = archived == "include"
+        exclude_list = [s for s in (exclude_sources or "").split(",") if s.strip()]
+        sessions = db.list_sessions_rich(
+            source=source or None,
+            exclude_sources=exclude_list or None,
+            cwd_prefix=(cwd_prefix or None),
+            limit=limit,
+            offset=offset,
+            min_message_count=min_message_count,
+            include_archived=include_archived,
+            archived_only=archived_only,
+            order_by_last_active=order == "recent",
+        )
+        total = db.session_count(
+            source=source or None,
+            cwd_prefix=(cwd_prefix or None),
+            exclude_sources=exclude_list or None,
+            min_message_count=min_message_count,
+            include_archived=include_archived,
+            archived_only=archived_only,
+            exclude_children=True,
+        )
+        now = time.time()
+        for s in sessions:
+            s["is_active"] = (
+                s.get("ended_at") is None
+                and (now - s.get("last_active", s.get("started_at", 0))) < 300
+            )
+            if profile_name:
+                s["profile"] = profile_name
+                s["is_default_profile"] = profile_name == "default"
+            s["archived"] = bool(s.get("archived"))
+        return {"sessions": sessions, "total": total, "limit": limit, "offset": offset}
+    finally:
+        db.close()
+
+
 @app.get("/api/sessions")
 async def get_sessions(
     limit: int = 20,
@@ -3159,50 +3244,19 @@ async def get_sessions(
     if profile:
         profile_name, _ = _cron_profile_home(profile)
     try:
-        db = _open_session_db_for_profile(profile)
-        try:
-            min_message_count = max(0, min_messages)
-            archived_only = archived == "only"
-            include_archived = archived == "include"
-            # Optional source scoping: ``source`` includes a single class,
-            # ``exclude_sources`` (comma-separated) drops classes. The desktop
-            # uses these to split recents (exclude=cron) from the cron-jobs
-            # section (source=cron) into two independent lists.
-            exclude_list = [s for s in (exclude_sources or "").split(",") if s.strip()]
-            sessions = db.list_sessions_rich(
-                source=source or None,
-                exclude_sources=exclude_list or None,
-                cwd_prefix=(cwd_prefix or None),
-                limit=limit,
-                offset=offset,
-                min_message_count=min_message_count,
-                include_archived=include_archived,
-                archived_only=archived_only,
-                order_by_last_active=order == "recent",
-            )
-            total = db.session_count(
-                source=source or None,
-                cwd_prefix=(cwd_prefix or None),
-                exclude_sources=exclude_list or None,
-                min_message_count=min_message_count,
-                include_archived=include_archived,
-                archived_only=archived_only,
-                exclude_children=True,
-            )
-            now = time.time()
-            for s in sessions:
-                s["is_active"] = (
-                    s.get("ended_at") is None
-                    and (now - s.get("last_active", s.get("started_at", 0))) < 300
-                )
-                if profile_name:
-                    s["profile"] = profile_name
-                    s["is_default_profile"] = profile_name == "default"
-                # SQLite stores the flag as 0/1; expose a real JSON boolean.
-                s["archived"] = bool(s.get("archived"))
-            return {"sessions": sessions, "total": total, "limit": limit, "offset": offset}
-        finally:
-            db.close()
+        return await asyncio.to_thread(
+            _get_sessions_sync,
+            limit=limit,
+            offset=offset,
+            min_messages=min_messages,
+            archived=archived,
+            order=order,
+            source=source,
+            exclude_sources=exclude_sources,
+            cwd_prefix=cwd_prefix,
+            profile=profile,
+            profile_name=profile_name,
+        )
     except HTTPException:
         raise
     except Exception:
@@ -3312,6 +3366,47 @@ def _fetch_profiles_sessions_sync(
         "offset": offset,
         "errors": errors,
     }
+
+
+def _get_config_sync(profile: Optional[str]) -> Dict[str, Any]:
+    """Blocking config load — run via asyncio.to_thread."""
+    with _profile_scope(profile):
+        config = _normalize_config_for_web(load_config())
+    return {k: v for k, v in config.items() if not k.startswith("_")}
+
+
+def _list_profiles_sync() -> Dict[str, Any]:
+    """Blocking profile enumeration — run via asyncio.to_thread."""
+    return {"profiles": _profile_rows_cached()}
+
+
+def _get_session_detail_sync(session_id: str, profile: Optional[str]) -> Dict[str, Any]:
+    """Blocking session detail — run via asyncio.to_thread."""
+    db = _open_session_db_for_profile(profile)
+    try:
+        sid = db.resolve_session_id(session_id)
+        session = db.get_session(sid) if sid else None
+        if not session:
+            raise _SessionNotFoundError()
+        if profile:
+            session["profile"] = _cron_profile_home(profile)[0]
+        return session
+    finally:
+        db.close()
+
+
+def _get_session_messages_sync(session_id: str, profile: Optional[str]) -> Dict[str, Any]:
+    """Blocking transcript load for session resume — run via asyncio.to_thread."""
+    db = _open_session_db_for_profile(profile)
+    try:
+        sid = db.resolve_session_id(session_id)
+        if not sid:
+            raise _SessionNotFoundError()
+        sid = db.resolve_resume_session_id(sid)
+        messages = db.get_messages(sid)
+        return {"session_id": sid, "messages": messages}
+    finally:
+        db.close()
 
 
 @app.get("/api/profiles/sessions")
@@ -3725,10 +3820,7 @@ async def update_memory_provider_config(name: str, body: MemoryProviderConfigUpd
 
 @app.get("/api/config")
 async def get_config(profile: Optional[str] = None):
-    with _profile_scope(profile):
-        config = _normalize_config_for_web(load_config())
-    # Strip internal keys that the frontend shouldn't see or send back
-    return {k: v for k, v in config.items() if not k.startswith("_")}
+    return await asyncio.to_thread(_get_config_sync, profile)
 
 
 @app.get("/api/config/defaults")
@@ -7690,17 +7782,10 @@ def _open_session_db_for_profile(profile: Optional[str]):
 
 @app.get("/api/sessions/{session_id}")
 async def get_session_detail(session_id: str, profile: Optional[str] = None):
-    db = _open_session_db_for_profile(profile)
     try:
-        sid = db.resolve_session_id(session_id)
-        session = db.get_session(sid) if sid else None
-        if not session:
-            raise HTTPException(status_code=404, detail="Session not found")
-        if profile:
-            session["profile"] = _cron_profile_home(profile)[0]
-        return session
-    finally:
-        db.close()
+        return await asyncio.to_thread(_get_session_detail_sync, session_id, profile)
+    except _SessionNotFoundError:
+        raise HTTPException(status_code=404, detail="Session not found")
 
 
 
@@ -7718,16 +7803,10 @@ async def get_session_latest_descendant(session_id: str):
 
 @app.get("/api/sessions/{session_id}/messages")
 async def get_session_messages(session_id: str, profile: Optional[str] = None):
-    db = _open_session_db_for_profile(profile)
     try:
-        sid = db.resolve_session_id(session_id)
-        if not sid:
-            raise HTTPException(status_code=404, detail="Session not found")
-        sid = db.resolve_resume_session_id(sid)
-        messages = db.get_messages(sid)
-        return {"session_id": sid, "messages": messages}
-    finally:
-        db.close()
+        return await asyncio.to_thread(_get_session_messages_sync, session_id, profile)
+    except _SessionNotFoundError:
+        raise HTTPException(status_code=404, detail="Session not found")
 
 
 @app.delete("/api/sessions/{session_id}")
@@ -7914,16 +7993,70 @@ class CronJobUpdate(BaseModel):
 
 
 _CRON_PROFILE_LOCK = threading.RLock()
+_PROFILE_LIST_CACHE_LOCK = threading.RLock()
+_CRON_ALL_JOBS_CACHE_LOCK = threading.RLock()
+_PROFILE_LIST_CACHE_TTL_SECONDS = 30.0
+_CRON_ALL_JOBS_CACHE_TTL_SECONDS = 30.0
+_profile_list_cache_rows: Optional[List[Dict[str, Any]]] = None
+_profile_list_cache_expires_at: float = 0.0
+_cron_all_jobs_cache_rows: Optional[List[Dict[str, Any]]] = None
+_cron_all_jobs_cache_expires_at: float = 0.0
 
 
-def _cron_profile_dicts() -> List[Dict[str, Any]]:
-    """Return dashboard profile records, falling back to a directory scan."""
+def _clone_dict_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Shallow-clone cached response rows before returning them."""
+    return [dict(row) for row in rows]
+
+
+def _invalidate_profile_list_cache() -> None:
+    global _profile_list_cache_rows, _profile_list_cache_expires_at
+    with _PROFILE_LIST_CACHE_LOCK:
+        _profile_list_cache_rows = None
+        _profile_list_cache_expires_at = 0.0
+
+
+def _invalidate_cron_jobs_cache() -> None:
+    global _cron_all_jobs_cache_rows, _cron_all_jobs_cache_expires_at
+    with _CRON_ALL_JOBS_CACHE_LOCK:
+        _cron_all_jobs_cache_rows = None
+        _cron_all_jobs_cache_expires_at = 0.0
+
+
+def _invalidate_profile_and_cron_caches() -> None:
+    _invalidate_profile_list_cache()
+    _invalidate_cron_jobs_cache()
+
+
+def _load_profile_rows_uncached() -> List[Dict[str, Any]]:
+    """Blocking profile enumeration shared by /api/profiles and cron scans."""
     from hermes_cli import profiles as profiles_mod
     try:
         return [_profile_to_dict(p) for p in profiles_mod.list_profiles()]
     except Exception:
-        _log.exception("Failed to list profiles for cron dashboard; falling back to directory scan")
+        _log.exception("GET /api/profiles failed; falling back to profile directory scan")
         return _fallback_profile_dicts(profiles_mod)
+
+
+def _profile_rows_cached() -> List[Dict[str, Any]]:
+    """Return cached profile rows for a short TTL to avoid repeated dir scans."""
+    global _profile_list_cache_rows, _profile_list_cache_expires_at
+    with _PROFILE_LIST_CACHE_LOCK:
+        now = time.monotonic()
+        rows = _profile_list_cache_rows
+        if rows is not None and now < _profile_list_cache_expires_at:
+            return _clone_dict_rows(rows)
+        # Compute under the lock so only one thread pays the expensive
+        # list_profiles() scan on a cold cache; otherwise concurrent misses
+        # stampede the thread pool and recreate the original timeout storm.
+        rows = _load_profile_rows_uncached()
+        _profile_list_cache_rows = _clone_dict_rows(rows)
+        _profile_list_cache_expires_at = time.monotonic() + _PROFILE_LIST_CACHE_TTL_SECONDS
+        return _clone_dict_rows(_profile_list_cache_rows)
+
+
+def _cron_profile_dicts() -> List[Dict[str, Any]]:
+    """Return dashboard profile records from the shared short-lived cache."""
+    return _profile_rows_cached()
 
 
 def _cron_profile_home(profile: Optional[str]) -> Tuple[str, Path]:
@@ -7983,22 +8116,19 @@ def _call_cron_for_profile(profile: Optional[str], func_name: str, *args, **kwar
 
 
 def _find_cron_job_profile(job_id: str) -> Optional[str]:
-    for profile in _cron_profile_dicts():
-        name = str(profile.get("name") or "")
-        if not name:
-            continue
-        jobs = _call_cron_for_profile(name, "list_jobs", True)
-        if any(j.get("id") == job_id or j.get("name") == job_id for j in jobs):
-            return name
+    return _find_cron_job_profile_sync(job_id)
+
+
+def _find_cached_cron_job(job_id: str) -> Optional[Dict[str, Any]]:
+    """Find a cron job by id or name in the cached all-profiles view."""
+    for job in _list_cron_jobs_sync("all"):
+        if job.get("id") == job_id or job.get("name") == job_id:
+            return dict(job)
     return None
 
 
-@app.get("/api/cron/jobs")
-async def list_cron_jobs(profile: str = "all"):
-    requested = (profile or "all").strip()
-    if requested.lower() != "all":
-        return _call_cron_for_profile(requested, "list_jobs", True)
-
+def _list_all_cron_jobs_uncached() -> List[Dict[str, Any]]:
+    """Aggregate cron jobs across all profiles without using the TTL cache."""
     jobs: List[Dict[str, Any]] = []
     for item in _cron_profile_dicts():
         name = str(item.get("name") or "")
@@ -8011,37 +8141,66 @@ async def list_cron_jobs(profile: str = "all"):
     return jobs
 
 
-@app.get("/api/cron/jobs/{job_id}")
-async def get_cron_job(job_id: str, profile: Optional[str] = None):
-    selected = profile or _find_cron_job_profile(job_id)
+def _list_all_cron_jobs_cached() -> List[Dict[str, Any]]:
+    """Cache the expensive all-profiles cron scan for a short TTL."""
+    global _cron_all_jobs_cache_rows, _cron_all_jobs_cache_expires_at
+    with _CRON_ALL_JOBS_CACHE_LOCK:
+        now = time.monotonic()
+        rows = _cron_all_jobs_cache_rows
+        if rows is not None and now < _cron_all_jobs_cache_expires_at:
+            return _clone_dict_rows(rows)
+        # Same anti-thundering-herd rule as _profile_rows_cached(): serialize
+        # the miss so only one worker performs the 43-profile cron scan.
+        rows = _list_all_cron_jobs_uncached()
+        _cron_all_jobs_cache_rows = _clone_dict_rows(rows)
+        _cron_all_jobs_cache_expires_at = time.monotonic() + _CRON_ALL_JOBS_CACHE_TTL_SECONDS
+        return _clone_dict_rows(_cron_all_jobs_cache_rows)
+
+
+def _find_cron_job_profile_sync(job_id: str) -> Optional[str]:
+    """Scan all profiles for a cron job id — run via asyncio.to_thread."""
+    cached = _find_cached_cron_job(job_id)
+    return str(cached.get("profile") or "") if cached else None
+
+
+def _list_cron_jobs_sync(requested: str) -> List[Dict[str, Any]]:
+    """List cron jobs for one profile or all — run via asyncio.to_thread.
+
+    Desktop polls this endpoint aggressively. Each profile scan holds
+    ``_CRON_PROFILE_LOCK``, swaps cron module globals, and reads jobs.json
+    synchronously — when this ran inline it blocked the single uvicorn worker
+    and stalled /api/status liveness probes.
+    """
+    if requested.lower() != "all":
+        return _call_cron_for_profile(requested, "list_jobs", True)
+    return _list_all_cron_jobs_cached()
+
+
+def _get_cron_job_sync(job_id: str, profile: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Fetch one cron job — run via asyncio.to_thread. Returns None if missing."""
+    if not profile:
+        cached = _find_cached_cron_job(job_id)
+        if cached is not None:
+            return cached
+    selected = profile or _find_cron_job_profile_sync(job_id)
     if not selected:
-        raise HTTPException(status_code=404, detail="Job not found")
+        return None
     job = _call_cron_for_profile(selected, "get_job", job_id)
     if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
+        return None
     return job
 
 
-@app.get("/api/cron/jobs/{job_id}/runs")
-async def list_cron_job_runs(job_id: str, profile: Optional[str] = None, limit: int = 20):
-    """Run sessions produced by a cron job, newest first.
-
-    Cron runs are stored as ordinary sessions whose id is
-    ``cron_{job_id}_{timestamp}`` (see cron/scheduler.run_job). A job's history
-    is therefore every session whose id carries that prefix; ``source='cron'``
-    narrows it and the id prefix binds it to this job. Powers the run-history
-    list under each job in the desktop cron detail. Same row shape as
-    ``/api/sessions`` so the frontend can reuse SessionInfo.
-
-    Backed by ``SessionDB.list_cron_job_runs`` — a bounded ``[prefix, hi)``
-    id-range scan, not the compression-chain CTE used for the recents list,
-    so the cost scales with the requested window and not the (unbounded) total
-    cron history.
-    """
-    selected = profile or _find_cron_job_profile(job_id)
-    # job_id may be a human name; resolve to the canonical id used in run-session ids.
-    canonical = job_id
-    if selected:
+def _list_cron_job_runs_sync(
+    job_id: str,
+    profile: Optional[str],
+    limit: int,
+) -> Dict[str, Any]:
+    """Cron run history for a job — run via asyncio.to_thread."""
+    cached = None if profile else _find_cached_cron_job(job_id)
+    selected = profile or (str(cached.get("profile") or "") if cached else None) or _find_cron_job_profile_sync(job_id)
+    canonical = str(cached.get("id") or job_id) if cached else job_id
+    if selected and cached is None:
         job = _call_cron_for_profile(selected, "get_job", job_id)
         if job and job.get("id"):
             canonical = str(job["id"])
@@ -8068,10 +8227,43 @@ async def list_cron_job_runs(job_id: str, profile: Optional[str] = None, limit: 
         db.close()
 
 
+@app.get("/api/cron/jobs")
+async def list_cron_jobs(profile: str = "all"):
+    requested = (profile or "all").strip()
+    return await asyncio.to_thread(_list_cron_jobs_sync, requested)
+
+
+@app.get("/api/cron/jobs/{job_id}")
+async def get_cron_job(job_id: str, profile: Optional[str] = None):
+    job = await asyncio.to_thread(_get_cron_job_sync, job_id, profile)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
+
+
+@app.get("/api/cron/jobs/{job_id}/runs")
+async def list_cron_job_runs(job_id: str, profile: Optional[str] = None, limit: int = 20):
+    """Run sessions produced by a cron job, newest first.
+
+    Cron runs are stored as ordinary sessions whose id is
+    ``cron_{job_id}_{timestamp}`` (see cron/scheduler.run_job). A job's history
+    is therefore every session whose id carries that prefix; ``source='cron'``
+    narrows it and the id prefix binds it to this job. Powers the run-history
+    list under each job in the desktop cron detail. Same row shape as
+    ``/api/sessions`` so the frontend can reuse SessionInfo.
+
+    Backed by ``SessionDB.list_cron_job_runs`` — a bounded ``[prefix, hi)``
+    id-range scan, not the compression-chain CTE used for the recents list,
+    so the cost scales with the requested window and not the (unbounded) total
+    cron history.
+    """
+    return await asyncio.to_thread(_list_cron_job_runs_sync, job_id, profile, limit)
+
+
 @app.post("/api/cron/jobs")
 async def create_cron_job(body: CronJobCreate, profile: str = "default"):
     try:
-        return _call_cron_for_profile(
+        job = _call_cron_for_profile(
             profile,
             "create_job",
             prompt=body.prompt,
@@ -8080,6 +8272,8 @@ async def create_cron_job(body: CronJobCreate, profile: str = "default"):
             deliver=body.deliver,
             skills=body.skills,
         )
+        _invalidate_cron_jobs_cache()
+        return job
     except Exception as e:
         _log.exception("POST /api/cron/jobs failed")
         raise HTTPException(status_code=400, detail=str(e))
@@ -8124,6 +8318,7 @@ async def update_cron_job(job_id: str, body: CronJobUpdate, profile: Optional[st
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    _invalidate_cron_jobs_cache()
     return job
 
 
@@ -8135,6 +8330,7 @@ async def pause_cron_job(job_id: str, profile: Optional[str] = None):
     job = _call_cron_for_profile(selected, "pause_job", job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    _invalidate_cron_jobs_cache()
     return job
 
 
@@ -8146,6 +8342,7 @@ async def resume_cron_job(job_id: str, profile: Optional[str] = None):
     job = _call_cron_for_profile(selected, "resume_job", job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    _invalidate_cron_jobs_cache()
     return job
 
 
@@ -8157,6 +8354,7 @@ async def trigger_cron_job(job_id: str, profile: Optional[str] = None):
     job = _call_cron_for_profile(selected, "trigger_job", job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    _invalidate_cron_jobs_cache()
     return job
 
 
@@ -8171,6 +8369,7 @@ async def delete_cron_job(job_id: str, profile: Optional[str] = None):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not removed:
         raise HTTPException(status_code=404, detail="Job not found")
+    _invalidate_cron_jobs_cache()
     return {"ok": True}
 
 
@@ -10130,12 +10329,7 @@ def _disable_unselected_skills(profile_dir: Path, keep: List[str]) -> int:
 
 @app.get("/api/profiles")
 async def list_profiles_endpoint():
-    from hermes_cli import profiles as profiles_mod
-    try:
-        return {"profiles": [_profile_to_dict(p) for p in profiles_mod.list_profiles()]}
-    except Exception:
-        _log.exception("GET /api/profiles failed; falling back to profile directory scan")
-        return {"profiles": _fallback_profile_dicts(profiles_mod)}
+    return await asyncio.to_thread(_list_profiles_sync)
 
 
 @app.post("/api/profiles")
@@ -10240,6 +10434,7 @@ async def create_profile_endpoint(body: ProfileCreate):
             )
             hub_installs.append({"identifier": ident, "pid": None})
 
+    _invalidate_profile_and_cron_caches()
     return {
         "ok": True,
         "name": body.name,
@@ -10363,6 +10558,7 @@ async def rename_profile_endpoint(name: str, body: ProfileRename):
     except Exception as e:
         _log.exception("PATCH /api/profiles/%s failed", name)
         raise HTTPException(status_code=500, detail=str(e))
+    _invalidate_profile_and_cron_caches()
     return {"ok": True, "name": body.new_name, "path": str(path)}
 
 
@@ -10381,6 +10577,7 @@ async def delete_profile_endpoint(name: str):
     except Exception as e:
         _log.exception("DELETE /api/profiles/%s failed", name)
         raise HTTPException(status_code=500, detail=str(e))
+    _invalidate_profile_and_cron_caches()
     return {"ok": True, "path": str(path)}
 
 

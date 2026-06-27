@@ -34,6 +34,14 @@ from typing import List, Optional, Tuple
 from agent.skill_utils import is_excluded_skill_path
 
 _PROFILE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+_ALIAS_WRAPPER_MAX_BYTES = 1024 * 1024
+_ALIAS_WRAPPER_READ_BYTES = 4096
+_SKILL_COUNT_PRUNE_DIRS: frozenset[str] = frozenset({
+    ".venv",
+    "venv",
+    "node_modules",
+    "__pycache__",
+})
 
 # Directories bootstrapped inside every new profile
 _PROFILE_DIRS = [
@@ -517,7 +525,13 @@ def find_alias_for_profile(profile_name: str) -> Optional[str]:
         if not is_windows and entry.suffix:
             continue
         try:
-            content = entry.read_text()
+            # Wrapper aliases are tiny text scripts. Never decode whole binaries
+            # from ~/.local/bin: some users keep large standalone executables
+            # there, and reading them as UTF-8 dominated profile-list latency.
+            if entry.stat().st_size > _ALIAS_WRAPPER_MAX_BYTES:
+                continue
+            with entry.open("r", encoding="utf-8") as fh:
+                content = fh.read(_ALIAS_WRAPPER_READ_BYTES)
         except (OSError, UnicodeDecodeError):
             continue
         if needle not in content:
@@ -650,7 +664,11 @@ def _count_skills(profile_dir: Path) -> int:
     if not skills_dir.is_dir():
         return 0
     count = 0
-    for md in skills_dir.rglob("SKILL.md"):
+    for root, dirs, files in os.walk(skills_dir):
+        dirs[:] = [d for d in dirs if d not in _SKILL_COUNT_PRUNE_DIRS]
+        if "SKILL.md" not in files:
+            continue
+        md = Path(root) / "SKILL.md"
         if is_excluded_skill_path(md):
             continue
         count += 1
