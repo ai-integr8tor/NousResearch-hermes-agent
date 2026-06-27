@@ -1438,9 +1438,9 @@ def init_agent(
         _agent_cfg,
         platform,
     )
-    agent._stream_context_scrubber = StreamingContextScrubber(
-        enabled=agent._scrub_recall_output
-    )
+    # Stream delta callbacks are always observer-facing, so recalled
+    # context must be scrubbed regardless of platform defaults.
+    agent._stream_context_scrubber = StreamingContextScrubber()
     agent._memory_nudge_interval = 10
     agent._turns_since_memory = 0
     agent._iters_since_skill = 0

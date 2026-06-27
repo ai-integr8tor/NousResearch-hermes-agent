@@ -36,6 +36,7 @@ from agent.turn_context import build_turn_context
 from agent.turn_retry_state import TurnRetryState
 from agent.memory_manager import (
     build_memory_context_block,
+    sanitize_recall_payload,
     strip_injected_recall_blocks,
 )
 from agent.message_sanitization import (
@@ -1208,7 +1209,7 @@ def run_conversation(
                             request_messages = api_kwargs.get("input")
                         if not isinstance(request_messages, list):
                             request_messages = api_messages
-                        _hook_request_messages = (
+                        _hook_request_messages = sanitize_recall_payload(
                             list(request_messages)
                             if isinstance(request_messages, list)
                             else []
@@ -1221,7 +1222,9 @@ def run_conversation(
                             api_request_id=api_request_id,
                             session_id=agent.session_id or "",
                             user_message=original_user_message,
-                            conversation_history=list(messages),
+                            conversation_history=sanitize_recall_payload(
+                                list(messages)
+                            ),
                             platform=agent.platform or "",
                             model=agent.model,
                             provider=agent.provider,

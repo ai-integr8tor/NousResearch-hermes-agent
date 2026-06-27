@@ -148,6 +148,7 @@ from tools.browser_tool import cleanup_browser
 from agent.memory_manager import (
     MemoryManager,
     sanitize_context,
+    sanitize_recall_payload,
     strip_injected_recall_blocks,
 )
 from agent.error_classifier import FailoverReason
@@ -1846,9 +1847,13 @@ class AIAgent:
                 # base64 images would bloat the session DB and aren't useful
                 # for cross-session replay.
                 if _is_multimodal_tool_result(content):
-                    content = _multimodal_text_summary(content)
+                    content = sanitize_recall_payload(_multimodal_text_summary(content))
                 elif isinstance(content, list):
                     # List of OpenAI-style content parts: strip images, keep text.
+                    cleaned_parts = sanitize_recall_payload(content)
+                    if cleaned_parts != content:
+                        msg["content"] = cleaned_parts
+                    content = cleaned_parts
                     _txt = []
                     for p in content:
                         if isinstance(p, dict) and p.get("type") == "text":
@@ -1856,14 +1861,19 @@ class AIAgent:
                         elif isinstance(p, dict) and p.get("type") in {"image", "image_url", "input_image"}:
                             _txt.append("[screenshot]")
                     content = "\n".join(_txt) if _txt else None
+                elif isinstance(content, str):
+                    cleaned_content = strip_injected_recall_blocks(content)
+                    if cleaned_content != content:
+                        msg["content"] = cleaned_content
+                        content = cleaned_content
                 tool_calls_data = None
                 if hasattr(msg, "tool_calls") and isinstance(msg.tool_calls, list) and msg.tool_calls:
-                    tool_calls_data = [
+                    tool_calls_data = sanitize_recall_payload([
                         {"name": tc.function.name, "arguments": tc.function.arguments}
                         for tc in msg.tool_calls
-                    ]
+                    ])
                 elif isinstance(msg.get("tool_calls"), list):
-                    tool_calls_data = msg["tool_calls"]
+                    tool_calls_data = sanitize_recall_payload(msg["tool_calls"])
                 self._session_db.append_message(
                     session_id=self.session_id,
                     role=role,
@@ -1872,14 +1882,34 @@ class AIAgent:
                     tool_calls=tool_calls_data,
                     tool_call_id=msg.get("tool_call_id"),
                     finish_reason=msg.get("finish_reason"),
-                    reasoning=msg.get("reasoning") if role == "assistant" else None,
-                    reasoning_content=msg.get("reasoning_content") if role == "assistant" else None,
-                    reasoning_details=msg.get("reasoning_details") if role == "assistant" else None,
+                    reasoning=(
+                        sanitize_recall_payload(msg.get("reasoning"))
+                        if role == "assistant"
+                        else None
+                    ),
+                    reasoning_content=(
+                        sanitize_recall_payload(msg.get("reasoning_content"))
+                        if role == "assistant"
+                        else None
+                    ),
+                    reasoning_details=(
+                        sanitize_recall_payload(msg.get("reasoning_details"))
+                        if role == "assistant"
+                        else None
+                    ),
                     thinking_signature_invalidated=(
                         msg.get("_thinking_signature_invalidated") if role == "assistant" else None
                     ),
-                    codex_reasoning_items=msg.get("codex_reasoning_items") if role == "assistant" else None,
-                    codex_message_items=msg.get("codex_message_items") if role == "assistant" else None,
+                    codex_reasoning_items=(
+                        sanitize_recall_payload(msg.get("codex_reasoning_items"))
+                        if role == "assistant"
+                        else None
+                    ),
+                    codex_message_items=(
+                        sanitize_recall_payload(msg.get("codex_message_items"))
+                        if role == "assistant"
+                        else None
+                    ),
                     timestamp=_row_timestamp,
                 )
                 msg[_DB_PERSISTED_MARKER] = True
@@ -2359,7 +2389,7 @@ class AIAgent:
 
     @classmethod
     def _sanitize_hook_payload(cls, value: Any) -> Any:
-        payload = cls._hook_jsonable(value)
+        payload = sanitize_recall_payload(cls._hook_jsonable(value))
         limit = cls._hook_payload_max_chars()
         try:
             encoded = json.dumps(payload, ensure_ascii=False, default=str)
@@ -2367,7 +2397,9 @@ class AIAgent:
             return str(payload)[:limit]
         if len(encoded) <= limit:
             return payload
-        payload = cls._hook_jsonable(value, max_string=1000, max_sequence=50)
+        payload = sanitize_recall_payload(
+            cls._hook_jsonable(value, max_string=1000, max_sequence=50)
+        )
         try:
             encoded = json.dumps(payload, ensure_ascii=False, default=str)
         except Exception:
@@ -2443,18 +2475,48 @@ class AIAgent:
         return normalized
 
     def _sanitize_assistant_message_for_hook(self, assistant_message: Any) -> Any:
+        safe_tool_calls = sanitize_recall_payload(
+            getattr(assistant_message, "tool_calls", None)
+        )
         return SimpleNamespace(
             role=getattr(assistant_message, "role", "assistant"),
-            content=str(getattr(assistant_message, "content", "") or "") or None,
-            tool_calls=self._sanitize_tool_calls_for_hook(
-                getattr(assistant_message, "tool_calls", None)
+            content=(
+                str(
+                    sanitize_recall_payload(
+                        getattr(assistant_message, "content", "") or ""
+                    )
+                )
+                or None
             ),
-            reasoning=str(getattr(assistant_message, "reasoning", "") or "") or None,
-            reasoning_content=str(getattr(assistant_message, "reasoning_content", "") or "") or None,
-            reasoning_details=getattr(assistant_message, "reasoning_details", None),
-            anthropic_content_blocks=getattr(assistant_message, "anthropic_content_blocks", None),
-            codex_message_items=getattr(assistant_message, "codex_message_items", None),
-            codex_reasoning_items=getattr(assistant_message, "codex_reasoning_items", None),
+            tool_calls=self._sanitize_tool_calls_for_hook(safe_tool_calls),
+            reasoning=(
+                str(
+                    sanitize_recall_payload(
+                        getattr(assistant_message, "reasoning", "") or ""
+                    )
+                )
+                or None
+            ),
+            reasoning_content=(
+                str(
+                    sanitize_recall_payload(
+                        getattr(assistant_message, "reasoning_content", "") or ""
+                    )
+                )
+                or None
+            ),
+            reasoning_details=sanitize_recall_payload(
+                getattr(assistant_message, "reasoning_details", None)
+            ),
+            anthropic_content_blocks=sanitize_recall_payload(
+                getattr(assistant_message, "anthropic_content_blocks", None)
+            ),
+            codex_message_items=sanitize_recall_payload(
+                getattr(assistant_message, "codex_message_items", None)
+            ),
+            codex_reasoning_items=sanitize_recall_payload(
+                getattr(assistant_message, "codex_reasoning_items", None)
+            ),
         )
 
     def _invoke_api_request_error_hook(
@@ -2833,7 +2895,7 @@ class AIAgent:
             return
         targets = []
         for path in _extract_file_mutation_targets(tool_name, args):
-            safe_path = str(path).strip()
+            safe_path = str(sanitize_recall_payload(path)).strip()
             if safe_path:
                 targets.append(safe_path)
         if not targets:

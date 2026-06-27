@@ -25,7 +25,7 @@ import threading
 import time
 from pathlib import Path
 
-from agent.memory_manager import sanitize_context
+from agent.memory_manager import sanitize_context, sanitize_recall_payload
 from hermes_constants import get_hermes_home
 from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar
 
@@ -4091,7 +4091,9 @@ class SessionDB:
                 msg["tool_name"] = row["tool_name"]
             if row["tool_calls"]:
                 try:
-                    msg["tool_calls"] = json.loads(row["tool_calls"])
+                    msg["tool_calls"] = sanitize_recall_payload(
+                        json.loads(row["tool_calls"])
+                    )
                 except (json.JSONDecodeError, TypeError):
                     logger.warning("Failed to deserialize tool_calls in conversation replay, falling back to []")
                     msg["tool_calls"] = []
@@ -4111,12 +4113,16 @@ class SessionDB:
                 if row["finish_reason"]:
                     msg["finish_reason"] = row["finish_reason"]
                 if row["reasoning"]:
-                    msg["reasoning"] = row["reasoning"]
+                    msg["reasoning"] = sanitize_recall_payload(row["reasoning"])
                 if row["reasoning_content"] is not None:
-                    msg["reasoning_content"] = row["reasoning_content"]
+                    msg["reasoning_content"] = sanitize_recall_payload(
+                        row["reasoning_content"]
+                    )
                 if row["reasoning_details"]:
                     try:
-                        msg["reasoning_details"] = json.loads(row["reasoning_details"])
+                        msg["reasoning_details"] = sanitize_recall_payload(
+                            json.loads(row["reasoning_details"])
+                        )
                     except (json.JSONDecodeError, TypeError):
                         logger.warning("Failed to deserialize reasoning_details, falling back to None")
                         msg["reasoning_details"] = None
@@ -4124,13 +4130,17 @@ class SessionDB:
                     msg["_thinking_signature_invalidated"] = True
                 if row["codex_reasoning_items"]:
                     try:
-                        msg["codex_reasoning_items"] = json.loads(row["codex_reasoning_items"])
+                        msg["codex_reasoning_items"] = sanitize_recall_payload(
+                            json.loads(row["codex_reasoning_items"])
+                        )
                     except (json.JSONDecodeError, TypeError):
                         logger.warning("Failed to deserialize codex_reasoning_items, falling back to None")
                         msg["codex_reasoning_items"] = None
                 if row["codex_message_items"]:
                     try:
-                        msg["codex_message_items"] = json.loads(row["codex_message_items"])
+                        msg["codex_message_items"] = sanitize_recall_payload(
+                            json.loads(row["codex_message_items"])
+                        )
                     except (json.JSONDecodeError, TypeError):
                         logger.warning("Failed to deserialize codex_message_items, falling back to None")
                         msg["codex_message_items"] = None

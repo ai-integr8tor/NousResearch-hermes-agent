@@ -639,6 +639,7 @@ def _sanitize_tool_error(error_msg: str) -> str:
     sanitized = _TOOL_ERROR_FENCE_OPEN_RE.sub("", sanitized)
     sanitized = _TOOL_ERROR_FENCE_CLOSE_RE.sub("", sanitized)
     sanitized = _TOOL_ERROR_CDATA_RE.sub("", sanitized)
+    sanitized = sanitize_recall_payload(sanitized)
     if len(sanitized) > _TOOL_ERROR_MAX_LEN:
         sanitized = sanitized[:_TOOL_ERROR_MAX_LEN - 3] + "..."
     return f"[TOOL_ERROR] {sanitized}"
