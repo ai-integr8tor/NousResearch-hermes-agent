@@ -341,9 +341,21 @@ const ACTIVE_HERMES_ROOT = path.join(HERMES_HOME, 'hermes-agent')
 // VENV_ROOT — venv lives inside the repo, exactly like install.ps1 does it.
 const VENV_ROOT = path.join(ACTIVE_HERMES_ROOT, 'venv')
 // SIDECAR_DIR — the hermes-eats-world sidecar (Windows UI-automation engine).
-// The composer's "attach app/window" picker shells out to its CLI. Override
-// with HERMES_SIDECAR_DIR; defaults to ~/hermes-eats-world.
-const SIDECAR_DIR = process.env.HERMES_SIDECAR_DIR || path.join(app.getPath('home'), 'hermes-eats-world')
+// The composer's "attach app/window" picker shells out to its CLI. Resolution:
+//   1. HERMES_SIDECAR_DIR (explicit override)
+//   2. packaged builds: the copy staged into resources at build time
+//      (scripts/stage-sidecar.cjs) — so a shipped app is self-contained and
+//      doesn't depend on a user-managed ~/hermes-eats-world checkout
+//   3. dev / fallback: the working copy at ~/hermes-eats-world
+function resolveSidecarDir() {
+  if (process.env.HERMES_SIDECAR_DIR) return process.env.HERMES_SIDECAR_DIR
+  if (app.isPackaged && process.resourcesPath) {
+    const bundled = path.join(process.resourcesPath, 'native-deps', 'hermes-eats-world')
+    if (directoryExists(bundled)) return bundled
+  }
+  return path.join(app.getPath('home'), 'hermes-eats-world')
+}
+const SIDECAR_DIR = resolveSidecarDir()
 // BOOTSTRAP_COMPLETE_MARKER — written by the first-launch bootstrap runner
 // (Phase 1D) after install.ps1 has completed all stages and the user has
 // finished initial configuration. Presence of this marker means the install
