@@ -577,3 +577,89 @@ def test_moa_facade_reruns_references_on_new_turn(monkeypatch, tmp_path):
 
     # 2 references × 2 distinct turns = 4 reference runs.
     assert len(ref_runs) == 4
+
+
+
+def test_moa_filters_failed_references_from_private_guidance(monkeypatch):
+    """Failed reference sentinel text must not be injected into aggregator guidance."""
+    from agent import moa_loop
+
+    reference_outputs = [
+        ("good:ok", "useful advice"),
+        ("bad:timeout", "[failed: timed out after 30s]"),
+    ]
+    captured = {}
+
+    def fake_call_llm(**kwargs):
+        if kwargs["task"] == "moa_aggregator":
+            captured["prompt"] = kwargs["messages"][0]["content"]
+        return _response("synthesis")
+
+    monkeypatch.setattr(moa_loop, "_run_references_parallel", lambda *a, **k: reference_outputs)
+    monkeypatch.setattr(moa_loop, "call_llm", fake_call_llm)
+    monkeypatch.setattr(moa_loop, "_extract_text", lambda _r: "synthesis")
+
+    guidance = moa_loop.aggregate_moa_context(
+        user_prompt="question",
+        api_messages=[{"role": "user", "content": "question"}],
+        reference_models=[{"provider": "good", "model": "ok"}, {"provider": "bad", "model": "timeout"}],
+        aggregator={"provider": "agg", "model": "model"},
+        reference_timeout=120,
+        degraded_reference_policy="loud",
+    )
+
+    combined = captured["prompt"] + "\n" + guidance
+    assert "[failed: timed out" not in combined
+    assert "useful advice" in combined
+    assert "[MoA degraded: reference failed or timed out: bad:timeout]" in combined
+    assert "[Mixture of Agents" not in guidance
+
+
+def test_moa_facade_filters_failed_references_from_user_prompt(monkeypatch, tmp_path):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    (home / "config.yaml").write_text(
+        """
+moa:
+  default_preset: review
+  presets:
+    review:
+      reference_timeout: 120
+      degraded_reference_policy: loud
+      reference_models:
+        - provider: good
+          model: ok
+        - provider: bad
+          model: timeout
+      aggregator:
+        provider: agg
+        model: model
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(home))
+
+    from agent import moa_loop
+    from agent.moa_loop import MoAChatCompletions
+
+    reference_outputs = [
+        ("good:ok", "useful advice"),
+        ("bad:timeout", "[failed: timed out after 30s]"),
+    ]
+    captured = {}
+
+    def fake_call_llm(**kwargs):
+        if kwargs["task"] == "moa_aggregator":
+            captured["messages"] = kwargs["messages"]
+        return _response("final")
+
+    monkeypatch.setattr(moa_loop, "_run_references_parallel", lambda *a, **k: reference_outputs)
+    monkeypatch.setattr(moa_loop, "call_llm", fake_call_llm)
+
+    MoAChatCompletions("review").create(messages=[{"role": "user", "content": "question"}])
+
+    user_message = captured["messages"][-1]["content"]
+    assert "[failed: timed out" not in user_message
+    assert "useful advice" in user_message
+    assert "[MoA degraded: reference failed or timed out: bad:timeout]" in user_message
+    assert "[Mixture of Agents reference context]" not in user_message

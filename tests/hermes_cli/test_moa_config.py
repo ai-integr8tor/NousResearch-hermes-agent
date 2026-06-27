@@ -203,3 +203,26 @@ def test_moa_provider_rejected_case_insensitive():
 
     assert cfg["presets"]["p"]["aggregator"]["provider"] != "moa"
     assert cfg["presets"]["p"]["aggregator"] == DEFAULT_MOA_AGGREGATOR
+
+
+
+def test_normalize_moa_config_supports_reference_timeout_and_degraded_policy():
+    cfg = normalize_moa_config(
+        {
+            "presets": {
+                "deep": {
+                    "reference_timeout": "240",
+                    "degraded_reference_policy": "silent",
+                },
+                "broken": {
+                    "reference_timeout": "9999",
+                    "degraded_reference_policy": "nonsense",
+                },
+            }
+        }
+    )
+
+    assert cfg["presets"]["deep"]["reference_timeout"] == 240.0
+    assert cfg["presets"]["deep"]["degraded_reference_policy"] == "silent"
+    assert cfg["presets"]["broken"]["reference_timeout"] == 300.0
+    assert cfg["presets"]["broken"]["degraded_reference_policy"] == "loud"

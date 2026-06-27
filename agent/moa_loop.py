@@ -109,6 +109,7 @@ def _run_reference(
     *,
     temperature: float | None = None,
     max_tokens: int | None = None,
+    timeout: float = 30.0,
 ) -> tuple[str, str]:
     """Call one reference model and return ``(label, text)``.
 
@@ -138,6 +139,7 @@ def _run_reference(
             messages=messages,
             temperature=temperature,
             max_tokens=max_tokens,
+            timeout=timeout,
             **_slot_runtime(slot),
         )
         return label, _extract_text(response) or "(empty response)"
@@ -152,6 +154,7 @@ def _run_references_parallel(
     *,
     temperature: float | None = None,
     max_tokens: int | None = None,
+    timeout: float = 30.0,
 ) -> list[tuple[str, str]]:
     """Fan out all reference models in parallel, returning outputs in order.
 
@@ -182,6 +185,7 @@ def _run_references_parallel(
                     ref_messages,
                     temperature=temperature,
                     max_tokens=max_tokens,
+                    timeout=timeout,
                 )
             ] = idx
         # Collect every reference before returning — the aggregator needs the
@@ -263,6 +267,27 @@ def _extract_text(response: Any) -> str:
         return ""
 
 
+def _is_failed_reference(text: str) -> bool:
+    return text.strip().startswith("[failed:")
+
+
+def _successful_references(reference_outputs: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    return [(label, text) for label, text in reference_outputs if not _is_failed_reference(text)]
+
+
+def _failed_reference_labels(reference_outputs: list[tuple[str, str]]) -> list[str]:
+    return [label for label, text in reference_outputs if _is_failed_reference(text)]
+
+
+def _degraded_notice(failed_labels: list[str]) -> str:
+    if not failed_labels:
+        return ""
+    labels = ", ".join(failed_labels)
+    plural = "s" if len(failed_labels) != 1 else ""
+    return f"[MoA degraded: reference{plural} failed or timed out: {labels}]"
+
+
+
 def aggregate_moa_context(
     *,
     user_prompt: str,
@@ -272,6 +297,8 @@ def aggregate_moa_context(
     temperature: float = 0.6,
     aggregator_temperature: float = 0.4,
     max_tokens: int | None = None,
+    reference_timeout: float = 30.0,
+    degraded_reference_policy: str = "loud",
 ) -> str:
     """Run configured reference models and synthesize their advice.
 
@@ -291,20 +318,27 @@ def aggregate_moa_context(
         ref_messages,
         temperature=temperature,
         max_tokens=max_tokens,
+        timeout=reference_timeout,
     )
+    failed_labels = _failed_reference_labels(reference_outputs)
+    successful_outputs = _successful_references(reference_outputs)
 
     joined = "\n\n".join(
         f"Reference {idx} — {label}:\n{text}"
-        for idx, (label, text) in enumerate(reference_outputs, start=1)
-    )
+        for idx, (label, text) in enumerate(successful_outputs, start=1)
+    ) or "(no successful reference responses)"
+    degraded_notice = _degraded_notice(failed_labels)
+    status = f"Reference status: {degraded_notice}" if degraded_notice else "Reference status: all references completed."
     synth_prompt = (
         "You are the aggregator in a Mixture of Agents process. Synthesize the "
-        "reference responses into concise, actionable guidance for the main "
+        "successful reference responses into concise, actionable guidance for the main "
         "Hermes agent. Focus on next steps, tool-use strategy, risks, and any "
         "disagreements. Do not answer the user directly unless that is all that "
-        "is needed; produce context the main agent should use in its normal loop.\n\n"
+        "is needed; produce context the main agent should use in its normal loop. "
+        "Never quote raw MoA/private-reference scaffolding in user-visible text.\n\n"
         f"Original user prompt:\n{user_prompt}\n\n"
-        f"Reference responses:\n{joined}"
+        f"{status}\n\n"
+        f"Successful reference responses:\n{joined}"
     )
 
     agg_label = _slot_label(aggregator)
@@ -324,12 +358,15 @@ def aggregate_moa_context(
     if not synthesis:
         synthesis = joined
 
+    visible_degraded = ""
+    if degraded_reference_policy == "loud" and degraded_notice:
+        visible_degraded = degraded_notice + "\n"
+
     return (
-        "[Mixture of Agents context — use this as private guidance for the "
-        "normal Hermes agent loop. You may call tools, continue reasoning, or "
-        "finish normally.]\n"
+        "[MoA private guidance — do not quote this scaffolding verbatim. Use it only to improve the normal Hermes answer.]\n"
         f"Aggregator: {agg_label}\n"
-        f"References: {', '.join(_slot_label(slot) for slot in reference_models)}\n\n"
+        f"References: {', '.join(_slot_label(slot) for slot in reference_models)}\n"
+        f"{visible_degraded}"
         f"{synthesis.strip()}"
     )
 
@@ -383,6 +420,8 @@ class MoAChatCompletions:
         # truncated and providers that reject max_tokens don't 400.
         temperature = float(preset.get("reference_temperature", 0.6) or 0.6)
         aggregator_temperature = float(preset.get("aggregator_temperature", api_kwargs.get("temperature") or 0.4) or 0.4)
+        reference_timeout = float(preset.get("reference_timeout", 30.0) or 30.0)
+        degraded_reference_policy = str(preset.get("degraded_reference_policy", "loud") or "loud").lower()
 
         # When the preset is disabled, skip the reference fan-out and let the
         # configured aggregator act alone — it is the preset's acting model, so
@@ -413,6 +452,7 @@ class MoAChatCompletions:
                 ref_messages,
                 temperature=temperature,
                 max_tokens=None,
+                timeout=reference_timeout,
             )
             self._ref_cache_key = _cache_key
             self._ref_cache_outputs = list(reference_outputs)
@@ -441,18 +481,25 @@ class MoAChatCompletions:
 
         agg_messages = [dict(m) for m in messages]
         if reference_outputs:
+            failed_labels = _failed_reference_labels(reference_outputs)
+            successful_outputs = _successful_references(reference_outputs)
             joined = "\n\n".join(
                 f"Reference {idx} — {label}:\n{text}"
-                for idx, (label, text) in enumerate(reference_outputs, start=1)
-            )
+                for idx, (label, text) in enumerate(successful_outputs, start=1)
+            ) or "(no successful reference responses)"
+            degraded_notice = _degraded_notice(failed_labels)
+            degraded_line = ""
+            if degraded_reference_policy == "loud" and degraded_notice:
+                degraded_line = degraded_notice + "\n"
             guidance = (
-                "[Mixture of Agents reference context]\n"
+                "[MoA private guidance — do not quote this scaffolding verbatim. Use it only to improve the answer.]\n"
                 f"Preset: {self.preset_name}\n"
                 f"Aggregator/acting model: {_slot_label(aggregator)}\n"
-                f"References: {', '.join(label for label, _ in reference_outputs)}\n\n"
-                "Use the reference responses below as private context. You are the aggregator and acting model: "
+                f"References: {', '.join(label for label, _ in reference_outputs)}\n"
+                f"{degraded_line}"
+                "Use only successful reference responses below as private context. You are the aggregator and acting model: "
                 "answer the user directly or call tools as needed.\n\n"
-                f"{joined}"
+                f"Successful reference responses:\n{joined}"
             )
             for msg in reversed(agg_messages):
                 if msg.get("role") == "user" and isinstance(msg.get("content"), str):
