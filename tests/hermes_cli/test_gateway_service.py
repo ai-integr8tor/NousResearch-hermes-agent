@@ -495,6 +495,180 @@ class TestGeneratedSystemdUnits:
         assert "WantedBy=multi-user.target" in unit
 
 
+class TestGeneratedLaunchdPlistXmlescaping:
+    """Regression tests for issue #48164.
+
+    ``generate_launchd_plist()`` historically built the LaunchAgent plist as an
+    f-string, interpolating user-controlled/machine-local values (label, paths,
+    PATH entries, environment values, log paths) into ``<string>...</string>``
+    elements without XML-escaping. A legal filesystem path containing ``&``,
+    ``<``, or ``>`` would therefore produce a plist that ``plistlib`` and
+    ``launchctl bootstrap`` both reject with an XML parse error.
+    """
+
+    def _install_fake_runtime(self, monkeypatch, *, label, hermes_home, python_path,
+                              profile_arg="", venv_dir=None, working_dir=None,
+                              priority_dirs=None, node_dir=None, shell_path=""):
+        from pathlib import Path
+        import shutil
+
+        monkeypatch.setattr(gateway_cli, "get_launchd_label", lambda: label)
+        monkeypatch.setattr(
+            gateway_cli,
+            "get_hermes_home",
+            lambda: Path(hermes_home),
+        )
+        monkeypatch.setattr(gateway_cli, "get_python_path", lambda: python_path)
+        monkeypatch.setattr(gateway_cli, "_profile_arg", lambda _h: profile_arg)
+        monkeypatch.setattr(gateway_cli, "_detect_venv_dir", lambda: Path(venv_dir) if venv_dir else None)
+        monkeypatch.setattr(
+            gateway_cli,
+            "_stable_service_working_dir",
+            lambda: working_dir or str(Path(hermes_home)),
+        )
+        monkeypatch.setattr(
+            gateway_cli,
+            "_build_service_path_dirs",
+            lambda: list(priority_dirs or []),
+        )
+
+        def _fake_which(cmd):
+            if cmd == "node" and node_dir:
+                return str(Path(node_dir) / "node")
+            return None
+
+        monkeypatch.setattr(gateway_cli.shutil, "which", _fake_which)
+        monkeypatch.setenv("PATH", shell_path)
+
+    def test_xml_metachars_in_paths_produce_parseable_plist(self, monkeypatch, tmp_path):
+        """A path containing ``&`` must produce a plist that ``plistlib`` accepts.
+
+        Issue #48164 — the f-string builder emitted ``<string>/tmp/x&A</string>``
+        which fails XML parsing with ``not well-formed (invalid token)``.
+        """
+        import plistlib
+
+        home = tmp_path / "hermes-agent-amp&A-home"
+        home.mkdir()
+        logs = home / "logs"
+        logs.mkdir()
+        # Ensure the Hermes home log directory is reachable via get_hermes_home().
+        self._install_fake_runtime(
+            monkeypatch,
+            label="com.example.amp&label",
+            hermes_home=str(home),
+            python_path="/opt/python&bin/python3",
+            profile_arg="--profile dev&one",
+            venv_dir=str(tmp_path / "venv&dir"),
+            working_dir="/var/folders/cwd&test",
+            priority_dirs=["/opt/brew&bin", "/usr/local/bin"],
+            node_dir="/opt/nvm&dir",
+            shell_path="/opt/shell&dir:/usr/bin",
+        )
+
+        text = gateway_cli.generate_launchd_plist()
+        parsed = plistlib.loads(text.encode("utf-8"))
+
+        # All interpolated values must round-trip byte-for-byte.
+        assert parsed["Label"] == "com.example.amp&label"
+        assert parsed["WorkingDirectory"] == "/var/folders/cwd&test"
+        env = parsed["EnvironmentVariables"]
+        assert env["HERMES_HOME"] == str(home.resolve())
+        assert env["VIRTUAL_ENV"] == str((tmp_path / "venv&dir").resolve())
+        # PATH preserves the colon-joined, order-preserved concatenation.
+        assert "&" in env["PATH"], "node-dir & brew-priority & shell PATH must all be present"
+        # ProgramArguments preserves the ampersand in profile args and python path.
+        assert parsed["ProgramArguments"][0] == "/opt/python&bin/python3"
+        assert "--profile" in parsed["ProgramArguments"]
+        assert "dev&one" in parsed["ProgramArguments"]
+
+    def test_less_than_and_greater_than_in_path(self, monkeypatch, tmp_path):
+        """``<`` and ``>`` in a path are also illegal raw XML — they must be escaped."""
+        import plistlib
+
+        home = tmp_path / "hermes-home<x>"
+        home.mkdir()
+        self._install_fake_runtime(
+            monkeypatch,
+            label="com.example",
+            hermes_home=str(home),
+            python_path="/opt/python3",
+        )
+
+        text = gateway_cli.generate_launchd_plist()
+        parsed = plistlib.loads(text.encode("utf-8"))
+        assert parsed["EnvironmentVariables"]["HERMES_HOME"] == str(home.resolve())
+
+    def test_quotes_and_amp_in_log_path(self, monkeypatch, tmp_path):
+        """Log path entries under ``logs/`` are also plist string values."""
+        import plistlib
+
+        home = tmp_path / "hermes&home"
+        home.mkdir()
+        logs = home / "logs"
+        logs.mkdir()
+        self._install_fake_runtime(
+            monkeypatch,
+            label="com.example",
+            hermes_home=str(home),
+            python_path="/opt/python3",
+        )
+
+        text = gateway_cli.generate_launchd_plist()
+        parsed = plistlib.loads(text.encode("utf-8"))
+        # StandardOutPath / StandardErrorPath live under logs/ — they must be
+        # parseable even when HERMES_HOME itself contains ``&``.
+        assert parsed["StandardOutPath"].endswith("/gateway.log")
+        assert parsed["StandardErrorPath"].endswith("/gateway.error.log")
+
+    def test_boolean_tags_are_emitted_as_booleans(self, monkeypatch, tmp_path):
+        """``<true/>``/``<false/>`` must be plist booleans, not string ``"true"``.
+
+        launchd only treats ``RunAtLoad`` and ``KeepAlive`` as actual booleans
+        when plistlib parses them as Python ``bool``. A regression that
+        accidentally stringified them would break launchd's "restart on
+        failure" semantics.
+        """
+        import plistlib
+
+        home = tmp_path / "hermes-home"
+        home.mkdir()
+        self._install_fake_runtime(
+            monkeypatch,
+            label="com.example",
+            hermes_home=str(home),
+            python_path="/opt/python3",
+        )
+
+        text = gateway_cli.generate_launchd_plist()
+        parsed = plistlib.loads(text.encode("utf-8"))
+        assert parsed["RunAtLoad"] is True
+        assert parsed["KeepAlive"] is True
+        assert isinstance(parsed["RunAtLoad"], bool)
+        assert isinstance(parsed["KeepAlive"], bool)
+
+    def test_generated_plist_is_byte_stable_for_unchanged_inputs(self, monkeypatch, tmp_path):
+        """Two back-to-back generations with identical inputs must be byte-identical.
+
+        ``launchd_plist_is_current()`` compares strings to detect staleness, so
+        ``generate_launchd_plist()`` must be deterministic. Switching to
+        plistlib-based serialization could in principle reorder dict keys
+        between runs; this test pins the implementation to a stable key order.
+        """
+        home = tmp_path / "stable-home"
+        home.mkdir()
+        self._install_fake_runtime(
+            monkeypatch,
+            label="com.example",
+            hermes_home=str(home),
+            python_path="/opt/python3",
+        )
+
+        first = gateway_cli.generate_launchd_plist()
+        second = gateway_cli.generate_launchd_plist()
+        assert first == second
+
+
 class TestGatewayStopCleanup:
     def test_stop_only_kills_current_profile_by_default(self, tmp_path, monkeypatch):
         """Without --all, stop uses systemd (if available) and does NOT call
@@ -3327,8 +3501,12 @@ class TestServiceWorkingDirIsStable:
 
         # Scalar <true/> must be present immediately after the KeepAlive key
         assert "<key>KeepAlive</key>" in plist
-        # The unconditional form
-        assert "<key>KeepAlive</key>\n    <true/>" in plist
+        # The unconditional form (plistlib may indent with tabs or spaces; match
+        # the start tag, then a single whitespace, then ``<true/>``)
+        import re as _re
+        assert _re.search(
+            r"<key>KeepAlive</key>\s*<true/>", plist
+        ), plist
         # The old conditional dict form must NOT appear
         assert "SuccessfulExit" not in plist
-        assert "<key>KeepAlive</key>\n    <dict>" not in plist
+        assert not _re.search(r"<key>KeepAlive</key>\s*<dict>", plist), plist
