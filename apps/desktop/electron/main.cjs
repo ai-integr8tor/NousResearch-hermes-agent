@@ -1387,6 +1387,22 @@ function findPythonForRoot(root) {
   return findSystemPython()
 }
 
+/**
+ * Returns true when a source checkout has a managed venv Python (``.venv`` or
+ * ``venv``) alongside ``hermes_cli/main.py`` — the typical shape after
+ * install.ps1 / install.sh.  When *only* a system Python is available the
+ * backend resolver must smoke-test that ``hermes_cli`` is actually importable
+ * before trusting the candidate, since a system Python 3.11-3.13 with no
+ * ``hermes_cli`` installed (common on dev boxes) will otherwise produce a
+ * dead-on-arrival backend.
+ */
+function sourceRootHasVenvPython(root) {
+  const venvPaths = IS_WINDOWS
+    ? [path.join(root, '.venv', 'Scripts', 'python.exe'), path.join(root, 'venv', 'Scripts', 'python.exe')]
+    : [path.join(root, '.venv', 'bin', 'python'), path.join(root, 'venv', 'bin', 'python')]
+  return venvPaths.some(p => fileExists(p))
+}
+
 function findSystemPython() {
   if (!IS_WINDOWS) {
     // POSIX systems: PATH lookup is safe.
@@ -2836,7 +2852,12 @@ function resolveHermesBackend(dashboardArgs) {
   const overrideRoot = process.env.HERMES_DESKTOP_HERMES_ROOT && path.resolve(process.env.HERMES_DESKTOP_HERMES_ROOT)
   if (overrideRoot && isHermesSourceRoot(overrideRoot)) {
     const backend = createPythonBackend(overrideRoot, `Hermes source at ${overrideRoot}`, dashboardArgs)
-    if (backend) return backend
+    if (backend && (sourceRootHasVenvPython(overrideRoot) || canImportHermesCli(backend.command))) {
+      return backend
+    }
+    if (backend) {
+      rememberLog(`Overridden source root ${overrideRoot} has no venv Python and system Python ${backend.command} cannot import hermes_cli; falling through.`)
+    }
   }
 
   // 2. Development source -- when running `npm run dev` from a checkout, the
@@ -2845,7 +2866,12 @@ function resolveHermesBackend(dashboardArgs) {
   //    (In dev with no checkout, SOURCE_REPO_ROOT won't pass isHermesSourceRoot.)
   if (!IS_PACKAGED && isHermesSourceRoot(SOURCE_REPO_ROOT)) {
     const backend = createPythonBackend(SOURCE_REPO_ROOT, `Hermes source at ${SOURCE_REPO_ROOT}`, dashboardArgs)
-    if (backend) return backend
+    if (backend && (sourceRootHasVenvPython(SOURCE_REPO_ROOT) || canImportHermesCli(backend.command))) {
+      return backend
+    }
+    if (backend) {
+      rememberLog(`Source checkout has no venv Python and system Python ${backend.command} cannot import hermes_cli; falling through.`)
+    }
   }
 
   // 3. Bootstrap-complete ACTIVE_HERMES_ROOT -- the canonical install at
