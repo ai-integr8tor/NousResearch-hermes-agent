@@ -1377,6 +1377,10 @@ MEDIA_DELIVERY_EXTS: Tuple[str, ...] = (
     ".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".7z", ".rar", ".apk", ".ipa",
     # Web / rendered output
     ".html", ".htm",
+    # Code / scripts
+    ".py", ".pyw", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx",
+    ".sh", ".bash", ".zsh", ".rb", ".go", ".rs", ".java",
+    ".c", ".cpp", ".h", ".hpp", ".css", ".sql", ".toml", ".ini", ".cfg",
 )
 
 # Regex alternation fragment of bare extensions (no leading dot), e.g.

@@ -614,7 +614,8 @@ class TestMediaExtensionAllowlistParity:
     """
 
     DROPPED_BEFORE = ["md", "json", "yaml", "yml", "xml", "html", "htm",
-                      "tsv", "svg"]
+                      "tsv", "svg", "py", "js", "ts", "sh", "go", "rs",
+                      "java", "css", "sql", "toml"]
 
     def test_previously_dropped_extensions_now_extract(self):
         for ext in self.DROPPED_BEFORE:
@@ -647,6 +648,37 @@ class TestMediaExtensionAllowlistParity:
         assert "MEDIA:" not in stripped
         assert "/tmp/report.md" not in stripped
         assert "Here is your report:" in stripped
+
+
+class TestCodeFileMediaExtraction:
+    """Regression tests for #42206 — code files not delivered via MEDIA: tag."""
+
+    def test_py_file_extracted(self):
+        content = "Here is the script:\nMEDIA:/root/file.py"
+        media, cleaned = BasePlatformAdapter.extract_media(content)
+        assert media == [("/root/file.py", False)]
+        assert "MEDIA:" not in cleaned
+        assert "Here is the script:" in cleaned
+
+    def test_multiple_code_files_extracted(self):
+        content = "MEDIA:/root/config.json\nMEDIA:/root/script.py"
+        media, cleaned = BasePlatformAdapter.extract_media(content)
+        assert len(media) == 2
+        paths = [p for p, _ in media]
+        assert "/root/config.json" in paths
+        assert "/root/script.py" in paths
+
+    def test_js_ts_sh_files_extracted(self):
+        for ext in ("js", "ts", "sh", "go", "rs", "java", "css", "sql", "toml"):
+            content = f"MEDIA:/tmp/file.{ext}"
+            media, _ = BasePlatformAdapter.extract_media(content)
+            assert media == [(f"/tmp/file.{ext}", False)], f".{ext} should extract"
+
+    def test_code_extension_in_delivery_exts(self):
+        from gateway.platforms.base import MEDIA_DELIVERY_EXTS
+        for ext in (".py", ".js", ".ts", ".sh", ".go", ".rs", ".java", ".css",
+                     ".sql", ".toml", ".tsx", ".jsx", ".c", ".cpp"):
+            assert ext in MEDIA_DELIVERY_EXTS, f"{ext} missing from MEDIA_DELIVERY_EXTS"
 
 
 class TestMediaDeliveryPathValidation:
