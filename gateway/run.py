@@ -1727,6 +1727,7 @@ from gateway.session import (
     build_session_context_prompt,
     build_session_key,
     is_shared_multi_user_session,
+    gateway_now,
 )
 from gateway.delivery import DeliveryRouter
 from gateway.authz_mixin import GatewayAuthorizationMixin
@@ -5673,7 +5674,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             logger.warning("Failed to enumerate resume-pending sessions: %s", exc)
             return 0
 
-        now = datetime.now()
+        now = gateway_now()
         scheduled = 0
         for entry in candidates:
             marker = entry.last_resume_marked_at or entry.updated_at
