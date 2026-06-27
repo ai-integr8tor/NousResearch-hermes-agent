@@ -16,6 +16,12 @@ Three concerns, all tied to ``AIAgent`` boot-time / runtime IO setup:
    ``HTTPS_PROXY`` / ``HTTP_PROXY`` / ``ALL_PROXY``;
    ``_get_proxy_for_base_url`` respects ``NO_PROXY`` for the given base URL.
 
+4. **TLS version override** — ``_get_tls_ssl_context`` honors
+   ``network.tls_max_version`` from config.yaml (bridged to the internal
+   ``HERMES_TLS_MAX_VERSION`` env var at startup) so users behind
+   TLS-1.3-hostile networks or CDN edges can cap provider connections
+   at TLS 1.2.
+
 ``run_agent`` re-exports every name so existing
 ``from run_agent import _get_proxy_from_env`` imports keep working
 unchanged.
@@ -142,6 +148,67 @@ def _get_proxy_for_base_url(base_url: Optional[str]) -> Optional[str]:
     return proxy
 
 
+def _get_tls_ssl_context() -> Optional["ssl.SSLContext"]:
+    """Build an ``ssl.SSLContext`` capped by ``HERMES_TLS_MAX_VERSION``.
+
+    Some CDN edges and middleboxes accept TLS 1.2 handshakes but kill
+    TLS 1.3 ClientHellos, surfacing as ``[SSL: UNEXPECTED_EOF_WHILE_READING]``
+    roughly 15s into every request while ``curl`` (which uses the OS TLS
+    stack on Windows/macOS) works fine (#44365, DeepSeek's edge).  The
+    user-facing knob is ``network.tls_max_version: "1.2"`` in config.yaml,
+    bridged onto ``HERMES_TLS_MAX_VERSION`` at process startup by
+    ``hermes_constants.apply_tls_max_version`` (this layer has no config
+    access, and spawned agent subprocesses must inherit the cap; an
+    explicitly exported env var wins over config.yaml).
+
+    Accepted values: ``1.2`` / ``1.3``, optionally prefixed ``tls``/``tlsv``
+    (case-insensitive).  Returns ``None`` — meaning "use httpx defaults" —
+    when the variable is unset, empty, or invalid.  The context honors the
+    same CA-bundle overrides as the rest of the CLI: ``HERMES_CA_BUNDLE`` >
+    ``REQUESTS_CA_BUNDLE`` > ``SSL_CERT_FILE``.
+    """
+    raw = os.environ.get("HERMES_TLS_MAX_VERSION", "").strip()
+    if not raw:
+        return None
+
+    import logging
+    import ssl
+
+    logger = logging.getLogger(__name__)
+
+    normalized = raw.lower()
+    for prefix in ("tlsv", "tls"):
+        if normalized.startswith(prefix):
+            normalized = normalized[len(prefix):]
+            break
+    max_version = {
+        "1.2": ssl.TLSVersion.TLSv1_2,
+        "1.3": ssl.TLSVersion.TLSv1_3,
+    }.get(normalized)
+    if max_version is None:
+        logger.warning(
+            "Ignoring HERMES_TLS_MAX_VERSION=%r: expected '1.2' or '1.3'", raw
+        )
+        return None
+
+    cafile = None
+    for env_var in ("HERMES_CA_BUNDLE", "REQUESTS_CA_BUNDLE", "SSL_CERT_FILE"):
+        path = os.environ.get(env_var, "").strip()
+        if path:
+            cafile = path
+            break
+    try:
+        ctx = ssl.create_default_context(cafile=cafile)
+    except OSError as exc:
+        logger.warning(
+            "Ignoring HERMES_TLS_MAX_VERSION=%r: failed to load CA bundle "
+            "%r: %s", raw, cafile, exc
+        )
+        return None
+    ctx.maximum_version = max_version
+    return ctx
+
+
 def _install_safe_stdio() -> None:
     """Wrap stdout/stderr so best-effort console output cannot crash the agent."""
     for stream_name in ("stdout", "stderr"):
@@ -164,4 +231,5 @@ __all__ = [
     "_install_safe_stdio",
     "_get_proxy_from_env",
     "_get_proxy_for_base_url",
+    "_get_tls_ssl_context",
 ]
