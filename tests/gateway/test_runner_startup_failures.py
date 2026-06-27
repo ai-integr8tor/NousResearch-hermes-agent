@@ -1,3 +1,5 @@
+import logging
+
 import pytest
 from unittest.mock import AsyncMock
 
@@ -115,6 +117,40 @@ async def test_runner_allows_cron_only_mode_when_no_platforms_are_enabled(monkey
     assert runner.adapters == {}
     state = read_runtime_status()
     assert state["gateway_state"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_runner_stale_systemd_warning_uses_existing_commands(
+    monkeypatch, tmp_path, caplog
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    config = GatewayConfig(
+        platforms={
+            Platform.TELEGRAM: PlatformConfig(enabled=False, token="***")
+        },
+        sessions_dir=tmp_path / "sessions",
+    )
+    runner = GatewayRunner(config)
+
+    monkeypatch.setattr(
+        "gateway.shutdown_forensics.check_systemd_timing_alignment",
+        lambda _timeout: {
+            "unit": "hermes-gateway.service",
+            "timeout_stop_sec": 60.0,
+            "drain_timeout": 120.0,
+            "expected_min": 150.0,
+            "mismatch": True,
+        },
+    )
+
+    with caplog.at_level(logging.WARNING, logger="gateway.run"):
+        ok = await runner.start()
+
+    assert ok is True
+    assert "Stale systemd unit detected" in caplog.text
+    assert "hermes gateway restart" in caplog.text
+    assert "sudo hermes gateway restart --system" in caplog.text
+    assert "hermes gateway service install --replace" not in caplog.text
 
 
 @pytest.mark.asyncio

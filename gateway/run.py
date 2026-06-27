@@ -5763,8 +5763,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 logger.warning(
                     "Stale systemd unit detected: %s has TimeoutStopSec=%.0fs but "
                     "drain_timeout=%.0fs (expected >=%.0fs). systemd may SIGKILL the "
-                    "gateway mid-drain. Run `hermes gateway service install --replace` "
-                    "to regenerate the unit, or shorten agent.restart_drain_timeout.",
+                    "gateway mid-drain. Run `hermes gateway restart` to refresh "
+                    "the unit, or `sudo hermes gateway restart --system` for a system "
+                    "service. Alternatively, shorten agent.restart_drain_timeout.",
                     _alignment.get("unit", "(unknown)"),
                     _alignment["timeout_stop_sec"],
                     _alignment["drain_timeout"],
