@@ -1155,10 +1155,24 @@ async def web_extract_tool(
             result_json = tool_error("Content was inaccessible or not found")
 
             cleaned_result = clean_base64_images(result_json)
-        
+
         else:
+            # Ensure every result entry has non-empty content.  Some providers
+            # (e.g. Xiaomi MiMo) reject tool results whose ``content`` field
+            # is empty with a non-retryable ``400 text is not set`` error that
+            # kills the entire turn (#46756).  When the extraction backend
+            # timed out or a URL was policy-blocked, ``content`` is blank but
+            # the ``error`` field explains why — surface that detail as the
+            # content so the model always receives usable text.
+            for r in trimmed_results:
+                if not r.get("content"):
+                    if r.get("error"):
+                        r["content"] = f"[Extraction error: {r['error']}]"
+                    else:
+                        r["content"] = "[No content extracted from this URL.]"
+
             result_json = json.dumps(trimmed_response, indent=2, ensure_ascii=False)
-            
+
             cleaned_result = clean_base64_images(result_json)
         
         debug_call_data["final_response_size"] = len(cleaned_result)

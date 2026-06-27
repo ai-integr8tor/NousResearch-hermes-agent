@@ -446,7 +446,9 @@ class TestWebToolPolicy:
         result = json.loads(await web_tools.web_extract_tool(["https://allowed.test"], use_llm_processing=False))
 
         assert result["results"][0]["url"] == "https://blocked.test/final"
-        assert result["results"][0]["content"] == ""
+        # Content is now populated with error info to prevent "text is not set"
+        # on providers that reject empty tool content (#46756).
+        assert result["results"][0]["content"]
         assert result["results"][0]["blocked_by_policy"]["rule"] == "blocked.test"
 
 
