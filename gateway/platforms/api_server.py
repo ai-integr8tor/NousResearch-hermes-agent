@@ -32,6 +32,7 @@ Requires:
 """
 
 import asyncio
+import copy
 import hashlib
 import hmac
 import json
@@ -320,6 +321,36 @@ def _normalize_multimodal_content(content: Any) -> Any:
         return "\n".join(p["text"] for p in normalized_parts if p.get("text"))
 
     return normalized_parts
+
+
+_DEFAULT_PRESERVED_HISTORY_FIELDS = frozenset({"name"})
+_PRESERVED_HISTORY_FIELDS_BY_ROLE = {
+    "assistant": frozenset({
+        "tool_calls",
+        "finish_reason",
+        "reasoning",
+        "reasoning_content",
+        "reasoning_details",
+        "codex_reasoning_items",
+        "codex_message_items",
+        "name",
+    }),
+    "tool": frozenset({"tool_call_id", "tool_name", "name"}),
+    "user": _DEFAULT_PRESERVED_HISTORY_FIELDS,
+}
+
+
+def _preserve_history_message(original: Dict[str, Any], content: Any) -> Dict[str, Any]:
+    """Return a normalized history message with role-appropriate continuity fields."""
+    role = str(original.get("role", "user"))
+    normalized: Dict[str, Any] = {
+        "role": role,
+        "content": content,
+    }
+    for field in _PRESERVED_HISTORY_FIELDS_BY_ROLE.get(role, _DEFAULT_PRESERVED_HISTORY_FIELDS):
+        if field in original:
+            normalized[field] = copy.deepcopy(original[field])
+    return normalized
 
 
 def _content_has_visible_payload(content: Any) -> bool:
@@ -1832,7 +1863,7 @@ class APIServerAdapter(BasePlatformAdapter):
 
         # Extract system message (becomes ephemeral system prompt layered ON TOP of core)
         system_prompt = None
-        conversation_messages: List[Dict[str, str]] = []
+        conversation_messages: List[Dict[str, Any]] = []
 
         for idx, msg in enumerate(messages):
             role = msg.get("role", "")
@@ -1845,12 +1876,12 @@ class APIServerAdapter(BasePlatformAdapter):
                     system_prompt = content
                 else:
                     system_prompt = system_prompt + "\n" + content
-            elif role in {"user", "assistant"}:
+            elif role in {"user", "assistant", "tool"}:
                 try:
                     content = _normalize_multimodal_content(raw_content)
                 except ValueError as exc:
                     return _multimodal_validation_error(exc, param=f"messages[{idx}].content")
-                conversation_messages.append({"role": role, "content": content})
+                conversation_messages.append(_preserve_history_message(msg, content))
 
         # Extract the last user message as the primary input
         user_message: Any = ""
@@ -2291,8 +2322,8 @@ class APIServerAdapter(BasePlatformAdapter):
         stream_q,
         agent_task,
         agent_ref,
-        conversation_history: List[Dict[str, str]],
-        user_message: str,
+        conversation_history: List[Dict[str, Any]],
+        user_message: Any,
         instructions: Optional[str],
         conversation: Optional[str],
         store: bool,
@@ -2930,12 +2961,11 @@ class APIServerAdapter(BasePlatformAdapter):
                 if isinstance(item, str):
                     input_messages.append({"role": "user", "content": item})
                 elif isinstance(item, dict):
-                    role = item.get("role", "user")
                     try:
                         content = _normalize_multimodal_content(item.get("content", ""))
                     except ValueError as exc:
                         return _multimodal_validation_error(exc, param=f"input[{idx}].content")
-                    input_messages.append({"role": role, "content": content})
+                    input_messages.append(_preserve_history_message(item, content))
         else:
             return web.json_response(_openai_error("'input' must be a string or array"), status=400)
 
@@ -2961,7 +2991,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     entry_content = _normalize_multimodal_content(entry["content"])
                 except ValueError as exc:
                     return _multimodal_validation_error(exc, param=f"conversation_history[{i}].content")
-                conversation_history.append({"role": str(entry["role"]), "content": entry_content})
+                conversation_history.append(_preserve_history_message(entry, entry_content))
             if previous_response_id:
                 logger.debug("Both conversation_history and previous_response_id provided; using conversation_history")
 
@@ -3699,8 +3729,8 @@ class APIServerAdapter(BasePlatformAdapter):
 
     async def _run_agent(
         self,
-        user_message: str,
-        conversation_history: List[Dict[str, str]],
+        user_message: Any,
+        conversation_history: List[Dict[str, Any]],
         ephemeral_system_prompt: Optional[str] = None,
         session_id: Optional[str] = None,
         stream_delta_callback=None,
@@ -3873,7 +3903,7 @@ class APIServerAdapter(BasePlatformAdapter):
 
         # Accept explicit conversation_history from the request body.
         # Precedence: explicit conversation_history > previous_response_id.
-        conversation_history: List[Dict[str, str]] = []
+        conversation_history: List[Dict[str, Any]] = []
         raw_history = body.get("conversation_history")
         if raw_history:
             if not isinstance(raw_history, list):
@@ -3887,7 +3917,7 @@ class APIServerAdapter(BasePlatformAdapter):
                         _openai_error(f"conversation_history[{i}] must have 'role' and 'content' fields"),
                         status=400,
                     )
-                conversation_history.append({"role": str(entry["role"]), "content": str(entry["content"])})
+                conversation_history.append(_preserve_history_message(entry, str(entry["content"])))
             if previous_response_id:
                 logger.debug("Both conversation_history and previous_response_id provided; using conversation_history")
 
@@ -3905,15 +3935,19 @@ class APIServerAdapter(BasePlatformAdapter):
         # Only fires when no explicit history was provided.
         if not conversation_history and isinstance(raw_input, list) and len(raw_input) > 1:
             for msg in raw_input[:-1]:
-                if isinstance(msg, dict) and msg.get("role") and msg.get("content"):
-                    content = msg["content"]
+                if isinstance(msg, dict) and msg.get("role") and "content" in msg:
+                    content = msg.get("content")
                     if isinstance(content, list):
                         # Flatten multi-part content blocks to text
                         content = " ".join(
                             part.get("text", "") for part in content
                             if isinstance(part, dict) and part.get("type") == "text"
                         )
-                    conversation_history.append({"role": msg["role"], "content": str(content)})
+                    elif content is None:
+                        content = ""
+                    else:
+                        content = str(content)
+                    conversation_history.append(_preserve_history_message(msg, content))
 
         run_id = f"run_{uuid.uuid4().hex}"
         session_id = body.get("session_id") or stored_session_id or run_id
