@@ -1135,11 +1135,12 @@ def _check_write_safe_root_code(code: str) -> str | None:
     so clear-text accidental writes to restricted paths surface an actionable
     error rather than silently succeeding.
     """
-    from agent.file_safety import get_safe_write_root, is_write_denied
+    from agent.file_safety import get_safe_write_roots, is_write_denied
 
-    safe_root = get_safe_write_root()
-    if not safe_root:
+    safe_roots = get_safe_write_roots()
+    if not safe_roots:
         return None
+    safe_root_display = os.pathsep.join(sorted(safe_roots))
 
     for m in _CODE_OPEN_RE.finditer(code):
         path, mode = m.group(1), m.group(2)
@@ -1149,7 +1150,7 @@ def _check_write_safe_root_code(code: str) -> str | None:
             if is_write_denied(expanded):
                 return (
                     f"Blocked: code attempts to write to {path!r}, which is "
-                    f"outside HERMES_WRITE_SAFE_ROOT ({safe_root!r}). "
+                    f"outside HERMES_WRITE_SAFE_ROOT ({safe_root_display!r}). "
                     "Writes must stay inside the configured safe root. "
                     "(Defense-in-depth — not a security boundary; regex matching "
                     "may miss dynamically constructed paths.)"
@@ -1161,7 +1162,7 @@ def _check_write_safe_root_code(code: str) -> str | None:
         if is_write_denied(expanded):
             return (
                 f"Blocked: code attempts to write to {path!r}, which is "
-                f"outside HERMES_WRITE_SAFE_ROOT ({safe_root!r}). "
+                f"outside HERMES_WRITE_SAFE_ROOT ({safe_root_display!r}). "
                 "Writes must stay inside the configured safe root. "
                 "(Defense-in-depth — not a security boundary; regex matching "
                 "may miss dynamically constructed paths.)"

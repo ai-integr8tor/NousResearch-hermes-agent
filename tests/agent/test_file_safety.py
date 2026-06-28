@@ -11,7 +11,6 @@ import pytest
 from agent.file_safety import (
     _BLOCKED_PROJECT_ENV_BASENAMES,
     get_read_block_error,
-    get_safe_write_root,
     is_write_denied,
 )
 
@@ -164,7 +163,7 @@ class TestCombinedGuards:
 
 
 # ---------------------------------------------------------------------------
-# HERMES_WRITE_SAFE_ROOT write guard (is_write_denied + get_safe_write_root)
+# HERMES_WRITE_SAFE_ROOT write guard (is_write_denied)
 # ---------------------------------------------------------------------------
 
 

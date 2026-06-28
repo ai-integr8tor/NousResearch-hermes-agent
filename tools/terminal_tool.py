@@ -314,11 +314,12 @@ def _check_write_safe_root(command: str) -> str | None:
     to restricted paths surface an actionable error rather than silently
     succeeding.
     """
-    from agent.file_safety import get_safe_write_root, is_write_denied
+    from agent.file_safety import get_safe_write_roots, is_write_denied
 
-    safe_root = get_safe_write_root()
-    if not safe_root:
+    safe_roots = get_safe_write_roots()
+    if not safe_roots:
         return None
+    safe_root_display = os.pathsep.join(sorted(safe_roots))
 
     candidates: list[str] = []
     for m in _SAFE_ROOT_REDIRECT_RE.finditer(command):
@@ -337,7 +338,7 @@ def _check_write_safe_root(command: str) -> str | None:
         if is_write_denied(expanded):
             return (
                 f"Blocked: command attempts to write to {target!r}, which is "
-                f"outside HERMES_WRITE_SAFE_ROOT ({safe_root!r}). "
+                f"outside HERMES_WRITE_SAFE_ROOT ({safe_root_display!r}). "
                 "Writes must stay inside the configured safe root. "
                 "(Defense-in-depth — not a security boundary; regex matching "
                 "may miss obfuscated write targets.)"
