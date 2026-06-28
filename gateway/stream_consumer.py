@@ -209,6 +209,11 @@ class GatewayStreamConsumer:
         # frame resets the counter so one transient hiccup can't kill drafts for
         # the entire session.
         self._draft_failures = 0
+        # When True, all streaming edits/draft-frames are suppressed until
+        # got_done so the final message is delivered as one clean rich send.
+        # Activated the first time the adapter signals rich-hold on the buffer
+        # while no message has been sent yet (_message_id is None).
+        self._rich_hold = False
         self._before_finalize_notified = False
 
     def _metadata_for_send(
@@ -543,8 +548,39 @@ class GatewayStreamConsumer:
                         # it's a debounce heuristic ("send updates roughly
                         # every N visible characters"), not a platform-limit
                         # check. _len_fn is reserved for overflow detection.
-                        or len(self._accumulated) >= self.cfg.buffer_threshold
+                        # Guard: require at least 1 second regardless of
+                        # edit_interval so fast LLMs can't fire the threshold
+                        # faster than platforms' per-chat edit rate limits.
+                        or (
+                            len(self._accumulated) >= self.cfg.buffer_threshold
+                            and elapsed >= min(self._current_edit_interval, 1.0)
+                        )
                     )
+
+                # Rich-hold: suppress all streaming until done so the adapter
+                # can deliver one clean final rich message instead of sending
+                # partial/broken markdown frames (e.g. a table that splits at
+                # 4096 chars or garbles mid-row in the rich renderer).
+                # Activated the first time the adapter signals hold while no
+                # message is on screen yet; resets on segment break.
+                if got_segment_break:
+                    self._rich_hold = False
+                if (
+                    should_edit
+                    and not got_done
+                    and not self._rich_hold
+                    and self._message_id is None
+                    and not self._already_sent
+                ):
+                    _hold_fn = getattr(self.adapter, "should_hold_streaming_for_rich", None)
+                    if _hold_fn is not None:
+                        try:
+                            if _hold_fn(self._accumulated):
+                                self._rich_hold = True
+                        except Exception:
+                            pass
+                if self._rich_hold and not got_done and self._message_id is None:
+                    should_edit = False
 
                 current_update_visible = False
                 if should_edit and self._accumulated:
@@ -950,6 +986,7 @@ class GatewayStreamConsumer:
                 edit_result = await self._edit_message(
                     message_id=stale_message_id,
                     content=final_text,
+                    finalize=True,
                 )
                 if getattr(edit_result, "success", False):
                     self._message_id = stale_message_id
