@@ -52,6 +52,9 @@ const groupLabel = (group: StatusGroup, s: Translations['statusStack']) => {
 }
 
 interface ComposerStatusStackProps {
+  /** Foreground turn state from ChatBar; in-progress todos animate only while
+   *  the visible session is actually running. */
+  busy?: boolean
   /** The queue, built by the composer (it owns the queue's callbacks). Rendered
    *  as the last group so it stays fused to the composer like before. */
   queue: ReactNode
@@ -63,7 +66,7 @@ interface ComposerStatusStackProps {
  * every session-scoped status — subagents, background tasks, queue — grouped by
  * type and separated by light dividers. Collapses to nothing when empty.
  */
-export function ComposerStatusStack({ queue, sessionId }: ComposerStatusStackProps) {
+export function ComposerStatusStack({ busy = false, queue, sessionId }: ComposerStatusStackProps) {
   const { t } = useI18n()
   const navigate = useNavigate()
   const itemsBySession = useStore($statusItemsBySession)
@@ -76,6 +79,7 @@ export function ComposerStatusStack({ queue, sessionId }: ComposerStatusStackPro
   )
 
   const previews = sessionId ? (previewsBySession[sessionId] ?? []) : []
+  const sessionWorking = busy
 
   // Seed from the registry on session open; event-driven refreshes (terminal /
   // process tool completions) live in use-message-stream.
@@ -145,6 +149,7 @@ export function ComposerStatusStack({ queue, sessionId }: ComposerStatusStackPro
             key={item.id}
             onDismiss={sessionId ? id => dismissBackgroundProcess(sessionId, id) : undefined}
             onOpen={() => openSubagent(item)}
+            sessionWorking={sessionWorking}
             onStop={sessionId ? id => void stopBackgroundProcess(sessionId, id) : undefined}
           />
         ))}
