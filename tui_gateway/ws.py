@@ -80,7 +80,7 @@ class WSTransport:
         if self._closed:
             return False
 
-        line = json.dumps(obj, ensure_ascii=False)
+        line = json.dumps(obj, ensure_ascii=False) + "\n"
 
         try:
             on_loop = asyncio.get_running_loop() is self._loop
@@ -125,7 +125,7 @@ class WSTransport:
         """Send from the owning event loop. Awaits until the frame is on the wire."""
         if self._closed:
             return False
-        await self._safe_send(json.dumps(obj, ensure_ascii=False))
+        await self._safe_send(json.dumps(obj, ensure_ascii=False) + "\n")
         return not self._closed
 
     async def _safe_send(self, line: str) -> None:
