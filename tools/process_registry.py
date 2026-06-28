@@ -41,6 +41,7 @@ import time
 import uuid
 
 _IS_WINDOWS = platform.system() == "Windows"
+from agent.platform import platform_info
 from tools.environments.local import _find_shell, _resolve_safe_cwd, _sanitize_subprocess_env
 from hermes_cli._subprocess_compat import windows_hide_flags
 from dataclasses import dataclass, field
@@ -160,7 +161,7 @@ class ProcessRegistry:
     def __init__(self):
         self._running: Dict[str, ProcessSession] = {}
         self._finished: Dict[str, ProcessSession] = {}
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
         # Side-channel for check_interval watchers (gateway reads after agent run)
         self.pending_watchers: List[Dict[str, Any]] = []
@@ -196,6 +197,7 @@ class ProcessRegistry:
         self._global_watch_window_hits: int = 0
         self._global_watch_tripped_until: float = 0.0
         self._global_watch_suppressed_during_trip: int = 0
+        self._checkpoint_write_disabled = False
 
     @staticmethod
     def _clean_shell_noise(text: str) -> str:
@@ -690,8 +692,11 @@ class ProcessRegistry:
         if use_pty:
             # Try PTY mode for interactive CLI tools
             try:
-                if _IS_WINDOWS:
-                    from winpty import PtyProcess as _PtyProcessCls
+                if platform_info.is_windows:
+                    try:
+                        from winpty import PtyProcess as _PtyProcessCls
+                    except ImportError:
+                        raise ImportError("winpty not installed")
                 else:
                     from ptyprocess import PtyProcess as _PtyProcessCls
                 user_shell = _find_shell()
@@ -739,7 +744,11 @@ class ProcessRegistry:
         # stdout is a pipe, hiding output from process(action="poll")).
         bg_env = _sanitize_subprocess_env(os.environ, env_vars)
         bg_env["PYTHONUNBUFFERED"] = "1"
-        _popen_kwargs = {"creationflags": windows_hide_flags()} if _IS_WINDOWS else {}
+        _popen_kwargs = (
+            {"creationflags": windows_hide_flags()}
+            if platform_info.is_windows
+            else dict(start_new_session=True)
+        )
 
         proc = subprocess.Popen(
             [user_shell, "-lic", f"set +m; {command}"],
@@ -751,7 +760,6 @@ class ProcessRegistry:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
-            start_new_session=True,
             **_popen_kwargs,
         )
 
@@ -777,8 +785,8 @@ class ProcessRegistry:
             self._write_checkpoint()
         except Exception:
             # Post-Popen setup failed — kill the orphaned subprocess (and any
-            # descendants spawned via setsid) before re-raising so they do not
-            # leak as untracked background processes.
+            # descendants spawned in its session/process tree) before
+            # re-raising so they do not leak as untracked background processes.
             try:
                 if not _IS_WINDOWS:
                     try:
@@ -1693,6 +1701,9 @@ class ProcessRegistry:
 
     def _write_checkpoint(self):
         """Write running process metadata to checkpoint file atomically."""
+        if self._checkpoint_write_disabled:
+            return
+
         try:
             with self._lock:
                 entries = []
@@ -1724,9 +1735,31 @@ class ProcessRegistry:
                             "watch_patterns": s.watch_patterns,
                         })
             
-            # Atomic write to avoid corruption on crash
-            from utils import atomic_json_write
-            atomic_json_write(CHECKPOINT_PATH, entries)
+            errors: list[BaseException] = []
+
+            def _writer() -> None:
+                try:
+                    from utils import atomic_json_write
+
+                    atomic_json_write(CHECKPOINT_PATH, entries)
+                except BaseException as exc:
+                    errors.append(exc)
+
+            writer = threading.Thread(
+                target=_writer,
+                daemon=True,
+                name="process-registry-checkpoint-write",
+            )
+            writer.start()
+            writer.join(timeout=2.0 if _IS_WINDOWS else 10.0)
+            if writer.is_alive():
+                self._checkpoint_write_disabled = True
+                logger.debug(
+                    "Timed out writing process checkpoint to %s; disabling checkpoint writes",
+                    CHECKPOINT_PATH,
+                )
+            elif errors:
+                raise errors[0]
         except Exception as e:
             logger.debug("Failed to write checkpoint file: %s", e, exc_info=True)
 

@@ -338,14 +338,19 @@ def _command_line_belongs_to_profile(command: str, profile_home: Path) -> bool:
     """
     command_lc = command.lower()
     profile_name = _profile_name_for_home(profile_home)
-    home_lc = str(profile_home).lower()
+    home_variants = {
+        str(profile_home).lower(),
+        profile_home.as_posix().lower(),
+        str(profile_home).replace("\\", "/").lower(),
+    }
+    matching_home = any(f"hermes_home={home}" in command_lc for home in home_variants)
 
     if profile_name is not None and profile_name != "default":
         profile_lc = profile_name.lower()
         return (
             f"--profile {profile_lc}" in command_lc
             or f"-p {profile_lc}" in command_lc
-            or f"hermes_home={home_lc}" in command_lc
+            or matching_home
         )
 
     # Default/root profile: the gateway runs with no profile flag. Accept unless
@@ -355,7 +360,7 @@ def _command_line_belongs_to_profile(command: str, profile_home: Path) -> bool:
     # absence is not disqualifying — only a conflicting explicit value is.
     if "--profile " in command_lc or " -p " in command_lc:
         return False
-    if "hermes_home=" in command_lc and f"hermes_home={home_lc}" not in command_lc:
+    if "hermes_home=" in command_lc and not matching_home:
         return False
     return True
 
