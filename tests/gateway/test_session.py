@@ -572,6 +572,105 @@ class TestLoadTranscriptDBOnly:
         assert result[1]["content"] == "db-a"
 
 
+class TestSessionStoreDbContinuityRecovery:
+    """Restart continuity when the sessions.json cache is missing/stale."""
+
+    def test_recovers_session_mapping_from_db_session_key(self, tmp_path, monkeypatch, caplog):
+        import hermes_state
+
+        monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", tmp_path / "state.db")
+        config = GatewayConfig()
+        sessions_dir = tmp_path / "sessions"
+        source = SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="chat-123",
+            chat_type="dm",
+            user_id="patrick",
+            user_name="Patrick",
+        )
+
+        first_store = SessionStore(sessions_dir=sessions_dir, config=config)
+        first_entry = first_store.get_or_create_session(source)
+        first_store.append_to_transcript(
+            first_entry.session_id,
+            {"role": "user", "content": "remember this across restart"},
+        )
+
+        (sessions_dir / "sessions.json").unlink()
+
+        second_store = SessionStore(sessions_dir=sessions_dir, config=config)
+        with caplog.at_level("INFO"):
+            recovered = second_store.get_or_create_session(source)
+
+        assert recovered.session_id == first_entry.session_id
+        transcript = second_store.load_transcript(recovered.session_id)
+        assert transcript[0]["content"] == "remember this across restart"
+        assert "session_continuity_db_recovered" in caplog.text
+
+    def test_recovers_legacy_session_without_session_key_by_peer(self, tmp_path, monkeypatch):
+        import hermes_state
+
+        monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", tmp_path / "state.db")
+        config = GatewayConfig()
+        sessions_dir = tmp_path / "sessions"
+        source = SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="chat-456",
+            chat_type="dm",
+            user_id="reid-user",
+            user_name="Patrick",
+        )
+
+        store = SessionStore(sessions_dir=sessions_dir, config=config)
+        store._db.create_session(
+            session_id="legacy-session",
+            source="telegram",
+            user_id="reid-user",
+        )
+        store._db.append_message(
+            session_id="legacy-session",
+            role="user",
+            content="legacy tracked fact",
+        )
+
+        recovered = store.get_or_create_session(source)
+
+        assert recovered.session_id == "legacy-session"
+        assert store.load_transcript(recovered.session_id)[0]["content"] == "legacy tracked fact"
+
+    def test_legacy_fallback_does_not_recover_parent_for_thread(self, tmp_path, monkeypatch):
+        import hermes_state
+
+        monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", tmp_path / "state.db")
+        config = GatewayConfig()
+        sessions_dir = tmp_path / "sessions"
+        thread_source = SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="chat-456",
+            chat_type="dm",
+            thread_id="thread-1",
+            user_id="reid-user",
+            user_name="Patrick",
+        )
+
+        store = SessionStore(sessions_dir=sessions_dir, config=config)
+        store._db.create_session(
+            session_id="legacy-parent-session",
+            source="telegram",
+            user_id="reid-user",
+        )
+        store._db.append_message(
+            session_id="legacy-parent-session",
+            role="user",
+            content="parent-only context",
+        )
+
+        recovered = store.get_or_create_session(thread_source)
+
+        assert recovered.session_id != "legacy-parent-session"
+        assert store.load_transcript(recovered.session_id) == []
+
+
 class TestSessionStoreSwitchSession:
     """Regression coverage for gateway /resume session switching semantics."""
 

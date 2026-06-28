@@ -965,6 +965,55 @@ class SessionStore:
             thread_sessions_per_user=getattr(self.config, "thread_sessions_per_user", False),
             profile=self._resolve_profile_for_key(source),
         )
+
+    def _recover_session_from_db(
+        self,
+        *,
+        session_key: str,
+        source: SessionSource,
+        now: datetime,
+    ) -> Optional[SessionEntry]:
+        """Recover session_key -> session_id mapping from SQLite.
+
+        sessions.json is only a lightweight routing cache.  After a pod
+        restart or cache loss, SQLite is the durable transcript source and
+        should be consulted before creating a brand-new conversation lane.
+        """
+        if not self._db:
+            return None
+        finder = getattr(self._db, "find_latest_session_for_peer", None)
+        if finder is None:
+            return None
+        try:
+            recovered = finder(
+                source=source.platform.value,
+                user_id=source.user_id,
+                session_key=session_key,
+                chat_id=source.chat_id,
+                chat_type=source.chat_type,
+                thread_id=source.thread_id,
+            )
+        except Exception as exc:
+            logger.debug("session_continuity_recovery_failed key=%s: %s", session_key, exc)
+            return None
+        if not recovered:
+            return None
+
+        started_at = recovered.get("started_at")
+        try:
+            created_at = datetime.fromtimestamp(float(started_at)) if started_at else now
+        except (TypeError, ValueError, OSError):
+            created_at = now
+        return SessionEntry(
+            session_key=session_key,
+            session_id=recovered["id"],
+            created_at=created_at,
+            updated_at=now,
+            origin=source,
+            display_name=source.chat_name,
+            platform=source.platform,
+            chat_type=source.chat_type,
+        )
     
     def _is_session_expired(self, entry: SessionEntry) -> bool:
         """Check if a session has expired based on its reset policy.
@@ -1126,6 +1175,12 @@ class SessionStore:
                 if not reset_reason:
                     entry.updated_at = now
                     self._save()
+                    logger.info(
+                        "session_continuity_cache_hit source=%s chat_type=%s session_id=%s",
+                        source.platform.value,
+                        source.chat_type,
+                        entry.session_id,
+                    )
                     return entry
                 else:
                     # Session is being auto-reset.
@@ -1138,6 +1193,23 @@ class SessionStore:
                 was_auto_reset = False
                 auto_reset_reason = None
                 reset_had_activity = False
+
+            if not force_new:
+                recovered_entry = self._recover_session_from_db(
+                    session_key=session_key,
+                    source=source,
+                    now=now,
+                )
+                if recovered_entry is not None:
+                    self._entries[session_key] = recovered_entry
+                    self._save()
+                    logger.info(
+                        "session_continuity_db_recovered source=%s chat_type=%s session_id=%s",
+                        source.platform.value,
+                        source.chat_type,
+                        recovered_entry.session_id,
+                    )
+                    return recovered_entry
 
             # Create new session
             session_id = f"{now.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
@@ -1162,7 +1234,17 @@ class SessionStore:
                 "session_id": session_id,
                 "source": source.platform.value,
                 "user_id": source.user_id,
+                "session_key": session_key,
+                "chat_id": source.chat_id,
+                "chat_type": source.chat_type,
+                "thread_id": source.thread_id,
             }
+            logger.info(
+                "session_continuity_new source=%s chat_type=%s session_id=%s",
+                source.platform.value,
+                source.chat_type,
+                session_id,
+            )
 
         # SQLite operations outside the lock
         if self._db and db_end_session_id:
@@ -1388,6 +1470,10 @@ class SessionStore:
                 "session_id": session_id,
                 "source": old_entry.platform.value if old_entry.platform else "unknown",
                 "user_id": old_entry.origin.user_id if old_entry.origin else None,
+                "session_key": session_key,
+                "chat_id": old_entry.origin.chat_id if old_entry.origin else None,
+                "chat_type": old_entry.origin.chat_type if old_entry.origin else None,
+                "thread_id": old_entry.origin.thread_id if old_entry.origin else None,
             }
 
         if self._db and db_end_session_id:

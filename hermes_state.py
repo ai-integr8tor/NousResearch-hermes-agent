@@ -675,6 +675,17 @@ CREATE TABLE IF NOT EXISTS sessions (
     FOREIGN KEY (parent_session_id) REFERENCES sessions(id)
 );
 
+CREATE TABLE IF NOT EXISTS session_peer_keys (
+    session_key TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES sessions(id),
+    source TEXT NOT NULL,
+    user_id TEXT,
+    chat_id TEXT,
+    chat_type TEXT,
+    thread_id TEXT,
+    updated_at REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL REFERENCES sessions(id),
@@ -713,6 +724,10 @@ CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
 CREATE INDEX IF NOT EXISTS idx_sessions_source_id ON sessions(source, id);
 CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_session_peer_keys_session
+    ON session_peer_keys(session_id);
+CREATE INDEX IF NOT EXISTS idx_session_peer_keys_peer
+    ON session_peer_keys(source, user_id, chat_id, chat_type, thread_id);
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, timestamp);
 CREATE INDEX IF NOT EXISTS idx_compression_locks_expires ON compression_locks(expires_at);
 """
@@ -1471,14 +1486,20 @@ class SessionDB:
         model_config: Dict[str, Any] = None,
         system_prompt: str = None,
         user_id: str = None,
+        session_key: str = None,
+        chat_id: str = None,
+        chat_type: str = None,
+        thread_id: str = None,
         parent_session_id: str = None,
         cwd: str = None,
     ) -> None:
         """Shared INSERT OR IGNORE for session rows."""
         def _do(conn):
             conn.execute(
-                """INSERT OR IGNORE INTO sessions (id, source, user_id, model, model_config,
-                   system_prompt, parent_session_id, cwd, started_at)
+                """INSERT OR IGNORE INTO sessions (
+                   id, source, user_id, model, model_config, system_prompt,
+                   parent_session_id, cwd, started_at
+                )
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     session_id,
@@ -1492,12 +1513,100 @@ class SessionDB:
                     time.time(),
                 ),
             )
+            if session_key:
+                conn.execute(
+                    """INSERT OR REPLACE INTO session_peer_keys (
+                       session_key, session_id, source, user_id, chat_id,
+                       chat_type, thread_id, updated_at
+                    )
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        session_key,
+                        session_id,
+                        source,
+                        user_id,
+                        chat_id,
+                        chat_type,
+                        thread_id,
+                        time.time(),
+                    ),
+                )
         self._execute_write(_do)
 
     def create_session(self, session_id: str, source: str, **kwargs) -> str:
         """Create a new session record. Returns the session_id."""
         self._insert_session_row(session_id, source, **kwargs)
         return session_id
+
+    def find_latest_session_for_peer(
+        self,
+        *,
+        source: str,
+        user_id: Optional[str] = None,
+        session_key: Optional[str] = None,
+        chat_id: Optional[str] = None,
+        chat_type: Optional[str] = None,
+        thread_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Find the best active session to continue for a gateway peer.
+
+        Newer rows persist ``session_key`` and can be recovered exactly when
+        the lightweight sessions.json key cache is missing after a restart.
+        Legacy rows did not store that key, so we fall back to the most recent
+        active source/user session with messages.  The legacy fallback is
+        intentionally conservative: it is only for continuity recovery on
+        existing databases and never crosses source or user boundaries.
+        """
+
+        def _fetch(sql: str, params: tuple[Any, ...]) -> Optional[Dict[str, Any]]:
+            with self._lock:
+                row = self._conn.execute(sql, params).fetchone()
+            return dict(row) if row else None
+
+        has_messages = (
+            "(COALESCE(message_count, 0) > 0 OR "
+            "EXISTS (SELECT 1 FROM messages WHERE messages.session_id = sessions.id LIMIT 1))"
+        )
+        if session_key:
+            row = _fetch(
+                f"""
+                SELECT sessions.*
+                FROM session_peer_keys
+                JOIN sessions ON sessions.id = session_peer_keys.session_id
+                WHERE session_peer_keys.session_key = ?
+                  AND sessions.ended_at IS NULL
+                  AND {has_messages}
+                ORDER BY sessions.started_at DESC
+                LIMIT 1
+                """,
+                (session_key,),
+            )
+            if row:
+                return row
+
+        if thread_id is not None:
+            # Legacy sessions did not persist thread identity. Without an
+            # exact session_key mapping, falling back by source/user would
+            # recover the parent DM/group and bleed unrelated context.
+            return None
+
+        clauses = ["source = ?", "ended_at IS NULL", has_messages]
+        params: list[Any] = [source]
+        if user_id is None:
+            clauses.append("user_id IS NULL")
+        else:
+            clauses.append("user_id = ?")
+            params.append(user_id)
+
+        return _fetch(
+            f"""
+            SELECT * FROM sessions
+            WHERE {' AND '.join(clauses)}
+            ORDER BY started_at DESC
+            LIMIT 1
+            """,
+            tuple(params),
+        )
     def end_session(self, session_id: str, end_reason: str) -> None:
         """Mark a session as ended.
 
