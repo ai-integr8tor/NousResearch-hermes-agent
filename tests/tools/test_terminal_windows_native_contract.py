@@ -57,7 +57,8 @@ def test_foreground_windows_popen_uses_native_cwd_and_no_window(monkeypatch, tmp
     assert proc.pid == 4321
     assert captured["kwargs"]["cwd"] == native_cwd
     assert captured["kwargs"]["creationflags"] == 0x08000000
-    assert captured["kwargs"]["preexec_fn"] is None
+    assert "preexec_fn" not in captured["kwargs"]
+    assert "start_new_session" not in captured["kwargs"]
     assert captured["kwargs"]["stdout"] == subprocess.PIPE
     assert captured["kwargs"]["stderr"] == subprocess.STDOUT
     assert captured["kwargs"]["encoding"] == "utf-8"
@@ -224,7 +225,8 @@ def test_background_windows_spawn_normalizes_cwd_and_hides_window(monkeypatch, t
     assert session.cwd == native_cwd
     assert captured["kwargs"]["cwd"] == native_cwd
     assert captured["kwargs"]["creationflags"] == 0x08000000
-    assert captured["kwargs"]["preexec_fn"] is None
+    assert "preexec_fn" not in captured["kwargs"]
+    assert "start_new_session" not in captured["kwargs"]
     assert captured["kwargs"]["stdout"] == subprocess.PIPE
     assert captured["kwargs"]["stderr"] == subprocess.STDOUT
 
