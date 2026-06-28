@@ -505,7 +505,8 @@ export function useSessionActions({
           ...(newChatProfile ? { profile: newChatProfile } : {}),
           ...(uiModel ? { model: uiModel, ...(uiProvider ? { provider: uiProvider } : {}) } : {}),
           ...(uiEffort ? { reasoning_effort: uiEffort } : {}),
-          ...(uiFast ? { fast: true } : {})
+          ...(uiFast ? { fast: true } : {}),
+          source: "desktop"
         })
 
         const stored = created.stored_session_id ?? null
@@ -757,7 +758,8 @@ export function useSessionActions({
           // (MCP discovery / prompt build), and the agent pre-warms in the
           // background while the prefetch above paints the transcript.
           ...(watchWindow ? { lazy: true } : {}),
-          ...(sessionProfile ? { profile: sessionProfile } : {})
+          ...(sessionProfile ? { profile: sessionProfile } : {}),
+          source: "desktop"
         })
 
         // The rejection is consumed by the `await` below; this guard only
