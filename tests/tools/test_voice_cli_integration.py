@@ -947,6 +947,36 @@ class TestVoiceBeepConfigReal:
     def test_beeps_can_be_disabled(self, _cfg):
         cli = _make_voice_cli()
         assert cli._voice_beeps_enabled() is False
+    @patch("hermes_cli.config.load_config", return_value={"voice": {"beep_enabled": "false"}})
+    def test_quoted_false_string_disables_beeps(self, _cfg):
+        cli = _make_voice_cli()
+        assert cli._voice_beeps_enabled() is False
+
+    @patch("hermes_cli.config.load_config", return_value={"voice": {"beep_enabled": "0"}})
+    def test_quoted_zero_string_disables_beeps(self, _cfg):
+        cli = _make_voice_cli()
+        assert cli._voice_beeps_enabled() is False
+
+    @patch("hermes_cli.config.load_config", return_value={"voice": {"beep_enabled": "no"}})
+    def test_quoted_no_string_disables_beeps(self, _cfg):
+        cli = _make_voice_cli()
+        assert cli._voice_beeps_enabled() is False
+
+    @patch("hermes_cli.config.load_config", return_value={"voice": {"beep_enabled": "off"}})
+    def test_quoted_off_string_disables_beeps(self, _cfg):
+        cli = _make_voice_cli()
+        assert cli._voice_beeps_enabled() is False
+
+    @patch("hermes_cli.config.load_config", return_value={"voice": {"beep_enabled": "true"}})
+    def test_quoted_true_string_enables_beeps(self, _cfg):
+        cli = _make_voice_cli()
+        assert cli._voice_beeps_enabled() is True
+
+    @patch("hermes_cli.config.load_config", return_value={"voice": {"beep_enabled": "1"}})
+    def test_quoted_one_string_enables_beeps(self, _cfg):
+        cli = _make_voice_cli()
+        assert cli._voice_beeps_enabled() is True
+
 
     @patch("cli._cprint")
     @patch("cli.threading.Thread")
