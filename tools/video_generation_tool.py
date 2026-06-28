@@ -26,6 +26,10 @@ edit, video extend — with a compact schema:
     image_url                drives image-to-video when operation=generate
     video_url                source video for edit/extend
     reference_image_urls     list, up to provider-declared cap
+    reference_video_urls     reference videos for motion/camera/style guidance
+    reference_audio_urls     reference audio for rhythm/music/voice guidance
+    first_frame_url          image URL to pin the video's first frame
+    last_frame_url           image URL to pin the video's last frame
     duration                 seconds (provider clamps)
     aspect_ratio             "16:9" | "9:16" | "1:1" | ...
     resolution               "480p" | "540p" | "720p" | "1080p"
@@ -95,6 +99,38 @@ VIDEO_GENERATE_SCHEMA: Dict[str, Any] = {
                     "character refs). Only supported by some backends; "
                     "the active backend's description below indicates whether "
                     "this is honored and what the max is."
+                ),
+            },
+            "reference_video_urls": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Optional list of reference video URLs for motion, "
+                    "camera, or style guidance. Only supported by some "
+                    "backends; ignored by providers that do not support it."
+                ),
+            },
+            "reference_audio_urls": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Optional list of reference audio URLs for rhythm, "
+                    "music, or voice guidance. Only supported by some "
+                    "backends; ignored by providers that do not support it."
+                ),
+            },
+            "first_frame_url": {
+                "type": "string",
+                "description": (
+                    "Optional image URL for the video's first frame. Only "
+                    "supported by some backends; ignored elsewhere."
+                ),
+            },
+            "last_frame_url": {
+                "type": "string",
+                "description": (
+                    "Optional image URL for the video's last frame. Only "
+                    "supported by some backends; ignored elsewhere."
                 ),
             },
             "duration": {
@@ -293,7 +329,7 @@ def _coerce_bool(value: Any) -> Optional[bool]:
     return None
 
 
-def _normalize_reference_images(value: Any) -> Optional[List[str]]:
+def _normalize_url_list(value: Any) -> Optional[List[str]]:
     if value is None:
         return None
     if isinstance(value, str):
@@ -310,7 +346,11 @@ def _normalize_reference_images(value: Any) -> Optional[List[str]]:
 def _handle_video_generate(args: Dict[str, Any], **_kw: Any) -> str:
     prompt = (args.get("prompt") or "").strip()
     image_url = (args.get("image_url") or "").strip() or None
-    reference_image_urls = _normalize_reference_images(args.get("reference_image_urls"))
+    reference_image_urls = _normalize_url_list(args.get("reference_image_urls"))
+    reference_video_urls = _normalize_url_list(args.get("reference_video_urls"))
+    reference_audio_urls = _normalize_url_list(args.get("reference_audio_urls"))
+    first_frame_url = (args.get("first_frame_url") or "").strip() or None
+    last_frame_url = (args.get("last_frame_url") or "").strip() or None
     duration = _coerce_int(args.get("duration"))
     aspect_ratio = (args.get("aspect_ratio") or DEFAULT_ASPECT_RATIO).strip() or DEFAULT_ASPECT_RATIO
     resolution = (args.get("resolution") or DEFAULT_RESOLUTION).strip() or DEFAULT_RESOLUTION
@@ -339,6 +379,10 @@ def _handle_video_generate(args: Dict[str, Any], **_kw: Any) -> str:
         "_model_override_explicit": bool(model_override),
         "image_url": image_url,
         "reference_image_urls": reference_image_urls,
+        "reference_video_urls": reference_video_urls,
+        "reference_audio_urls": reference_audio_urls,
+        "first_frame_url": first_frame_url,
+        "last_frame_url": last_frame_url,
         "duration": duration,
         "aspect_ratio": aspect_ratio,
         "resolution": resolution,
