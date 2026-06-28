@@ -52,6 +52,7 @@ import {
   setPetOverlayScaleHandler,
   setPetOverlaySubmitHandler
 } from '../store/pet-overlay'
+import { requestVoiceConversationStart } from '../store/composer'
 import { $filePreviewTarget, $previewTarget, closeActiveRightRailTab } from '../store/preview'
 import {
   $activeGatewayProfile,
@@ -740,6 +741,24 @@ export function DesktopController() {
     updateSessionState
   })
 
+  // "Hey Hermes": handle the wake event on the canonical onEvent pipeline (the
+  // path every gateway socket already feeds), not a side-registered listener —
+  // open a fresh session and begin back-and-forth voice.
+  const handleGatewayEventWithWake = useCallback(
+    (event: Parameters<typeof handleDesktopGatewayEvent>[0]) => {
+      if (event.type === 'wake.detected') {
+        const payload = event.payload as { start_new_session?: boolean } | undefined
+        if (payload?.start_new_session !== false) {
+          startFreshSessionDraft()
+        }
+        requestVoiceConversationStart()
+        return
+      }
+      handleDesktopGatewayEvent(event)
+    },
+    [handleDesktopGatewayEvent, startFreshSessionDraft]
+  )
+
   // Single global listener for every rebindable hotkey (incl. profile switching)
   // plus the on-screen keybind editor's capture mode.
   useKeybinds({
@@ -988,7 +1007,7 @@ export function DesktopController() {
   }, [])
 
   useGatewayBoot({
-    handleGatewayEvent: handleDesktopGatewayEvent,
+    handleGatewayEvent: handleGatewayEventWithWake,
     onConnectionReady: c => {
       connectionRef.current = c
     },
@@ -1006,6 +1025,16 @@ export function DesktopController() {
       void refreshSessions().catch(() => undefined)
     }
   }, [gatewayState, refreshCurrentModel, refreshSessions])
+
+  // "Hey Hermes" wake word: arm the server-side detector for this surface
+  // (gated on config). Detection arrives as a wake.detected event handled in
+  // handleGatewayEventWithWake. Idempotent server-side, so reconnects are safe.
+  useEffect(() => {
+    if (gatewayState !== 'open') {
+      return
+    }
+    void requestGateway('wake.start', { surface: 'gui' }).catch(() => undefined)
+  }, [gatewayState, requestGateway])
 
   // Keep the cron jobs section live without a user action: the scheduler ticks
   // in the background (advancing next-run/state and creating runs), so poll the

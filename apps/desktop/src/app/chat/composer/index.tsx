@@ -27,11 +27,13 @@ import { triggerHaptic } from '@/lib/haptics'
 import { cn } from '@/lib/utils'
 import {
   $composerAttachments,
+  $voiceConversationStartRequest,
   clearComposerAttachments,
   clearSessionDraft,
   type ComposerAttachment,
   stashSessionDraft,
-  takeSessionDraft
+  takeSessionDraft,
+  takeVoiceConversationStart
 } from '@/store/composer'
 import {
   browseBackward,
@@ -60,6 +62,7 @@ import {
   updateQueuedPrompt
 } from '@/store/composer-queue'
 import { $statusItemsBySession } from '@/store/composer-status'
+import { $gateway } from '@/store/gateway'
 import { notify } from '@/store/notifications'
 import { $previewStatusBySession } from '@/store/preview-status'
 import { listRepoBranches, requestStartWorkSession, startWorkInRepo, switchBranchInRepo } from '@/store/projects'
@@ -2020,6 +2023,48 @@ export function ChatBar({
   }, [conversation, disabled, voiceConversationActive])
 
   useEffect(() => onComposerVoiceToggleRequest(toggleVoiceConversation), [toggleVoiceConversation])
+
+  // "Hey Hermes" wake word: a latched start request (nanostore) the composer
+  // claims once it's mounted and the gateway is open. Survives the fresh-session
+  // remount the wake handler triggers, and waits out a transient `disabled`.
+  const voiceStartReq = useStore($voiceConversationStartRequest)
+  useEffect(() => {
+    if (disabled) {
+      return // not ready — re-runs when `disabled` flips false
+    }
+    if (!takeVoiceConversationStart(voiceStartReq)) {
+      return
+    }
+    if (!voiceConversationActive) {
+      setVoiceConversationActive(true)
+    }
+  }, [voiceStartReq, disabled, voiceConversationActive])
+
+  // Hand the mic between the server-side wake detector and the browser's voice
+  // loop: pause the detector while a conversation is live, resume it after
+  // (no-ops server-side when the wake word isn't armed). wakePausedRef tracks
+  // whether WE paused, so resume always runs once — including on unmount, where
+  // ending voice can tear the composer down before the `false` render lands and
+  // would otherwise leave the detector paused forever (#wake-stays-off).
+  const wakePausedRef = useRef(false)
+  const resumeWakeIfPaused = useCallback(() => {
+    if (!wakePausedRef.current) {
+      return
+    }
+    wakePausedRef.current = false
+    void $gateway.get()?.request('wake.resume', {}).catch(() => undefined)
+  }, [])
+
+  useEffect(() => {
+    if (voiceConversationActive) {
+      wakePausedRef.current = true
+      void $gateway.get()?.request('wake.pause', {}).catch(() => undefined)
+    } else {
+      resumeWakeIfPaused()
+    }
+  }, [voiceConversationActive, resumeWakeIfPaused])
+
+  useEffect(() => resumeWakeIfPaused, [resumeWakeIfPaused])
 
   const contextMenu = (
     <ContextMenu
