@@ -7621,6 +7621,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if isinstance(val, str) and val.strip():
                 token = val.strip()
                 break
+        # Many adapters (e.g. Discord) store the token on their `config`
+        # sub-object rather than directly on the adapter. Without this lookup
+        # those adapters all return None here, the same-token conflict check
+        # is silently skipped, and every profile's adapter for that platform
+        # starts polling the same bot token — producing a per-message race
+        # for which adapter answers. See test_reads_config_token.
+        if not token:
+            cfg = getattr(adapter, "config", None)
+            if cfg is not None:
+                for attr in ("token", "bot_token"):
+                    val = getattr(cfg, attr, None)
+                    if isinstance(val, str) and val.strip():
+                        token = val.strip()
+                        break
         if not token:
             return None
         import hashlib
@@ -15152,19 +15166,99 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 persist_user_timestamp=persist_user_timestamp,
             )
 
+    def _profile_name_for_source(self, source: SessionSource) -> Optional[str]:
+        """Resolve the profile name for an inbound source via configured routes.
+
+        Returns ``None`` when no routes are configured or no route matches.
+        Callers (``build_source``, ``_resolve_profile_home_for_source``) treat
+        ``None`` as "use the default/active profile". When
+        ``gateway.profile_routes`` is configured, the most specific matching
+        route wins (guild < channel < thread). See :mod:`gateway.profile_routing`
+        for matching rules.
+        """
+        config = getattr(self, "config", None)
+        routes = getattr(config, "profile_routes", None)
+        if not routes:
+            return None
+        from gateway.profile_routing import match_profile_route
+        try:
+            matched = match_profile_route(
+                routes,
+                platform=source.platform.value,
+                guild_id=getattr(source, "guild_id", None),
+                chat_id=source.chat_id,
+                thread_id=getattr(source, "thread_id", None),
+                parent_chat_id=getattr(source, "parent_chat_id", None),
+            )
+        except Exception:
+            logger.warning(
+                "Profile route matching failed for %s/%s, falling back to default",
+                source.platform, source.chat_id, exc_info=True,
+            )
+            return None
+        if matched:
+            return matched.profile
+        logger.info(
+            "No profile route matched: platform=%s chat_id=%s thread_id=%s parent_chat_id=%s",
+            source.platform.value, source.chat_id,
+            getattr(source, "thread_id", None), getattr(source, "parent_chat_id", None),
+        )
+        return None
+
     def _resolve_profile_home_for_source(self, source: SessionSource) -> "Path":
         """Resolve which profile's HERMES_HOME should serve this inbound source.
 
-        Prefers the profile the source was routed to (``source.profile`` — set
-        by the /p/<profile>/ URL prefix or a per-credential adapter), falling
-        back to the active profile (the multiplexer's own home).
+        Resolution order:
+          1. ``source.profile`` — set by /p/<profile>/ URL prefix, per-credential
+             adapter ownership, OR profile_routes matching at ``build_source`` time.
+          2. ``_profile_name_for_source`` — re-run routing here as a defensive
+             fallback for sources that bypass ``build_source``.
+          3. The active profile (the multiplexer's own home).
         """
-        from hermes_cli.profiles import get_active_profile_name, get_profile_dir
+        from hermes_cli.profiles import (
+            get_active_profile_name,
+            get_profile_dir,
+            profile_exists,
+        )
+        from hermes_constants import get_hermes_home
+        
+        # Track whether a profile was explicitly requested (vs. falling back to default)
+        explicit_profile = None
         try:
-            name = (source.profile or "").strip() or get_active_profile_name() or "default"
-            return get_profile_dir(name)
+            name = (source.profile or "").strip()
+            if name:
+                explicit_profile = name  # User explicitly set this profile
+            if not name:
+                name = self._profile_name_for_source(source)
+                if name:
+                    explicit_profile = name  # Routing explicitly set this profile
+            if not name:
+                name = get_active_profile_name() or "default"
+            
+            profile_dir = get_profile_dir(name)
+            # Warn if an explicit profile doesn't exist on disk
+            if explicit_profile and not profile_exists(name):
+                logger.warning(
+                    "Profile %r does not exist for source %s/%s (guild_id=%s), "
+                    "falling back to global HERMES_HOME",
+                    explicit_profile,
+                    source.platform.value,
+                    source.chat_id,
+                    getattr(source, "guild_id", None),
+                )
+                return get_hermes_home()
+            return profile_dir
         except Exception:
-            from hermes_constants import get_hermes_home
+            # Catch normalization errors, path errors, etc.
+            logger.warning(
+                "Failed to resolve profile directory for source %s/%s (guild_id=%s), "
+                "falling back to global HERMES_HOME: %s",
+                source.platform.value,
+                source.chat_id,
+                getattr(source, "guild_id", None),
+                explicit_profile or "(no profile)",
+                exc_info=True,
+            )
             return get_hermes_home()
 
     async def _run_agent_inner(
