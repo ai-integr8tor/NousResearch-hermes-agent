@@ -28,6 +28,7 @@ import {
 } from '@/store/profile'
 import { requestNewWorktree } from '@/store/projects'
 import { toggleReview } from '@/store/review'
+import { openFindBar } from '@/store/find-in-page'
 import { setModelPickerOpen } from '@/store/session'
 import {
   $switcherOpen,
@@ -162,6 +163,7 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
       }
     },
     'view.toggleReview': toggleReview,
+    'view.findInPage': openFindBar,
     'view.showFiles': showFiles,
     'view.showTerminal': () => setTerminalTakeover(!$terminalTakeover.get()),
     'view.flipPanes': togglePanesFlipped,
