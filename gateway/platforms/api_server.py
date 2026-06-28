@@ -132,6 +132,131 @@ def _coerce_request_bool(value: Any, default: bool = False) -> bool:
     return default
 
 
+_REQUEST_OPTION_MISSING = object()
+_REASONING_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh"})
+
+
+def _clean_request_string(value: Any) -> Optional[str]:
+    """Return a stripped request string, or None for absent/non-string values."""
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def _request_reasoning_config(model_options: Any) -> Optional[Dict[str, Any]]:
+    """Translate browser/API model_options into AIAgent reasoning_config.
+
+    The browser extension sends both a structured ``reasoning`` object and a
+    compatibility ``reasoning_effort`` scalar.  Keep this parser permissive so
+    older clients can send either shape, but ignore unknown effort values rather
+    than raising on a chat request.
+    """
+    if not isinstance(model_options, dict):
+        return None
+
+    reasoning = model_options.get("reasoning")
+    enabled: Any = None
+    effort: Any = model_options.get("reasoning_effort")
+    if isinstance(reasoning, dict):
+        enabled = reasoning.get("enabled")
+        effort = reasoning.get("effort", effort)
+
+    effort_norm = str(effort).strip().lower() if effort is not None else ""
+    if enabled is False or effort_norm == "none":
+        return {"enabled": False}
+    if effort_norm in _REASONING_EFFORTS and effort_norm != "none":
+        return {"enabled": True, "effort": effort_norm}
+    if enabled is True:
+        return {"enabled": True}
+    return None
+
+
+def _request_service_tier(model_options: Any) -> Any:
+    """Return a per-request service_tier override or _REQUEST_OPTION_MISSING."""
+    if not isinstance(model_options, dict):
+        return _REQUEST_OPTION_MISSING
+    if "service_tier" in model_options:
+        raw_tier = model_options.get("service_tier")
+        if raw_tier is None:
+            return None
+        if isinstance(raw_tier, str):
+            return raw_tier.strip() or None
+        return raw_tier
+    if "fast" in model_options:
+        return "priority" if _coerce_request_bool(model_options.get("fast"), default=False) else None
+    return _REQUEST_OPTION_MISSING
+
+
+def _resolve_request_runtime_agent_kwargs(provider: str, target_model: Optional[str] = None) -> Dict[str, Any]:
+    """Resolve runtime kwargs for a one-request provider override.
+
+    This mirrors gateway.run._resolve_runtime_agent_kwargs(), but accepts an
+    explicit provider/model so an API caller can use the same authenticated
+    provider catalog as the TUI without mutating config.yaml.
+    """
+    from hermes_cli.runtime_provider import resolve_runtime_provider, format_runtime_provider_error, _get_model_config
+
+    try:
+        runtime = resolve_runtime_provider(requested=provider, target_model=target_model)
+    except Exception as exc:
+        raise RuntimeError(format_runtime_provider_error(exc)) from exc
+
+    model_cfg = _get_model_config()
+    max_tokens = None
+    env_max_tokens = os.environ.get("HERMES_MAX_TOKENS")
+    if env_max_tokens:
+        try:
+            max_tokens = int(env_max_tokens)
+        except (ValueError, TypeError):
+            max_tokens = None
+    elif isinstance(model_cfg, dict):
+        cfg_max_tokens = model_cfg.get("max_tokens")
+        if isinstance(cfg_max_tokens, int):
+            max_tokens = cfg_max_tokens
+    if max_tokens is None:
+        runtime_max_tokens = runtime.get("max_output_tokens")
+        if isinstance(runtime_max_tokens, int) and runtime_max_tokens > 0:
+            max_tokens = runtime_max_tokens
+
+    return {
+        "api_key": runtime.get("api_key"),
+        "base_url": runtime.get("base_url"),
+        "provider": runtime.get("provider"),
+        "api_mode": runtime.get("api_mode"),
+        "command": runtime.get("command"),
+        "args": list(runtime.get("args") or []),
+        "credential_pool": runtime.get("credential_pool"),
+        "max_tokens": max_tokens,
+    }
+
+
+def _request_agent_overrides(body: Any, *, virtual_model: Optional[str] = None) -> Dict[str, Any]:
+    """Extract per-request model/provider/options for _run_agent.
+
+    ``/v1/models`` advertises a stable virtual model (usually ``hermes-agent``)
+    for OpenAI-compatible clients.  Treat that alias as "use the gateway
+    default"; real model picker selections from the browser extension send the
+    raw provider model id plus a provider slug and should override this turn.
+    """
+    if not isinstance(body, dict):
+        return {}
+
+    overrides: Dict[str, Any] = {}
+    model = _clean_request_string(body.get("model"))
+    if model and model != virtual_model:
+        overrides["requested_model"] = model
+
+    provider = _clean_request_string(body.get("provider"))
+    if provider:
+        overrides["requested_provider"] = provider
+
+    model_options = body.get("model_options")
+    if isinstance(model_options, dict):
+        overrides["model_options"] = dict(model_options)
+    return overrides
+
+
 def _normalize_chat_content(
     content: Any, *, _max_depth: int = 10, _depth: int = 0,
 ) -> str:
@@ -1078,6 +1203,9 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_start_callback=None,
         tool_complete_callback=None,
         gateway_session_key: Optional[str] = None,
+        requested_model: Optional[str] = None,
+        requested_provider: Optional[str] = None,
+        model_options: Optional[Dict[str, Any]] = None,
     ) -> Any:
         """
         Create an AIAgent instance using the gateway's runtime config.
@@ -1108,6 +1236,21 @@ class APIServerAdapter(BasePlatformAdapter):
         reasoning_config = GatewayRunner._load_reasoning_config()
         model = _resolve_gateway_model()
 
+        request_model = _clean_request_string(requested_model)
+        request_provider = _clean_request_string(requested_provider)
+        if request_model:
+            model = request_model
+        if request_provider:
+            runtime_kwargs = _resolve_request_runtime_agent_kwargs(
+                request_provider,
+                target_model=model or None,
+            )
+
+        request_reasoning_config = _request_reasoning_config(model_options)
+        if request_reasoning_config is not None:
+            reasoning_config = request_reasoning_config
+        request_service_tier = _request_service_tier(model_options)
+
         user_config = _load_gateway_config()
         enabled_toolsets = sorted(_get_platform_tools(user_config, "api_server"))
 
@@ -1117,25 +1260,29 @@ class APIServerAdapter(BasePlatformAdapter):
         # same fallback behaviour as Telegram/Discord/Slack (fixes #4954).
         fallback_model = GatewayRunner._load_fallback_model()
 
-        agent = AIAgent(
-            model=model,
+        agent_kwargs = {
+            "model": model,
             **runtime_kwargs,
-            max_iterations=max_iterations,
-            quiet_mode=True,
-            verbose_logging=False,
-            ephemeral_system_prompt=ephemeral_system_prompt or None,
-            enabled_toolsets=enabled_toolsets,
-            session_id=session_id,
-            platform="api_server",
-            stream_delta_callback=stream_delta_callback,
-            tool_progress_callback=tool_progress_callback,
-            tool_start_callback=tool_start_callback,
-            tool_complete_callback=tool_complete_callback,
-            session_db=self._ensure_session_db(),
-            fallback_model=fallback_model,
-            reasoning_config=reasoning_config,
-            gateway_session_key=gateway_session_key,
-        )
+            "max_iterations": max_iterations,
+            "quiet_mode": True,
+            "verbose_logging": False,
+            "ephemeral_system_prompt": ephemeral_system_prompt or None,
+            "enabled_toolsets": enabled_toolsets,
+            "session_id": session_id,
+            "platform": "api_server",
+            "stream_delta_callback": stream_delta_callback,
+            "tool_progress_callback": tool_progress_callback,
+            "tool_start_callback": tool_start_callback,
+            "tool_complete_callback": tool_complete_callback,
+            "session_db": self._ensure_session_db(),
+            "fallback_model": fallback_model,
+            "reasoning_config": reasoning_config,
+            "gateway_session_key": gateway_session_key,
+        }
+        if request_service_tier is not _REQUEST_OPTION_MISSING:
+            agent_kwargs["service_tier"] = request_service_tier
+
+        agent = AIAgent(**agent_kwargs)
         return agent
 
     # ------------------------------------------------------------------
@@ -1210,6 +1357,39 @@ class APIServerAdapter(BasePlatformAdapter):
             ],
         })
 
+    async def _handle_model_options(self, request: "web.Request") -> "web.Response":
+        """GET /api/model/options — provider-aware Hermes model inventory.
+
+        Keep /v1/models OpenAI-compatible by advertising the synthetic Hermes
+        alias there. Browser and dashboard clients that need the real provider
+        registry use this route, which mirrors the TUI/dashboard picker payload.
+        """
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+
+        try:
+            from hermes_cli.inventory import build_models_payload, load_picker_context
+
+            refresh = str(request.query.get("refresh", "")).lower() in {"1", "true", "yes", "on"}
+            payload = build_models_payload(
+                load_picker_context(),
+                include_unconfigured=True,
+                picker_hints=True,
+                canonical_order=True,
+                pricing=False,
+                capabilities=True,
+                refresh=refresh,
+            )
+            payload.setdefault("object", "hermes.model_options")
+            return web.json_response(payload)
+        except Exception:
+            logger.exception("GET /api/model/options failed")
+            return web.json_response(
+                _openai_error("Failed to enumerate model options", err_type="server_error"),
+                status=500,
+            )
+
     async def _handle_capabilities(self, request: "web.Request") -> "web.Response":
         """GET /v1/capabilities — advertise the stable API surface.
 
@@ -1259,6 +1439,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 "jobs_admin": False,
                 "memory_write_api": False,
                 "skills_api": True,
+                "model_options_api": True,
                 "audio_api": False,
                 "realtime_voice": False,
                 "session_continuity_header": "X-Hermes-Session-Id",
@@ -1269,6 +1450,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 "health": {"method": "GET", "path": "/health"},
                 "health_detailed": {"method": "GET", "path": "/health/detailed"},
                 "models": {"method": "GET", "path": "/v1/models"},
+                "model_options": {"method": "GET", "path": "/api/model/options"},
                 "chat_completions": {"method": "POST", "path": "/v1/chat/completions"},
                 "responses": {"method": "POST", "path": "/v1/responses"},
                 "runs": {"method": "POST", "path": "/v1/runs"},
@@ -1649,6 +1831,7 @@ class APIServerAdapter(BasePlatformAdapter):
         system_prompt = body.get("system_message") or body.get("instructions")
         if system_prompt is not None and not isinstance(system_prompt, str):
             return web.json_response(_openai_error("system_message must be a string", code="invalid_system_message"), status=400)
+        agent_overrides = _request_agent_overrides(body, virtual_model=self._model_name)
         history = self._conversation_history_for_session(session_id)
         result, usage = await self._run_agent(
             user_message=user_message,
@@ -1656,6 +1839,7 @@ class APIServerAdapter(BasePlatformAdapter):
             ephemeral_system_prompt=system_prompt,
             session_id=session_id,
             gateway_session_key=gateway_session_key,
+            **agent_overrides,
         )
         effective_session_id = result.get("session_id") if isinstance(result, dict) else session_id
         final_response = result.get("final_response", "") if isinstance(result, dict) else ""
@@ -1693,6 +1877,7 @@ class APIServerAdapter(BasePlatformAdapter):
         system_prompt = body.get("system_message") or body.get("instructions")
         if system_prompt is not None and not isinstance(system_prompt, str):
             return web.json_response(_openai_error("system_message must be a string", code="invalid_system_message"), status=400)
+        agent_overrides = _request_agent_overrides(body, virtual_model=self._model_name)
 
         loop = asyncio.get_running_loop()
         queue: "asyncio.Queue[Optional[tuple[str, Dict[str, Any]]]]" = asyncio.Queue()
@@ -1747,6 +1932,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     stream_delta_callback=_delta,
                     tool_progress_callback=_tool_progress,
                     gateway_session_key=gateway_session_key,
+                    **agent_overrides,
                 )
                 final_response = result.get("final_response", "") if isinstance(result, dict) else ""
                 effective_session_id = result.get("session_id", session_id) if isinstance(result, dict) else session_id
@@ -1838,6 +2024,7 @@ class APIServerAdapter(BasePlatformAdapter):
             )
 
         stream = _coerce_request_bool(body.get("stream"), default=False)
+        agent_overrides = _request_agent_overrides(body, virtual_model=self._model_name)
 
         # Extract system message (becomes ephemeral system prompt layered ON TOP of core)
         system_prompt = None
@@ -2018,6 +2205,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 tool_complete_callback=_on_tool_complete,
                 agent_ref=agent_ref,
                 gateway_session_key=gateway_session_key,
+                **agent_overrides,
             ))
             # Ensure SSE drain loops can terminate without relying on polling
             # agent_task.done(), which can race with queue timeout checks.
@@ -2037,11 +2225,15 @@ class APIServerAdapter(BasePlatformAdapter):
                 ephemeral_system_prompt=system_prompt,
                 session_id=session_id,
                 gateway_session_key=gateway_session_key,
+                **agent_overrides,
             )
 
         idempotency_key = request.headers.get("Idempotency-Key")
         if idempotency_key:
-            fp = _make_request_fingerprint(body, keys=["model", "messages", "tools", "tool_choice", "stream"])
+            fp = _make_request_fingerprint(
+                body,
+                keys=["model", "provider", "model_options", "messages", "tools", "tool_choice", "stream"],
+            )
             try:
                 result, usage = await _idem_cache.get_or_set(idempotency_key, fp, _compute_completion)
             except Exception as e:
@@ -3048,6 +3240,7 @@ class APIServerAdapter(BasePlatformAdapter):
         session_id = stored_session_id or str(uuid.uuid4())
 
         stream = _coerce_request_bool(body.get("stream"), default=False)
+        agent_overrides = _request_agent_overrides(body, virtual_model=self._model_name)
         if stream:
             # Streaming branch — emit OpenAI Responses SSE events as the
             # agent runs so frontends can render text deltas and tool
@@ -3100,6 +3293,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 tool_complete_callback=_on_tool_complete,
                 agent_ref=agent_ref,
                 gateway_session_key=gateway_session_key,
+                **agent_overrides,
             ))
             # Ensure SSE drain loops can terminate without relying on polling
             # agent_task.done(), which can race with queue timeout checks.
@@ -3133,13 +3327,23 @@ class APIServerAdapter(BasePlatformAdapter):
                 ephemeral_system_prompt=instructions,
                 session_id=session_id,
                 gateway_session_key=gateway_session_key,
+                **agent_overrides,
             )
 
         idempotency_key = request.headers.get("Idempotency-Key")
         if idempotency_key:
             fp = _make_request_fingerprint(
                 body,
-                keys=["input", "instructions", "previous_response_id", "conversation", "model", "tools"],
+                keys=[
+                    "input",
+                    "instructions",
+                    "previous_response_id",
+                    "conversation",
+                    "model",
+                    "provider",
+                    "model_options",
+                    "tools",
+                ],
             )
             try:
                 result, usage = await _idem_cache.get_or_set(idempotency_key, fp, _compute_response)
@@ -3763,6 +3967,9 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_complete_callback=None,
         agent_ref: Optional[list] = None,
         gateway_session_key: Optional[str] = None,
+        requested_model: Optional[str] = None,
+        requested_provider: Optional[str] = None,
+        model_options: Optional[Dict[str, Any]] = None,
     ) -> tuple:
         """
         Create an agent and run a conversation in a thread executor.
@@ -3794,6 +4001,9 @@ class APIServerAdapter(BasePlatformAdapter):
                     tool_start_callback=tool_start_callback,
                     tool_complete_callback=tool_complete_callback,
                     gateway_session_key=gateway_session_key,
+                    requested_model=requested_model,
+                    requested_provider=requested_provider,
+                    model_options=model_options,
                 )
                 if agent_ref is not None:
                     agent_ref[0] = agent
@@ -4440,6 +4650,7 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_get("/health/detailed", self._handle_health_detailed)
             self._app.router.add_get("/v1/health", self._handle_health)
             self._app.router.add_get("/v1/models", self._handle_models)
+            self._app.router.add_get("/api/model/options", self._handle_model_options)
             self._app.router.add_get("/v1/capabilities", self._handle_capabilities)
             self._app.router.add_get("/v1/skills", self._handle_skills)
             self._app.router.add_get("/v1/toolsets", self._handle_toolsets)
