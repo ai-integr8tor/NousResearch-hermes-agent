@@ -308,7 +308,8 @@ class EventBridge:
 
     def __init__(self):
         self._queue: List[QueueEvent] = []
-        self._cursor = self._load_db_high_water_mark()
+        self._startup_message_id_floor = self._load_db_message_high_water_mark()
+        self._cursor = self._message_cursor(self._startup_message_id_floor)
         self._lock = threading.Lock()
         self._new_event = threading.Event()
         self._running = False
@@ -320,7 +321,11 @@ class EventBridge:
         self._state_db_mtime: float = 0.0
         self._cached_sessions_index: dict = {}
 
-    def _load_db_high_water_mark(self) -> int:
+    @staticmethod
+    def _message_cursor(message_id: int) -> int:
+        return max(message_id, 0) * 2
+
+    def _load_db_message_high_water_mark(self) -> int:
         try:
             db = _get_session_db()
             if db is None:
@@ -498,7 +503,10 @@ class EventBridge:
             if not session_id:
                 continue
 
-            last_seen_id = self._last_poll_ids.get(session_key, 0)
+            last_seen_id = self._last_poll_ids.get(
+                session_key,
+                self._startup_message_id_floor,
+            )
 
             try:
                 messages = db.get_messages(session_id)
@@ -518,15 +526,16 @@ class EventBridge:
                 content = _extract_message_content(msg)
                 if not content:
                     continue
+                message_id = int(msg.get("id", 0))
                 self._enqueue(QueueEvent(
-                    cursor=int(msg.get("id", 0)),
+                    cursor=self._message_cursor(message_id),
                     type="message",
                     session_key=session_key,
                     data={
                         "role": msg.get("role", ""),
                         "content": content[:500],
                         "timestamp": str(msg.get("timestamp", "")),
-                        "message_id": str(msg.get("id", "")),
+                        "message_id": str(message_id),
                     },
                 ))
 
