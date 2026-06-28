@@ -106,6 +106,23 @@ class TestUnifiedDispatch:
         assert result["modality"] == "image"
         assert provider.last_kwargs["image_url"] == "https://example.com/img.png"
 
+    def test_reference_media_inputs_reach_provider(self):
+        provider = _RecordingProvider("rec")
+        video_gen_registry.register_provider(provider)
+        result = self._run({
+            "prompt": "match the references",
+            "reference_video_urls": [" https://example.com/ref.mp4 ", ""],
+            "reference_audio_urls": "https://example.com/ref.wav",
+            "first_frame_url": " https://example.com/first.png ",
+            "last_frame_url": "https://example.com/last.png",
+        })
+
+        assert result["success"] is True
+        assert provider.last_kwargs["reference_video_urls"] == ["https://example.com/ref.mp4"]
+        assert provider.last_kwargs["reference_audio_urls"] == ["https://example.com/ref.wav"]
+        assert provider.last_kwargs["first_frame_url"] == "https://example.com/first.png"
+        assert provider.last_kwargs["last_frame_url"] == "https://example.com/last.png"
+
     def test_prompt_required(self):
         provider = _RecordingProvider("rec")
         video_gen_registry.register_provider(provider)
@@ -122,5 +139,15 @@ class TestUnifiedDispatch:
     def test_operation_field_not_in_schema(self):
         """Make sure we removed the operation field from the schema."""
         from tools.video_generation_tool import VIDEO_GENERATE_SCHEMA
-        assert "operation" not in VIDEO_GENERATE_SCHEMA["parameters"]["properties"]
-        assert "video_url" not in VIDEO_GENERATE_SCHEMA["parameters"]["properties"]
+        properties = VIDEO_GENERATE_SCHEMA["parameters"]["properties"]
+        assert "operation" not in properties
+        assert "video_url" not in properties
+
+    def test_reference_media_fields_in_schema(self):
+        from tools.video_generation_tool import VIDEO_GENERATE_SCHEMA
+
+        properties = VIDEO_GENERATE_SCHEMA["parameters"]["properties"]
+        assert properties["reference_video_urls"]["items"]["type"] == "string"
+        assert properties["reference_audio_urls"]["items"]["type"] == "string"
+        assert properties["first_frame_url"]["type"] == "string"
+        assert properties["last_frame_url"]["type"] == "string"
