@@ -3814,15 +3814,27 @@ def _cfg_max_turns(cfg: dict, default: int) -> int:
 
 
 def _parse_tui_skills_env() -> list[str]:
-    raw = os.environ.get("HERMES_TUI_SKILLS", "")
-    skills: list[str] = []
-    seen: set[str] = set()
-    for part in raw.replace("\n", ",").split(","):
-        item = part.strip()
-        if item and item not in seen:
-            seen.add(item)
-            skills.append(item)
-    return skills
+    from agent.skill_commands import normalize_skill_identifiers
+
+    return normalize_skill_identifiers(os.environ.get("HERMES_TUI_SKILLS", ""))
+
+
+def _resolve_tui_startup_skills(cfg: dict) -> tuple[list[str], list[str]]:
+    from agent.skill_commands import (
+        config_default_skill_identifiers,
+        merge_preloaded_skill_identifiers,
+    )
+
+    explicit_skills = _parse_tui_skills_env()
+    default_skills = (
+        []
+        if is_truthy_value(os.environ.get("HERMES_IGNORE_RULES"))
+        else config_default_skill_identifiers(cfg)
+    )
+    return (
+        merge_preloaded_skill_identifiers(default_skills, explicit_skills),
+        explicit_skills,
+    )
 
 
 def _load_fallback_model():
@@ -4198,7 +4210,7 @@ def _make_agent(
     cfg = _load_cfg()
     agent_cfg = cfg.get("agent") or {}
     system_prompt = _prompt_text(agent_cfg.get("system_prompt", ""))
-    startup_skills = _parse_tui_skills_env()
+    startup_skills, explicit_startup_skills = _resolve_tui_startup_skills(cfg)
     if startup_skills:
         from agent.skill_commands import build_preloaded_skills_prompt
 
@@ -4207,7 +4219,16 @@ def _make_agent(
             task_id=session_id or key,
         )
         if missing_skills:
-            raise ValueError(f"Unknown skill(s): {', '.join(missing_skills)}")
+            explicit_set = set(explicit_startup_skills)
+            missing_explicit = [name for name in missing_skills if name in explicit_set]
+            missing_defaults = [name for name in missing_skills if name not in explicit_set]
+            if missing_defaults:
+                logger.warning(
+                    "Profile default skill(s) not found and skipped: %s",
+                    ", ".join(missing_defaults),
+                )
+            if missing_explicit:
+                raise ValueError(f"Unknown skill(s): {', '.join(missing_explicit)}")
         if skills_prompt:
             system_prompt = "\n\n".join(
                 part for part in (system_prompt, skills_prompt) if part
