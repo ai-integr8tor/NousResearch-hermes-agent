@@ -333,10 +333,7 @@ export function GatewaySettings({ onReconnectApplied }: GatewaySettingsProps) {
       notify({
         kind: 'warning',
         title: g.incompleteTitle,
-        message:
-          authMode === 'oauth'
-            ? g.incompleteSignIn
-            : g.incompleteToken
+        message: authMode === 'oauth' ? g.incompleteSignIn : g.incompleteToken
       })
 
       return
@@ -432,10 +429,7 @@ export function GatewaySettings({ onReconnectApplied }: GatewaySettingsProps) {
       notify({
         kind: 'warning',
         title: g.incompleteTitle,
-        message:
-          authMode === 'oauth'
-            ? g.incompleteSignInTest
-            : g.incompleteTokenTest
+        message: authMode === 'oauth' ? g.incompleteSignInTest : g.incompleteTokenTest
       })
 
       return
@@ -471,12 +465,7 @@ export function GatewaySettings({ onReconnectApplied }: GatewaySettingsProps) {
   }
 
   if (!window.hermesDesktop?.getConnectionConfig) {
-    return (
-      <EmptyState
-        description={g.unavailableDesc}
-        title={g.unavailableTitle}
-      />
-    )
+    return <EmptyState description={g.unavailableDesc} title={g.unavailableTitle} />
   }
 
   return (
@@ -519,9 +508,7 @@ export function GatewaySettings({ onReconnectApplied }: GatewaySettingsProps) {
           <AlertCircle className="mt-0.5 size-4 shrink-0" />
           <div>
             <div className="font-medium">{g.envOverrideTitle}</div>
-            <div className="mt-1 leading-5">
-              {g.envOverrideDesc}
-            </div>
+            <div className="mt-1 leading-5">{g.envOverrideDesc}</div>
           </div>
         </div>
       ) : null}
