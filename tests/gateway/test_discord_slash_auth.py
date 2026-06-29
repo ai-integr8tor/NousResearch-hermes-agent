@@ -128,7 +128,7 @@ _SENTINEL = object()
 
 def _make_interaction(
     user_id, *, channel_id=12345, guild_id=42, in_dm=False, in_thread=False,
-    parent_channel_id=None, user=_SENTINEL,
+    parent_channel_id=None, category_id=None, user=_SENTINEL,
 ):
     """Build a mock Discord Interaction with a still-unresponded response.
 
@@ -146,10 +146,11 @@ def _make_interaction(
         channel = discord.Thread()
         channel.id = channel_id
         channel.parent_id = parent_channel_id
+        channel.category_id = category_id
     elif channel_id is None:
         channel = None
     else:
-        channel = SimpleNamespace(id=channel_id)
+        channel = SimpleNamespace(id=channel_id, category_id=category_id)
 
     if user is _SENTINEL:
         user_obj = SimpleNamespace(id=int(user_id), name=f"user_{user_id}")
@@ -283,6 +284,14 @@ async def test_channel_allowlist_does_not_apply_to_dms(adapter, monkeypatch):
     assert await adapter._check_slash_authorization(interaction, "/help") is True
 
 
+@pytest.mark.asyncio
+async def test_channel_category_in_allowlist_passes(adapter, monkeypatch):
+    """A channel passes when its category is in DISCORD_ALLOWED_CHANNELS."""
+    monkeypatch.setenv("DISCORD_ALLOWED_CHANNELS", "5555")
+    interaction = _make_interaction("100200300", channel_id=9999, category_id=5555)
+    assert await adapter._check_slash_authorization(interaction, "/help") is True
+
+
 # ---------------------------------------------------------------------------
 # Channel blocklist (DISCORD_IGNORED_CHANNELS) parity
 # ---------------------------------------------------------------------------
@@ -301,6 +310,14 @@ async def test_ignored_channel_rejected(adapter, monkeypatch, caplog):
 async def test_ignored_channel_wildcard_blocks_all(adapter, monkeypatch):
     monkeypatch.setenv("DISCORD_IGNORED_CHANNELS", "*")
     interaction = _make_interaction("100200300", channel_id=9999)
+    assert await adapter._check_slash_authorization(interaction, "/help") is False
+
+
+@pytest.mark.asyncio
+async def test_channel_category_in_ignorelist_rejects(adapter, monkeypatch):
+    """A channel rejects when its category is in DISCORD_IGNORED_CHANNELS."""
+    monkeypatch.setenv("DISCORD_IGNORED_CHANNELS", "5555")
+    interaction = _make_interaction("100200300", channel_id=9999, category_id=5555)
     assert await adapter._check_slash_authorization(interaction, "/help") is False
 
 

@@ -58,10 +58,17 @@ class FakeDMChannel:
 
 
 class FakeTextChannel:
-    def __init__(self, channel_id: int = 1, name: str = "general", guild_name: str = "Hermes Server"):
+    def __init__(
+        self,
+        channel_id: int = 1,
+        name: str = "general",
+        guild_name: str = "Hermes Server",
+        category_id: int | None = None,
+    ):
         self.id = channel_id
         self.name = name
         self.guild = SimpleNamespace(name=guild_name)
+        self.category_id = category_id
         self.topic = None
 
     def history(self, *, limit, before, after=None, oldest_first=None):
@@ -276,6 +283,21 @@ async def test_discord_free_response_channel_overrides_mention_requirement(adapt
     adapter.handle_message.assert_awaited_once()
     event = adapter.handle_message.await_args.args[0]
     assert event.text == "allowed without mention"
+
+
+@pytest.mark.asyncio
+async def test_discord_free_response_category_allows_channel(adapter, monkeypatch):
+    monkeypatch.setenv("DISCORD_REQUIRE_MENTION", "true")
+    monkeypatch.setenv("DISCORD_FREE_RESPONSE_CHANNELS", "555")
+
+    channel = FakeTextChannel(channel_id=789, category_id=555)
+    message = make_message(channel=channel, content="allowed from category")
+
+    await adapter._handle_message(message)
+
+    adapter.handle_message.assert_awaited_once()
+    event = adapter.handle_message.await_args.args[0]
+    assert event.text == "allowed from category"
 
 
 @pytest.mark.asyncio
@@ -1153,4 +1175,3 @@ async def test_discord_non_reply_free_channel_skips_backfill(adapter, monkeypatc
     await adapter._handle_message(message)
 
     adapter._fetch_channel_context.assert_not_awaited()
-

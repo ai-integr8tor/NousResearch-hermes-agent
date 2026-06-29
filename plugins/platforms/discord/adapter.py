@@ -1099,14 +1099,8 @@ class DiscordAdapter(BasePlatformAdapter):
                         "DISCORD_IGNORE_NO_MENTION", "true"
                     ).lower() in {"true", "1", "yes"}
                     if _ignore_no_mention and not _self_mentioned and not _other_bots_mentioned:
-                        _channel_id = str(message.channel.id)
-                        _parent_id = None
-                        if hasattr(message.channel, "parent_id") and message.channel.parent_id:
-                            _parent_id = str(message.channel.parent_id)
                         _free_channels = adapter_self._discord_free_response_channels()
-                        _channel_ids = {_channel_id}
-                        if _parent_id:
-                            _channel_ids.add(_parent_id)
+                        _channel_ids = adapter_self._discord_channel_scope_ids(message.channel)
                         if "*" not in _free_channels and not (_channel_ids & _free_channels):
                             return
 
@@ -2985,13 +2979,8 @@ class DiscordAdapter(BasePlatformAdapter):
             )
             channel_ids: set = set()
             if chan_id_raw is not None:
+                channel_ids = self._discord_channel_scope_ids(chan_obj)
                 channel_ids.add(str(chan_id_raw))
-                # Mirror on_message: also test the parent channel for threads
-                # so per-channel allow/deny lists work consistently.
-                if isinstance(chan_obj, discord.Thread):
-                    parent_id = self._get_parent_channel_id(chan_obj)
-                    if parent_id:
-                        channel_ids.add(str(parent_id))
 
             allowed_raw = os.getenv("DISCORD_ALLOWED_CHANNELS", "")
             if allowed_raw:
@@ -5130,6 +5119,31 @@ class DiscordAdapter(BasePlatformAdapter):
             return str(parent_id)
         return None
 
+    def _discord_channel_scope_ids(self, channel: Any) -> set[str]:
+        """Return IDs that should match Discord channel policy.
+
+        Includes the concrete channel, its parent channel, and category IDs.
+        Text channels expose their category as ``category_id`` rather than
+        ``parent_id`` in some discord.py paths. This lets allowed/free-response
+        lists target a whole category while preserving per-channel entries.
+        """
+        ids: set[str] = set()
+
+        def _add_id(value: Any) -> None:
+            if value is not None:
+                ids.add(str(value))
+
+        _add_id(getattr(channel, "id", None))
+        parent = getattr(channel, "parent", None)
+        _add_id(getattr(parent, "id", None))
+        _add_id(getattr(channel, "category_id", None))
+        _add_id(getattr(channel, "parent_id", None))
+        _add_id(getattr(parent, "category_id", None))
+        _add_id(getattr(parent, "parent_id", None))
+        grandparent = getattr(parent, "parent", None)
+        _add_id(getattr(grandparent, "id", None))
+        return ids
+
     def _is_forum_parent(self, channel: Any) -> bool:
         """Best-effort check for whether a Discord channel is a forum channel."""
         if channel is None:
@@ -5347,7 +5361,7 @@ class DiscordAdapter(BasePlatformAdapter):
             normalized_content = normalized_content.replace(f"<@!{self._client.user.id}>", "").strip()
             message.content = normalized_content
         if not isinstance(message.channel, discord.DMChannel):
-            channel_ids = {str(message.channel.id)}
+            channel_ids = self._discord_channel_scope_ids(message.channel)
             if parent_channel_id:
                 channel_ids.add(parent_channel_id)
 
