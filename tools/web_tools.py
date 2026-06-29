@@ -307,6 +307,32 @@ def _web_requires_env() -> list[str]:
 
 DEFAULT_MIN_LENGTH_FOR_SUMMARIZATION = 5000
 
+
+def _read_web_extract_config() -> dict:
+    """Read web extraction config values with fallback to defaults."""
+    cfg = {
+        "max_output_size": 5000,
+        "min_length": DEFAULT_MIN_LENGTH_FOR_SUMMARIZATION,
+        "max_tokens": 20000,
+    }
+    try:
+        from hermes_cli.config import load_config
+        web_cfg = load_config().get("web", {})
+        if isinstance(web_cfg, dict):
+            val = web_cfg.get("extract_summary_max_chars")
+            if isinstance(val, (int, float)) and val > 0:
+                cfg["max_output_size"] = int(val)
+            val = web_cfg.get("extract_min_length")
+            if isinstance(val, (int, float)) and val > 0:
+                cfg["min_length"] = int(val)
+            val = web_cfg.get("extract_summary_max_tokens")
+            if isinstance(val, (int, float)) and val > 0:
+                cfg["max_tokens"] = int(val)
+    except Exception:
+        pass
+    return cfg
+
+
 def _is_nous_auxiliary_client(client: Any) -> bool:
     """Return True when the resolved auxiliary backend is Nous Portal."""
     from urllib.parse import urlparse
@@ -370,17 +396,24 @@ async def process_content_with_llm(
     MAX_CONTENT_SIZE = 2_000_000  # 2M chars - refuse entirely above this
     CHUNK_THRESHOLD = 500_000     # 500k chars - use chunked processing above this
     CHUNK_SIZE = 100_000          # 100k chars per chunk
-    MAX_OUTPUT_SIZE = 5000        # Hard cap on final output size
-    
+
+    # Read configurable thresholds from web.* config keys
+    _web_cfg = _read_web_extract_config()
+    MAX_OUTPUT_SIZE = _web_cfg["max_output_size"]
+    max_tokens = _web_cfg["max_tokens"]
+    # Use config value when caller passed the module-level default
+    if min_length == DEFAULT_MIN_LENGTH_FOR_SUMMARIZATION:
+        min_length = _web_cfg["min_length"]
+
     try:
         content_len = len(content)
-        
+
         # Refuse if content is absurdly large
         if content_len > MAX_CONTENT_SIZE:
             size_mb = content_len / 1_000_000
             logger.warning("Content too large (%.1fMB > 2MB limit). Refusing to process.", size_mb)
             return f"[Content too large to process: {size_mb:.1f}MB. Try a more focused source URL.]"
-        
+
         # Skip processing if content is too short
         if content_len < min_length:
             logger.debug("Content too short (%d < %d chars), skipping LLM processing", content_len, min_length)
@@ -398,13 +431,17 @@ async def process_content_with_llm(
         if content_len > CHUNK_THRESHOLD:
             logger.info("Content large (%d chars). Using chunked processing...", content_len)
             return await _process_large_content_chunked(
-                content, context_str, model, CHUNK_SIZE, MAX_OUTPUT_SIZE
+                content, context_str, model, CHUNK_SIZE, MAX_OUTPUT_SIZE,
+                max_tokens=max_tokens,
             )
         
         # Standard single-pass processing for normal content
         logger.info("Processing content with LLM (%d characters)", content_len)
         
-        processed_content = await _call_summarizer_llm(content, context_str, model)
+        processed_content = await _call_summarizer_llm(
+            content, context_str, model,
+            max_tokens=max_tokens, max_output_size=MAX_OUTPUT_SIZE,
+        )
         
         if processed_content:
             # Enforce output cap
@@ -440,12 +477,13 @@ async def process_content_with_llm(
 
 
 async def _call_summarizer_llm(
-    content: str, 
-    context_str: str, 
-    model: Optional[str], 
+    content: str,
+    context_str: str,
+    model: Optional[str],
     max_tokens: int = 20000,
     is_chunk: bool = False,
-    chunk_info: str = ""
+    chunk_info: str = "",
+    max_output_size: int = 5000,
 ) -> Optional[str]:
     """
     Make a single LLM call to summarize content.
@@ -485,14 +523,16 @@ Extract all important information from this section in a structured format. Focu
 
     else:
         # Standard full-document prompt
-        system_prompt = """You are an expert content analyst. Your job is to process web content and create a comprehensive yet concise summary that preserves all important information while dramatically reducing bulk.
+        system_prompt = f"""You are an expert content analyst. Your job is to process web content and create a comprehensive yet concise summary that preserves all important information while dramatically reducing bulk.
 
 Create a well-structured markdown summary that includes:
 1. Key excerpts (quotes, code snippets, important facts) in their original format
 2. Comprehensive summary of all other important information
 3. Proper markdown formatting with headers, bullets, and emphasis
 
-Your goal is to preserve ALL important information while reducing length. Never lose key facts, figures, insights, or actionable information. Make it scannable and well-organized."""
+Your goal is to preserve ALL important information while reducing length. Never lose key facts, figures, insights, or actionable information. Make it scannable and well-organized.
+
+Keep the summary concise — ensure the output is no more than {max_output_size:,} characters of well-structured markdown. Do not exceed this limit."""
 
         user_prompt = f"""Please process this web content and create a comprehensive markdown summary:
 
@@ -558,11 +598,12 @@ Create a markdown summary that captures all key information in a well-organized,
 
 
 async def _process_large_content_chunked(
-    content: str, 
-    context_str: str, 
-    model: Optional[str], 
+    content: str,
+    context_str: str,
+    model: Optional[str],
     chunk_size: int,
-    max_output_size: int
+    max_output_size: int,
+    max_tokens: int = 20000,
 ) -> Optional[str]:
     """
     Process large content by chunking, summarizing each chunk in parallel,
@@ -672,7 +713,7 @@ Create a single, unified markdown summary."""
                 {"role": "user", "content": synthesis_prompt},
             ],
             "temperature": 0.1,
-            "max_tokens": 20000,
+            "max_tokens": max_tokens,
         }
         if extra_body:
             call_kwargs["extra_body"] = extra_body

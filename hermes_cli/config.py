@@ -1161,6 +1161,9 @@ DEFAULT_CONFIG = {
         "backend": "",           # shared fallback — applies to both search and extract
         "search_backend": "",    # per-capability override for web_search (e.g. "searxng")
         "extract_backend": "",   # per-capability override for web_extract (e.g. "native")
+        "extract_summary_max_chars": 5000,   # Max chars for LLM summarization output
+        "extract_min_length": 5000,          # Min content length to trigger LLM summarization
+        "extract_summary_max_tokens": 20000, # Max tokens for LLM summarization call
     },
 
     "browser": {
