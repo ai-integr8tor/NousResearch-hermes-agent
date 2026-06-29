@@ -1051,10 +1051,12 @@ export function useMessageStream({
         const question = typeof payload?.question === 'string' ? payload.question : ''
 
         if (requestId && question) {
+          const choices = Array.isArray(payload?.choices) ? payload.choices.filter(c => typeof c === 'string') : null
+
           setClarifyRequest({
             requestId,
             question,
-            choices: Array.isArray(payload?.choices) ? payload!.choices!.filter(c => typeof c === 'string') : null,
+            choices,
             sessionId: sessionId ?? null
           })
 
@@ -1064,6 +1066,18 @@ export function useMessageStream({
           // "needs input" indicator on its row — works for the active session
           // too, and survives alt-tab / window blur (unlike a toast).
           if (sessionId) {
+            upsertToolCall(
+              sessionId,
+              {
+                args: {
+                  choices,
+                  question
+                },
+                name: 'clarify'
+              },
+              'running',
+              event.type
+            )
             updateSessionState(sessionId, state => ({ ...state, needsInput: true }))
           }
 
