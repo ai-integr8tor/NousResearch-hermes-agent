@@ -580,6 +580,15 @@ class SessionEntry:
     resume_reason: Optional[str] = None  # e.g. "restart_timeout"
     last_resume_marked_at: Optional[datetime] = None
 
+    # Set to True after the gateway has delivered the Codex gpt-5.5 autoraise
+    # explanatory notice once for this durable session. Persisted so the notice
+    # is not re-emitted when the in-memory AIAgent is rebuilt for the same
+    # session (agent-cache eviction, runtime signature change, gateway
+    # restart). /new, /reset, and auto-reset construct a fresh SessionEntry,
+    # which naturally clears this back to False so the notice is shown once
+    # for the new session. See issue #42187.
+    codex_gpt55_autoraise_notice_shown: bool = False
+
     def to_dict(self) -> Dict[str, Any]:
         result = {
             "session_key": self.session_key,
@@ -610,6 +619,7 @@ class SessionEntry:
             "was_auto_reset": self.was_auto_reset,
             "auto_reset_reason": self.auto_reset_reason,
             "reset_had_activity": self.reset_had_activity,
+            "codex_gpt55_autoraise_notice_shown": self.codex_gpt55_autoraise_notice_shown,
         }
         if self.origin:
             result["origin"] = self.origin.to_dict()
@@ -672,6 +682,9 @@ class SessionEntry:
             was_auto_reset=data.get("was_auto_reset", False),
             auto_reset_reason=data.get("auto_reset_reason"),
             reset_had_activity=data.get("reset_had_activity", False),
+            codex_gpt55_autoraise_notice_shown=data.get(
+                "codex_gpt55_autoraise_notice_shown", False
+            ),
         )
 
 
@@ -1336,6 +1349,19 @@ class SessionStore:
                     session_key,
                     entry.origin,
                 )
+
+    def mark_autoraise_notice_shown(self, session_key: str) -> None:
+        """Record that the Codex gpt-5.5 autoraise notice was delivered for
+        this durable session, so an AIAgent rebuild for the same session
+        does not re-emit it. No-op if the entry is missing or already
+        marked. See issue #42187.
+        """
+        with self._lock:
+            self._ensure_loaded_locked()
+            entry = self._entries.get(session_key)
+            if entry and not entry.codex_gpt55_autoraise_notice_shown:
+                entry.codex_gpt55_autoraise_notice_shown = True
+                self._save()
 
     def suspend_session(self, session_key: str) -> bool:
         """Mark a session as suspended so it auto-resets on next access.
