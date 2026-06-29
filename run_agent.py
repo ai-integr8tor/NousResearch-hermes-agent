@@ -5317,6 +5317,7 @@ class AIAgent:
             max_iterations=function_args.get("max_iterations"),
             acp_command=function_args.get("acp_command"),
             acp_args=function_args.get("acp_args"),
+            acp_cwd=function_args.get("acp_cwd"),
             role=function_args.get("role"),
             background=(not _is_subagent),
             parent_agent=self,
