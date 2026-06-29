@@ -477,6 +477,30 @@ class TestUnifiedCronjobTool:
         assert "Blocked" in result["error"]
         assert "restart loops" in result["error"]
 
+    def test_create_blocks_systemctl_user_restart_script(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / "hermes"
+        scripts_dir = hermes_home / "scripts"
+        scripts_dir.mkdir(parents=True)
+        (scripts_dir / "restart_gw.sh").write_text(
+            "#!/usr/bin/env bash\n"
+            "systemctl --user restart hermes-gateway.service\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        result = json.loads(
+            cronjob(
+                action="create",
+                schedule="every 1h",
+                script="restart_gw.sh",
+                no_agent=True,
+            )
+        )
+
+        assert result["success"] is False
+        assert "Blocked" in result["error"]
+        assert "restart loops" in result["error"]
+
     def test_update_blocks_script_that_restarts_gateway(self, tmp_path, monkeypatch):
         hermes_home = tmp_path / "hermes"
         scripts_dir = hermes_home / "scripts"
