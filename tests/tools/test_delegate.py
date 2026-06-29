@@ -1486,6 +1486,7 @@ class TestDelegationProviderIntegration(unittest.TestCase):
             "api_mode": "chat_completions",
             "command": "custom-copilot",
             "args": ["--stdio-custom"],
+            "cwd": "/remote/project",
         }
         parent = _make_mock_parent(depth=0)
 
@@ -1507,6 +1508,44 @@ class TestDelegationProviderIntegration(unittest.TestCase):
             self.assertEqual(kwargs.get("override_api_mode"), "chat_completions")
             self.assertEqual(kwargs.get("override_acp_command"), "custom-copilot")
             self.assertEqual(kwargs.get("override_acp_args"), ["--stdio-custom"])
+            self.assertEqual(kwargs.get("override_acp_cwd"), "/remote/project")
+
+    @patch("tools.delegate_tool._load_config")
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
+    def test_delegation_acp_cwd_override_reaches_child_agent(self, mock_creds, mock_cfg):
+        """Top-level and per-task ACP cwd overrides must reach child agents."""
+        mock_cfg.return_value = {"max_iterations": 45}
+        mock_creds.return_value = {
+            "provider": None,
+            "base_url": None,
+            "api_key": None,
+            "api_mode": None,
+            "model": None,
+        }
+        parent = _make_mock_parent(depth=0)
+
+        with patch("tools.delegate_tool._build_child_agent") as mock_build, \
+             patch("tools.delegate_tool._run_single_child") as mock_run:
+            mock_child = MagicMock()
+            mock_build.return_value = mock_child
+            mock_run.return_value = {
+                "task_index": 0, "status": "completed",
+                "summary": "Done", "api_calls": 1, "duration_seconds": 1.0
+            }
+
+            delegate_task(
+                acp_command="ssh",
+                acp_args=["remote", "copilot", "--acp", "--stdio"],
+                acp_cwd="/remote/default",
+                tasks=[
+                    {"goal": "Task A"},
+                    {"goal": "Task B", "acp_cwd": "/remote/task-b"},
+                ],
+                parent_agent=parent,
+            )
+
+            self.assertEqual(mock_build.call_args_list[0].kwargs["override_acp_cwd"], "/remote/default")
+            self.assertEqual(mock_build.call_args_list[1].kwargs["override_acp_cwd"], "/remote/task-b")
 
     @patch("tools.delegate_tool._load_config")
     @patch("tools.delegate_tool._resolve_delegation_credentials")
@@ -2104,11 +2143,13 @@ class TestDispatchDelegateTask(unittest.TestCase):
                 goal="test",
                 acp_command="claude",
                 acp_args=["--acp", "--stdio"],
+                acp_cwd="/remote/project",
                 parent_agent=parent,
             )
             _, kwargs = mock_build.call_args
             self.assertEqual(kwargs["override_acp_command"], "claude")
             self.assertEqual(kwargs["override_acp_args"], ["--acp", "--stdio"])
+            self.assertEqual(kwargs["override_acp_cwd"], "/remote/project")
 
 class TestDelegateEventEnum(unittest.TestCase):
     """Tests for DelegateEvent enum and back-compat aliases."""

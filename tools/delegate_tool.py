@@ -1043,6 +1043,7 @@ def _build_child_agent(
     # ACP transport overrides — lets a non-ACP parent spawn ACP child agents
     override_acp_command: Optional[str] = None,
     override_acp_args: Optional[List[str]] = None,
+    override_acp_cwd: Optional[str] = None,
     # Per-call role controlling whether the child can further delegate.
     # 'leaf' (default) cannot; 'orchestrator' retains the delegation
     # toolset subject to depth/kill-switch bounds applied below.
@@ -1205,6 +1206,7 @@ def _build_child_agent(
         if override_acp_args is not None
         else (getattr(parent_agent, "acp_args", []) or [])
     )
+    effective_acp_cwd = override_acp_cwd or getattr(parent_agent, "acp_cwd", None)
 
     # When override_provider is set (e.g. delegation.provider: minimax-cn),
     # the subagent must use direct API calls — not the parent's ACP transport.
@@ -1213,6 +1215,7 @@ def _build_child_agent(
     if override_provider and not override_acp_command:
         effective_acp_command = None
         effective_acp_args = []
+        effective_acp_cwd = None
 
     if override_acp_command:
         # If explicitly forcing an ACP transport override, the provider MUST be copilot-acp
@@ -1274,6 +1277,7 @@ def _build_child_agent(
         api_mode=effective_api_mode,
         acp_command=effective_acp_command,
         acp_args=effective_acp_args,
+        acp_cwd=effective_acp_cwd,
         max_iterations=max_iterations,
         max_tokens=getattr(parent_agent, "max_tokens", None),
         reasoning_config=child_reasoning,
@@ -2129,6 +2133,7 @@ def delegate_task(
     max_iterations: Optional[int] = None,
     acp_command: Optional[str] = None,
     acp_args: Optional[List[str]] = None,
+    acp_cwd: Optional[str] = None,
     role: Optional[str] = None,
     background: Optional[bool] = None,
     parent_agent=None,
@@ -2270,6 +2275,7 @@ def delegate_task(
     try:
         for i, t in enumerate(task_list):
             task_acp_args = t.get("acp_args") if "acp_args" in t else None
+            task_acp_cwd = t.get("acp_cwd") if "acp_cwd" in t else None
             # Per-task role beats top-level; normalise again so unknown
             # per-task values warn and degrade to leaf uniformly.
             effective_role = _normalize_role(t.get("role") or top_role)
@@ -2293,6 +2299,11 @@ def delegate_task(
                     task_acp_args
                     if task_acp_args is not None
                     else (acp_args if acp_args is not None else creds.get("args"))
+                ),
+                override_acp_cwd=(
+                    task_acp_cwd
+                    if task_acp_cwd is not None
+                    else (acp_cwd if acp_cwd is not None else creds.get("cwd"))
                 ),
                 role=effective_role,
             )
@@ -2825,6 +2836,7 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
             "base_url": None,
             "api_key": None,
             "api_mode": None,
+            "cwd": None,
         }
 
     # Provider is configured — resolve full credentials
@@ -2855,6 +2867,7 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
         "api_mode": runtime.get("api_mode"),
         "command": runtime.get("command"),
         "args": list(runtime.get("args") or []),
+        "cwd": runtime.get("cwd"),
     }
 
 
@@ -3138,6 +3151,13 @@ DELEGATE_TASK_SCHEMA = {
                             "items": {"type": "string"},
                             "description": "Per-task ACP args override. Leave empty unless acp_command is set.",
                         },
+                        "acp_cwd": {
+                            "type": "string",
+                            "description": (
+                                "Per-task ACP session cwd override. Use only with acp_command, "
+                                "especially when the ACP CLI runs on a remote host over ssh."
+                            ),
+                        },
                         "role": {
                             "type": "string",
                             "enum": ["leaf", "orchestrator"],
@@ -3190,6 +3210,14 @@ DELEGATE_TASK_SCHEMA = {
                     "Leave empty unless acp_command is explicitly provided."
                 ),
             },
+            "acp_cwd": {
+                "type": "string",
+                "description": (
+                    "Working directory to send in ACP session/new for child agents. "
+                    "Only used when acp_command is set. This may be a remote path "
+                    "when acp_command launches an ACP CLI over ssh."
+                ),
+            },
         },
         "required": [],
     },
@@ -3228,6 +3256,7 @@ registry.register(
         max_iterations=args.get("max_iterations"),
         acp_command=args.get("acp_command"),
         acp_args=args.get("acp_args"),
+        acp_cwd=args.get("acp_cwd"),
         role=args.get("role"),
         background=_model_background_value(args, kw.get("parent_agent")),
         parent_agent=kw.get("parent_agent"),
