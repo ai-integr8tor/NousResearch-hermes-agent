@@ -546,12 +546,39 @@ def find_alias_for_profile(profile_name: str) -> Optional[str]:
             continue
         if not is_windows and entry.suffix:
             continue
+        # On POSIX, skip non-executable files (binaries, etc.) to avoid
+        # expensive read attempts on unrelated files in ~/.local/bin.
+        if not is_windows:
+            try:
+                if not os.access(entry, os.X_OK):
+                    continue
+            except OSError:
+                continue
         try:
-            content = entry.read_text()
+            # Read only the first ~200 bytes — enough for shebang + needle.
+            # This avoids loading large binaries or non-wrapper scripts.
+            with entry.open("r", encoding="utf-8", errors="strict") as fh:
+                head = fh.read(256)
         except (OSError, UnicodeDecodeError):
             continue
-        if needle not in content:
-            continue
+        # Fast-path: our wrappers always start with a shebang (POSIX) or
+        # "@echo off" (Windows). If the header doesn't look like ours, skip.
+        if is_windows:
+            if not head.lstrip().startswith("@echo off"):
+                continue
+        else:
+            if not head.startswith("#!"):
+                continue
+        # Header looks like a wrapper; read the rest if needle not in head.
+        if needle not in head:
+            try:
+                with entry.open("r", encoding="utf-8", errors="strict") as fh:
+                    fh.seek(0)
+                    content = fh.read()
+            except (OSError, UnicodeDecodeError):
+                continue
+            if needle not in content:
+                continue
         alias = entry.stem if is_windows else entry.name
         if alias == canon:
             profile_named = alias
