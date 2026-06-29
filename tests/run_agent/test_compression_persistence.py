@@ -100,7 +100,7 @@ class TestFlushAfterCompression:
                 f"Compression persistence bug: messages not written to SQLite."
             )
 
-    def test_flush_with_stale_history_loses_messages(self):
+    def test_flush_with_stale_history_recovers_from_persisted_prefix(self):
         """Stale conversation_history no longer causes data loss."""
         from hermes_state import SessionDB
 
@@ -120,8 +120,9 @@ class TestFlushAfterCompression:
                 {"role": "assistant", "content": "continuing..."},
             ]
 
-            # Stale history longer than messages: the old positional flush
-            # sliced past the end and dropped both messages (#46053).
+            # A stale API-call history cursor can be longer than the compressed
+            # messages list. The SessionDB flush must recover from the durable
+            # persisted prefix (0 here), not skip messages[100:].
             stale_history = [{"role": "user", "content": f"msg{i}"} for i in range(100)]
             agent._flush_messages_to_session_db(compressed, stale_history)
 

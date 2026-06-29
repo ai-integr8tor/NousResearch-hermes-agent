@@ -549,7 +549,7 @@ class AIAgent:
 
     def _ensure_db_session(self) -> None:
         """Create session DB row on first use. Disables _session_db on failure."""
-        if self._session_db_created or not self._session_db:
+        if getattr(self, "_session_db_created", False) or not self._session_db:
             return
         source = _session_source_for_agent(self.platform)
         try:
@@ -557,10 +557,10 @@ class AIAgent:
                 session_id=self.session_id,
                 source=source,
                 model=self.model,
-                model_config=self._session_init_model_config,
-                system_prompt=self._cached_system_prompt,
+                model_config=getattr(self, "_session_init_model_config", None),
+                system_prompt=getattr(self, "_cached_system_prompt", None),
                 user_id=None,
-                parent_session_id=self._parent_session_id,
+                parent_session_id=getattr(self, "_parent_session_id", None),
                 cwd=_launch_cwd_for_session(source),
             )
             self._session_db_created = True
@@ -647,7 +647,7 @@ class AIAgent:
         carry_over_context: bool = False,
     ):
         """Reset all session-scoped token counters to 0 for a fresh session.
-        
+
         This method encapsulates the reset logic for all session-level metrics
         including:
         - Token usage counters (input, output, total, prompt, completion)
@@ -656,7 +656,7 @@ class AIAgent:
         - Reasoning tokens
         - Estimated cost tracking
         - Context compressor internal counters
-        
+
         The method safely handles optional attributes (e.g., context compressor)
         using ``hasattr`` checks.
 
@@ -1645,7 +1645,7 @@ class AIAgent:
         self._apply_persist_user_message_override(messages)
         try:
             # Retry row creation if the earlier attempt failed transiently.
-            if not self._session_db_created:
+            if not getattr(self, "_session_db_created", False):
                 self._ensure_db_session()
             # Positional flushing used to slice at
             # max(len(conversation_history), _last_flushed_db_idx). That
@@ -1655,10 +1655,14 @@ class AIAgent:
             # larger than len(messages); the slice is then empty and delivered
             # assistant responses never reach state.db (#46053).
             #
-            # Track object identities instead. `messages` is a shallow copy of
-            # `conversation_history`, so history dicts are skipped by identity,
-            # and new dicts appended during this turn are written once even if
-            # repair compacts the list around them.
+            # Track object identities instead. `messages` is often a shallow
+            # copy of `conversation_history`, so a strict shared prefix marks
+            # pre-turn history that should not be re-written on the first flush
+            # for a turn. But `conversation_history` is only an API-call cursor,
+            # not a durable SessionDB cursor: after compression/session rotation
+            # it can cover the whole local transcript (or point past it) even
+            # though the new session row is empty. Recover that case from the
+            # persisted DB prefix instead of skipping the full message list.
             current_session_id = getattr(self, "session_id", None)
             flushed_session_id = getattr(self, "_flushed_db_message_session_id", None)
             if flushed_session_id != current_session_id or self._last_flushed_db_idx == 0:
@@ -1668,19 +1672,63 @@ class AIAgent:
             if not isinstance(flushed_ids, set):
                 flushed_ids = set()
                 self._flushed_db_message_ids = flushed_ids
-            history_ids = {
-                id(item) for item in (conversation_history or [])
+
+            history_items = [
+                item for item in (conversation_history or [])
                 if isinstance(item, dict)
-            }
+            ]
+            history_prefix_len = 0
+            if history_items and len(history_items) < len(messages):
+                _prefix_len = min(len(history_items), len(messages))
+                if all(messages[i] is history_items[i] for i in range(_prefix_len)):
+                    history_prefix_len = _prefix_len
+                    for msg in messages[:history_prefix_len]:
+                        flushed_ids.add(id(msg))
+
+            if not flushed_ids:
+                try:
+                    if hasattr(self._session_db, "message_count"):
+                        _raw_persisted_count = self._session_db.message_count(self.session_id)
+                    else:
+                        _raw_persisted_count = len(self._session_db.get_messages(self.session_id))
+                    persisted_count = (
+                        _raw_persisted_count
+                        if isinstance(_raw_persisted_count, int)
+                        and not isinstance(_raw_persisted_count, bool)
+                        and _raw_persisted_count >= 0
+                        else None
+                    )
+                except Exception:
+                    persisted_count = None
+                if persisted_count is not None:
+                    durable_prefix_len = min(persisted_count, len(messages))
+                    if history_items and len(history_items) >= len(messages):
+                        if persisted_count >= len(messages):
+                            # repair_message_sequence can shrink a long persisted
+                            # history into fewer local message dicts before adding
+                            # this turn's new user/assistant tail. In that shape a
+                            # raw persisted row count no longer maps onto positions
+                            # in ``messages``; marking every local dict flushed would
+                            # drop the new turn. Fall back to identity-based writes.
+                            durable_prefix_len = 0
+                        elif durable_prefix_len < len(messages):
+                            logger.warning(
+                                "Session DB flush cursor ahead of persisted messages for %s "
+                                "(history_len=%s, persisted=%s, message_len=%s); "
+                                "resuming from durable prefix",
+                                self.session_id,
+                                len(history_items),
+                                persisted_count,
+                                len(messages),
+                            )
+                    for msg in messages[:durable_prefix_len]:
+                        flushed_ids.add(id(msg))
 
             for msg in messages:
                 if not isinstance(msg, dict):
                     continue
                 msg_id = id(msg)
                 if msg_id in flushed_ids:
-                    continue
-                if msg_id in history_ids:
-                    flushed_ids.add(msg_id)
                     continue
                 role = msg.get("role", "unknown")
                 content = msg.get("content")
