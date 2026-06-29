@@ -1917,15 +1917,18 @@ DEFAULT_CONFIG = {
         "provider": "edge",  # "edge" (free) | "elevenlabs" (premium) | "openai" | "xai" | "minimax" | "mistral" | "gemini" | "neutts" (local) | "kittentts" (local) | "piper" (local)
         "edge": {
             "voice": "en-US-AriaNeural",
+            "streaming": False,
             # Popular: AriaNeural, JennyNeural, AndrewNeural, BrianNeural, SoniaNeural
         },
         "elevenlabs": {
             "voice_id": "pNInz6obpgDQGcFmaJgB",  # Adam
             "model_id": "eleven_multilingual_v2",
+            "streaming": True,
         },
         "openai": {
             "model": "gpt-4o-mini-tts",
             "voice": "alloy",
+            "streaming": False,
             # Voices: alloy, echo, fable, onyx, nova, shimmer
         },
         "gemini": {
@@ -3013,7 +3016,7 @@ DEFAULT_CONFIG = {
 
 
     # Config schema version - bump this when adding new required fields
-    "_config_version": 31,
+    "_config_version": 32,
 }
 
 # =============================================================================
