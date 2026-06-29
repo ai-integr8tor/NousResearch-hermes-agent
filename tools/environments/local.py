@@ -892,7 +892,22 @@ class LocalEnvironment(BaseEnvironment):
 
         try:
             if _IS_WINDOWS:
-                proc.terminate()
+                # On Windows, proc.terminate() only kills the bash wrapper
+                # process, not its children.  GUI programs (.exe) launched
+                # from bash inherit the stdout pipe and keep it open even
+                # after bash exits, causing the drain thread in
+                # _wait_for_process to block indefinitely (issue #54201).
+                # Use taskkill /T /F to kill the entire process tree rooted
+                # at bash, which closes the pipe and lets the drain thread
+                # complete.
+                try:
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                        timeout=3,
+                        capture_output=True,
+                    )
+                except Exception:
+                    proc.terminate()
             else:
                 try:
                     pgid = os.getpgid(proc.pid)
