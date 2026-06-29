@@ -1113,6 +1113,17 @@ class APIServerAdapter(BasePlatformAdapter):
 
         max_iterations = _current_max_iterations()
 
+        # If API-server startup kicked off MCP discovery in the background,
+        # briefly join it before constructing AIAgent. AIAgent snapshots tools
+        # during construction, so this bounded wait lets slow/cold MCP servers
+        # that are already starting register in time for the first REST turn
+        # while preserving prompt-cache safety and never blocking indefinitely.
+        try:
+            from hermes_cli.mcp_startup import wait_for_mcp_discovery
+            wait_for_mcp_discovery()
+        except Exception:
+            logger.debug("[%s] MCP discovery wait failed", self.name, exc_info=True)
+
         # Load fallback provider chain so the API server platform has the
         # same fallback behaviour as Telegram/Discord/Slack (fixes #4954).
         fallback_model = GatewayRunner._load_fallback_model()
@@ -4562,6 +4573,24 @@ class APIServerAdapter(BasePlatformAdapter):
                 return False
             except (ConnectionRefusedError, OSError):
                 pass  # port is free
+
+            # Load configured MCP servers so REST/API sessions expose MCP tools,
+            # matching the TUI/gateway/ACP/CLI entrypoints which all kick off
+            # MCP discovery at startup (#50248). Do this only after startup
+            # refusal gates pass so a missing/weak API_SERVER_KEY cannot spawn
+            # configured MCP subprocesses or open remote MCP connections. The
+            # bounded pre-agent wait in _create_agent() gives fast/cold servers
+            # a chance to register before AIAgent snapshots tools without
+            # blocking startup indefinitely.
+            try:
+                from hermes_cli.mcp_startup import start_background_mcp_discovery
+                start_background_mcp_discovery(
+                    logger=logger, thread_name=f"{self.name}-mcp-discovery"
+                )
+            except Exception:
+                logger.debug(
+                    "[%s] MCP discovery kickoff failed", self.name, exc_info=True
+                )
 
             self._runner = web.AppRunner(self._app)
             await self._runner.setup()
