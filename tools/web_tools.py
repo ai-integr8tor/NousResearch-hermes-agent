@@ -149,7 +149,7 @@ def _get_backend() -> str:
     keys manually without running setup.
     """
     configured = (_load_web_config().get("backend") or "").lower().strip()
-    if configured in {"parallel", "firecrawl", "tavily", "exa", "searxng", "brave-free", "ddgs", "xai"}:
+    if configured in {"parallel", "firecrawl", "tavily", "exa", "searxng", "brave-free", "openai-codex", "ddgs", "xai"}:
         return configured
 
     # Fallback for manual / legacy config — pick the highest-priority
@@ -167,6 +167,7 @@ def _get_backend() -> str:
         ("firecrawl", _is_tool_gateway_ready()),
         ("searxng", _has_env("SEARXNG_URL")),
         ("brave-free", _has_env("BRAVE_SEARCH_API_KEY")),
+        ("openai-codex", _has_codex_oauth_token()),
         ("ddgs", _ddgs_package_importable()),
     )
     for backend, available in backend_candidates:
@@ -230,6 +231,11 @@ def _is_backend_available(backend: str) -> bool:
         return _has_env("BRAVE_SEARCH_API_KEY")
     if backend == "ddgs":
         return _ddgs_package_importable()
+    if backend == "openai-codex":
+        # Cheap probe only — do not call _read_codex_access_token() here,
+        # because that may touch the credential pool / refresh path. Actual
+        # token validity is checked by the provider when it makes the request.
+        return _has_codex_oauth_token()
     if backend == "xai":
         # Cheap probe — env var OR auth.json has OAuth tokens. Must not
         # call resolve_xai_http_credentials() here because the OAuth path
@@ -241,6 +247,16 @@ def _is_backend_available(backend: str) -> bool:
         except Exception:
             return False
     return False
+
+
+def _has_codex_oauth_token() -> bool:
+    """Return True when OpenAI Codex OAuth credentials are present locally."""
+    try:
+        from plugins.web.openai_codex.provider import _has_codex_oauth_token as _probe
+
+        return _probe()
+    except Exception:
+        return False
 
 
 def _ddgs_package_importable() -> bool:
@@ -789,7 +805,7 @@ def web_search_tool(query: str, limit: int = 5) -> str:
     Search the web for information using available search API backend.
 
     This function provides a generic interface for web search that can work
-    with multiple backends (Parallel or Firecrawl).
+    with multiple plugin-backed providers.
 
     Note: This function returns search result metadata only (URLs, titles, descriptions).
     Use web_extract_tool to get full content from specific URLs.
@@ -840,10 +856,9 @@ def web_search_tool(query: str, limit: int = 5) -> str:
         if is_interrupted():
             return tool_error("Interrupted", success=False)
 
-        # Dispatch through the web search registry. All 7 providers
-        # (brave-free, ddgs, searxng, exa, parallel, tavily, firecrawl)
-        # now live as plugins; the dispatcher is just a registry lookup +
-        # delegation. Sync only — every provider's search() is sync.
+        # Dispatch through the web search registry. Built-in providers now live
+        # as plugins; the dispatcher is just a registry lookup + delegation.
+        # Sync only — every provider's search() is sync.
         _ensure_web_plugins_loaded()
         from agent.web_search_registry import (
             get_active_search_provider,
@@ -902,7 +917,7 @@ async def web_extract_tool(
     Extract content from specific web pages using available extraction API backend.
 
     This function provides a generic interface for web content extraction that
-    can work with multiple backends. Currently uses Firecrawl.
+    can work with multiple plugin-backed providers.
 
     Args:
         urls (List[str]): List of URLs to extract content from
