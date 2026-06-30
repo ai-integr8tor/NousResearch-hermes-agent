@@ -17,6 +17,9 @@ export const HERMES_CONFIG_KEY = ['hermes-config-record'] as const
 export const useHermesConfigRecord = () =>
   useQuery({ queryKey: HERMES_CONFIG_KEY, queryFn: getHermesConfigRecord, staleTime: 0 })
 
+export const fetchHermesConfigRecord = () =>
+  queryClient.fetchQuery({ queryKey: HERMES_CONFIG_KEY, queryFn: getHermesConfigRecord, staleTime: 0 })
+
 export const setHermesConfigCache = writeCache<HermesConfigRecord>(HERMES_CONFIG_KEY)
 
 export const invalidateHermesConfig = () => queryClient.invalidateQueries({ queryKey: HERMES_CONFIG_KEY })
