@@ -307,7 +307,26 @@ def _apply_external_secret_sources(home_path: Path) -> None:
     except Exception:  # noqa: BLE001 — config errors must not block startup
         return
 
-    bw_cfg = (cfg or {}).get("bitwarden") or {}
+    cfg = cfg or {}
+    bw_cfg = cfg.get("bitwarden") or {}
+
+    # Unified selector: secrets.provider chooses the backend
+    # ("env" | "command" | "bitwarden").  BACK-COMPAT: existing Bitwarden
+    # users have only `secrets.bitwarden.enabled: true` and no provider
+    # key — treat that as provider == "bitwarden" so they are unaffected.
+    provider = str(cfg.get("provider") or "").strip().lower()
+    if not provider:
+        provider = "bitwarden" if bw_cfg.get("enabled") else "env"
+
+    if provider == "command":
+        _apply_command_provider(cfg, home_path)
+        return
+
+    if provider != "bitwarden":
+        # "env" (or anything unrecognized) — today's default: .env / shell
+        # env only, nothing to pull.
+        return
+
     if not bw_cfg.get("enabled"):
         return
 
@@ -354,6 +373,47 @@ def _apply_external_secret_sources(home_path: Path) -> None:
             f"  Bitwarden Secrets Manager: {warn}",
             file=sys.stderr,
         )
+
+
+def _apply_command_provider(cfg: dict, home_path: Path) -> None:
+    """Route ``secrets.provider: command`` to the command secret source.
+
+    Mirrors the Bitwarden block: applied keys get recorded in
+    ``_SECRET_SOURCES`` (label ``"command"``), a one-line status goes to
+    stderr, and the ASCII sanitization sweep re-runs over the new values.
+    Failures never block startup.
+    """
+    try:
+        from agent.secret_sources.command import apply_command_secrets
+    except ImportError:
+        return
+
+    result = apply_command_secrets(
+        command=str(cfg.get("command", "") or ""),
+        override_existing=bool(cfg.get("override_existing", False)),
+        timeout_seconds=float(cfg.get("timeout_seconds", 3.0)),
+        home_path=home_path,
+    )
+
+    if result.applied:
+        # Re-run the ASCII sanitization pass: helper-supplied values are
+        # user-supplied and might have the same copy-paste corruption as a
+        # manually edited .env (see #6843).
+        _sanitize_loaded_credentials()
+        # Remember where these came from so the setup / `hermes model`
+        # flows can label detected credentials with "(from command)".
+        for name in result.applied:
+            _SECRET_SOURCES[name] = "command"
+        print(
+            f"  Command secret source: applied {len(result.applied)} "
+            f"secret{'s' if len(result.applied) != 1 else ''} "
+            f"({', '.join(sorted(result.applied))})",
+            file=sys.stderr,
+        )
+    if result.error:
+        print(f"  Command secret source: {result.error}", file=sys.stderr)
+    for warn in result.warnings:
+        print(f"  Command secret source: {warn}", file=sys.stderr)
 
 
 def _load_secrets_config(home_path: Path) -> dict:
