@@ -1936,7 +1936,7 @@ DEFAULT_CONFIG = {
     # limit (OpenAI 4096, xAI 15000, MiniMax 10000, ElevenLabs 5k-40k model-aware,
     # Gemini 32000, Edge 5000, Mistral 4000, NeuTTS/KittenTTS 2000).
     "tts": {
-        "provider": "edge",  # "edge" (free) | "elevenlabs" (premium) | "openai" | "xai" | "minimax" | "mistral" | "gemini" | "neutts" (local) | "kittentts" (local) | "piper" (local)
+        "provider": "edge",  # "edge" (free) | "elevenlabs" (premium) | "openai" | "xai" | "minimax" | "mistral" | "gemini" | "gradium" | "neutts" (local) | "kittentts" (local) | "piper" (local)
         "edge": {
             "voice": "en-US-AriaNeural",
             # Popular: AriaNeural, JennyNeural, AndrewNeural, BrianNeural, SoniaNeural
@@ -1991,6 +1991,10 @@ DEFAULT_CONFIG = {
             # "noise_w_scale": 0.8,
             # "volume": 1.0,
             # "normalize_audio": True,
+        },
+        "gradium": {
+            "voice_id": "YTpq7expH9539ERJ",  # default english voice id
+            "model": "default",
         },
     },
     
@@ -3609,6 +3613,13 @@ OPTIONAL_ENV_VARS = {
         "prompt": "ElevenLabs API key",
         "url": "https://elevenlabs.io/",
         "tools": ["elevenlabs_tts", "voice_transcription"],
+        "password": True,
+        "category": "tool",
+    },
+    "GRADIUM_API_KEY": {
+        "description": "Gradium API key for text-to-speech",
+        "prompt": "Gradium API key",
+        "url": "https://gradium.ai/",
         "password": True,
         "category": "tool",
     },
