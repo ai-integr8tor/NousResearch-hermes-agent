@@ -486,6 +486,78 @@ def _get_cdp_override() -> str:
     return ""
 
 
+# Composite session-key prefix for named browser profiles.  Mirrors
+# ``_LOCAL_SUFFIX`` ("::local") used by hybrid routing — a profile session key
+# is ``f"{task_id}::profile:{name}"``.  Both forms flow through the same
+# _active_sessions / _run_browser_command / cleanup paths; the key is opaque to
+# those internals.
+_PROFILE_PREFIX = "::profile:"
+
+
+def _get_browser_profiles() -> Dict[str, str]:
+    """Return the configured ``browser.profiles`` map (name -> CDP endpoint).
+
+    Read fresh from config on each call (like ``_get_cdp_override``) so a
+    config edit takes effect on the next browser call without a restart.
+    Returns an empty dict when unset or malformed.
+    """
+    try:
+        from hermes_cli.config import read_raw_config
+
+        cfg = read_raw_config()
+        browser_cfg = cfg.get("browser", {})
+        if isinstance(browser_cfg, dict):
+            profiles = browser_cfg.get("profiles", {})
+            if isinstance(profiles, dict):
+                # Coerce to str->str, dropping empty/invalid entries.
+                return {
+                    str(k): str(v)
+                    for k, v in profiles.items()
+                    if k and isinstance(v, (str,)) and v.strip()
+                }
+    except Exception as e:
+        logger.debug("Could not read browser.profiles from config: %s", e)
+    return {}
+
+
+def _resolve_profile_cdp(profile: str) -> str:
+    """Resolve a named browser profile to a concrete CDP URL.
+
+    Resolution order:
+      1. ``browser.profiles[profile]`` — explicit named endpoint.
+      2. For the implicit ``default`` profile only: fall back to the legacy
+         single-endpoint ``BROWSER_CDP_URL`` env / ``browser.cdp_url`` config
+         (so pre-profiles configs keep working with no ``profiles`` map).
+
+    Raises ``ValueError`` for an unknown non-default profile.  We deliberately
+    do NOT silently fall back to the default endpoint for an unknown name —
+    crossing an account boundary silently is exactly the failure profiles
+    exist to prevent.
+    """
+    profiles = _get_browser_profiles()
+    raw = profiles.get(profile, "")
+    if raw and raw.strip():
+        return _resolve_cdp_override(raw.strip())
+
+    if profile == _DEFAULT_PROFILE:
+        # Legacy fallback: a config with no profiles map but a bare cdp_url.
+        legacy = _get_cdp_override()
+        if legacy:
+            return legacy
+        return ""
+
+    # Unknown named profile — fail loud.
+    known = ", ".join(sorted(profiles)) or "(none configured)"
+    raise ValueError(
+        f"Unknown browser profile {profile!r}. "
+        f"Configured profiles: {known}. "
+        f"Add it under browser.profiles in config.yaml."
+    )
+
+
+_DEFAULT_PROFILE = "default"
+
+
 def _get_dialog_policy_config() -> Tuple[str, float]:
     """Read ``browser.dialog_policy`` + ``browser.dialog_timeout_s`` from config.
 
@@ -1284,6 +1356,25 @@ def _is_local_sidecar_key(session_key: str) -> bool:
     return session_key.endswith(_LOCAL_SUFFIX)
 
 
+def _profile_from_session_key(session_key: str) -> Optional[str]:
+    """Extract the browser-profile name from a composite session key.
+
+    Profile session keys look like ``f"{task_id}::profile:{name}"`` (see
+    ``_PROFILE_PREFIX``).  Returns the ``name`` portion, or ``None`` when the
+    key carries no profile (bare task_id or a ``::local`` sidecar key).
+    """
+    idx = session_key.find(_PROFILE_PREFIX)
+    if idx == -1:
+        return None
+    name = session_key[idx + len(_PROFILE_PREFIX):]
+    return name or None
+
+
+def _compose_profile_session_key(task_id: str, profile: str) -> str:
+    """Build the composite session key for ``task_id`` under ``profile``."""
+    return f"{task_id}{_PROFILE_PREFIX}{profile}"
+
+
 def _last_session_key(task_id: str) -> str:
     """Return the session key to use for a non-nav browser tool call.
 
@@ -1783,6 +1874,10 @@ BROWSER_TOOL_SCHEMAS = [
                 "url": {
                     "type": "string",
                     "description": "The URL to navigate to (e.g., 'https://example.com')"
+                },
+                "profile": {
+                    "type": "string",
+                    "description": "Optional named browser profile for account isolation. Only set this when operating a specific logged-in identity that maps to a configured profile under browser.profiles in config.yaml (each profile is a separate persistent browser with its own cookies/logins). The profile sticks to all follow-up browser_snapshot/click/type calls on this task. Omit for normal browsing (uses the default profile). Passing an unconfigured profile name errors rather than silently using the default — it never crosses an account boundary by accident."
                 }
             },
             "required": ["url"]
@@ -1992,9 +2087,21 @@ def _get_session_info(task_id: Optional[str] = None) -> Dict[str, str]:
     # the bare task_id key.
     force_local = _is_local_sidecar_key(task_id)
 
+    # Named browser profile: session keys of the form ``{task_id}::profile:{name}``
+    # bind this session to that profile's dedicated CDP endpoint (its own
+    # persistent Chrome / cookie jar).  Resolves ahead of the global override so
+    # each profile stays isolated; an unknown profile raises (no silent
+    # cross-account fallback).
+    profile_name = _profile_from_session_key(task_id)
+    profile_cdp = ""
+    if profile_name:
+        profile_cdp = _resolve_profile_cdp(profile_name)
+
     # Create session outside the lock (network call in cloud mode)
     cdp_override = _get_cdp_override()
-    if cdp_override and not force_local:
+    if profile_cdp:
+        session_info = _create_cdp_session(task_id, profile_cdp)
+    elif cdp_override and not force_local:
         session_info = _create_cdp_session(task_id, cdp_override)
     elif force_local:
         session_info = _create_local_session(task_id)
@@ -2624,13 +2731,18 @@ def _truncate_snapshot(snapshot_text: str, max_chars: int = 8000) -> str:
 # Browser Tool Functions
 # ============================================================================
 
-def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
+def browser_navigate(url: str, task_id: Optional[str] = None, profile: Optional[str] = None) -> str:
     """
     Navigate to a URL in the browser.
 
     Args:
         url: The URL to navigate to
         task_id: Task identifier for session isolation
+        profile: Optional named browser profile (from ``browser.profiles`` in
+            config). Binds this navigation — and every follow-up
+            snapshot/click/type on the same task — to that profile's dedicated
+            CDP endpoint (its own persistent Chrome / cookie jar), so distinct
+            accounts stay isolated. Omit to use the ``default`` profile.
 
     Returns:
         JSON string with navigation result (includes stealth features info on first nav)
@@ -2668,6 +2780,28 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
     effective_task_id = task_id or "default"
     nav_session_key = _navigation_session_key(effective_task_id, url)
     auto_local_this_nav = _is_local_sidecar_key(nav_session_key)
+
+    # Named browser profile overrides session keying: bind this nav (and all
+    # follow-up calls on the same task) to the profile's dedicated CDP endpoint.
+    # A profile pins one explicit endpoint, so it supersedes ::local hybrid
+    # routing. Validate up front so an unknown profile fails loud here rather
+    # than mid-session — no silent fallback across an account boundary.
+    if profile:
+        try:
+            resolved = _resolve_profile_cdp(profile)
+        except ValueError as e:
+            return json.dumps({"success": False, "error": str(e)})
+        if not resolved:
+            return json.dumps({
+                "success": False,
+                "error": (
+                    f"Browser profile {profile!r} resolves to no CDP endpoint. "
+                    f"Set browser.profiles.{profile} (or browser.cdp_url for "
+                    f"the default profile) in config.yaml."
+                ),
+            })
+        nav_session_key = _compose_profile_session_key(effective_task_id, profile)
+        auto_local_this_nav = False
 
     # Always-blocked floor: cloud metadata / IMDS endpoints are denied
     # regardless of backend, hybrid routing, or allow_private_urls.
@@ -3957,24 +4091,36 @@ def cleanup_browser(task_id: Optional[str] = None) -> None:
         task_id = "default"
 
     # Expand to the full set of session keys to reap. For a bare task_id
-    # that includes the cloud/primary key + the local sidecar if one exists.
+    # that includes the cloud/primary key + the local sidecar if one exists,
+    # plus any named-profile sessions (``{task_id}::profile:<name>``) opened
+    # under this task.
     if _is_local_sidecar_key(task_id):
         session_keys = [task_id]
         bare_task_id = task_id[: -len(_LOCAL_SUFFIX)]
+    elif _profile_from_session_key(task_id) is not None:
+        # Called with an explicit profile key — reap only that one.
+        session_keys = [task_id]
+        bare_task_id = task_id.split(_PROFILE_PREFIX, 1)[0]
     else:
         session_keys = [task_id]
         sidecar_key = f"{task_id}{_LOCAL_SUFFIX}"
+        profile_prefix = f"{task_id}{_PROFILE_PREFIX}"
         with _cleanup_lock:
             if sidecar_key in _active_sessions:
                 session_keys.append(sidecar_key)
+            # Reap every named-profile session opened under this bare task.
+            session_keys.extend(
+                k for k in _active_sessions
+                if k.startswith(profile_prefix) and k not in session_keys
+            )
         bare_task_id = task_id
 
     for session_key in session_keys:
         _cleanup_single_browser_session(session_key)
 
     # Drop the last-active pointer only when the bare task is being cleaned
-    # (i.e. not when we're only reaping a sidecar mid-task).
-    if not _is_local_sidecar_key(task_id):
+    # (i.e. not when we're only reaping a sidecar / single profile mid-task).
+    if not _is_local_sidecar_key(task_id) and _profile_from_session_key(task_id) is None:
         _last_active_session_key.pop(bare_task_id, None)
 
 
@@ -4419,7 +4565,7 @@ registry.register(
     name="browser_navigate",
     toolset="browser",
     schema=_BROWSER_SCHEMA_MAP["browser_navigate"],
-    handler=lambda args, **kw: browser_navigate(url=args.get("url", ""), task_id=kw.get("task_id")),
+    handler=lambda args, **kw: browser_navigate(url=args.get("url", ""), task_id=kw.get("task_id"), profile=args.get("profile")),
     check_fn=check_browser_requirements,
     emoji="🌐",
 )
