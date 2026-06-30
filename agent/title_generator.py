@@ -6,6 +6,7 @@ adds latency to the user-facing reply.
 
 import logging
 import threading
+import re
 from typing import Callable, Optional
 
 from agent.auxiliary_client import call_llm
@@ -87,7 +88,36 @@ def generate_title(
             timeout=timeout,
             main_runtime=main_runtime,
         )
-        title = (response.choices[0].message.content or "").strip()
+        msg = response.choices[0].message
+        title = (msg.content or "").strip()
+        # Some reasoning models (e.g. mimo-v2-pro) emit their answer into the
+        # reasoning field instead of content when the token budget is tight,
+        # leaving content empty -> a silently untitled session. Fall back to
+        # extracting a title candidate from the reasoning text.
+        if not title:
+            reasoning = getattr(msg, "reasoning", None) or getattr(
+                msg, "reasoning_content", None
+            )
+            if reasoning:
+                # The model often lists quoted candidates
+                # (e.g. - "Weather Inquiry" - "Sunny Day Forecast"); the last
+                # quoted candidate is usually its pick.
+                quoted = re.findall(r'"([^"]{3,80})"', reasoning)
+                if quoted:
+                    title = quoted[-1]
+                else:
+                    # Fall back to the last title-like line (short, no trailing
+                    # sentence punctuation), stripped of markdown bullets.
+                    lines = [
+                        l.strip().lstrip("-*\u2022").strip()
+                        for l in reasoning.strip().split("\n")
+                        if l.strip()
+                    ]
+                    candidates = [
+                        l for l in lines
+                        if 3 <= len(l) <= 80 and not l.endswith((".", ",", ":"))
+                    ]
+                    title = candidates[-1] if candidates else (lines[-1] if lines else "")
         # Clean up: remove quotes, trailing punctuation, prefixes like "Title: "
         title = title.strip('"\'')
         if title.lower().startswith("title:"):
