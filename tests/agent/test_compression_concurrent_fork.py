@@ -244,6 +244,64 @@ def test_missing_lock_subsystem_fails_open_not_infinite_loop(tmp_path: Path) -> 
     assert agent.session_id != parent_sid
 
 
+class _TransientLockErrorDB:
+    """Wraps a real SessionDB whose lock-acquire raises a transient error.
+
+    Unlike ``_NoLockSubsystemDB`` (structural AttributeError — no lock
+    subsystem exists at all), here the lock subsystem is present but the
+    acquire fails for an ambiguous, non-sqlite reason (RuntimeError).
+    Another compressor MAY be mid-flight, so ``_compress_context`` must
+    fail CLOSED: skip compression this cycle rather than risk the
+    concurrent double-compression / session-id fork the lock prevents.
+    """
+
+    def __init__(self, real_db: SessionDB) -> None:
+        self._real = real_db
+
+    def try_acquire_compression_lock(self, *_a, **_k):
+        raise RuntimeError("lock backend temporarily unavailable")
+
+    def get_compression_lock_holder(self, *_a, **_k):
+        # The holder probe in the not-acquired abort path must tolerate
+        # the lock subsystem still being broken.
+        raise RuntimeError("lock backend temporarily unavailable")
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def test_transient_lock_error_fails_closed_and_skips_compression(tmp_path: Path) -> None:
+    """A non-AttributeError lock-acquire failure must SKIP compression.
+
+    Regression for the over-broad #34475 fail-open: it treated ALL
+    lock-acquire exceptions as "no lock subsystem" and proceeded, letting
+    transient errors bypass the concurrency veto. Only version-skew
+    AttributeError may proceed; anything else aborts the cycle (messages
+    returned unchanged, compress() never called, no rotation) and retries
+    next cycle.
+    """
+    db = SessionDB(db_path=tmp_path / "state.db")
+    parent_sid = "TRANSIENT_LOCK_ERR_TEST"
+    db.create_session(parent_sid, source="discord")
+
+    agent = _build_agent_with_db(db, parent_sid)
+    agent._session_db = _TransientLockErrorDB(db)
+
+    messages = [{"role": "user", "content": f"m{i}"} for i in range(20)]
+
+    # MUST NOT raise — and MUST NOT compress.
+    compressed, _sp = agent._compress_context(messages, "sys", approx_tokens=120_000)
+
+    assert compressed is messages or compressed == messages, (
+        "Fail-closed path must return the input messages verbatim so the "
+        "caller's no-op detection (len(returned) == len(input)) holds."
+    )
+    agent.context_compressor.compress.assert_not_called()
+    # No rotation, no child sessions — the session is untouched.
+    assert agent.session_id == parent_sid
+    assert _count_children(db, parent_sid) == 0
+
+
 def test_review_fork_disables_compression_to_prevent_stale_parent_fork() -> None:
     """The background-review fork must set ``compression_enabled = False``
     so it can never compress the parent it shares a session_id with

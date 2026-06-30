@@ -426,10 +426,12 @@ def compress_context(
             _lock_acquired = _lock_db.try_acquire_compression_lock(
                 _lock_sid, _lock_holder
             )
-        except Exception as _lock_err:
-            # Broken/absent lock subsystem (version skew, etc.).  Log once
-            # per session and proceed WITHOUT the lock rather than letting
-            # the exception spin the outer loop.
+        except AttributeError as _lock_err:
+            # Structurally absent lock subsystem (version skew: stale
+            # in-memory ``SessionDB`` without the method).  No competing
+            # compressor can exist, so log once per session and proceed
+            # WITHOUT the lock rather than letting the exception spin the
+            # outer loop (the #34475 fix).
             _lock_holder = None  # we don't own anything to release
             if getattr(agent, "_last_compression_lock_error_sid", None) != _lock_sid:
                 agent._last_compression_lock_error_sid = _lock_sid
@@ -441,6 +443,24 @@ def compress_context(
                     _lock_sid, type(_lock_err).__name__, _lock_err,
                 )
             _lock_acquired = True  # treat as acquired-but-unlocked; proceed
+        except Exception as _lock_err:
+            # Transient/ambiguous lock-acquire failure (lock DB busy,
+            # RuntimeError, ...).  Unlike the AttributeError case above,
+            # the lock subsystem exists, so another compressor MAY be
+            # mid-flight on this session.  Fail CLOSED: treat the lock as
+            # not acquired and skip compression this cycle (the abort path
+            # below returns the messages unchanged; we retry next cycle).
+            _lock_holder = None  # we don't own anything to release
+            if getattr(agent, "_last_compression_lock_error_sid", None) != _lock_sid:
+                agent._last_compression_lock_error_sid = _lock_sid
+                logger.warning(
+                    "compression lock acquire failed for session=%s "
+                    "(%s: %s) — skipping compression this cycle to avoid a "
+                    "possible concurrent-compression session fork; will "
+                    "retry next cycle.",
+                    _lock_sid, type(_lock_err).__name__, _lock_err,
+                )
+            _lock_acquired = False  # fail closed; abort path below
         if not _lock_acquired:
             try:
                 existing = _lock_db.get_compression_lock_holder(_lock_sid)
