@@ -3179,6 +3179,7 @@ class SessionDB:
         result = []
         for row in rows:
             msg = dict(row)
+            msg["_flushed_to_db"] = True
             if "content" in msg:
                 msg["content"] = self._decode_content(msg["content"])
             if msg.get("tool_calls"):
@@ -3512,7 +3513,7 @@ class SessionDB:
             content = self._decode_content(row["content"])
             if row["role"] in {"user", "assistant"} and isinstance(content, str):
                 content = sanitize_context(content).strip()
-            msg = {"role": row["role"], "content": content}
+            msg = {"role": row["role"], "content": content, "_flushed_to_db": True}
             if row["timestamp"]:
                 msg["timestamp"] = row["timestamp"]
             if row["tool_call_id"]:
