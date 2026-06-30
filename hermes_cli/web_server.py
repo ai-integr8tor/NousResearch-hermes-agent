@@ -868,6 +868,10 @@ class ModelAssignment(BaseModel):
 class MoaModelSlot(BaseModel):
     provider: str = ""
     model: str = ""
+    # Optional per-slot effort for Codex reference models. Empty or unsupported
+    # provider values are ignored by normalize_moa_config so existing clients
+    # that only send provider/model keep the old shape on disk.
+    reasoning_effort: str = ""
 
 
 class MoaPresetPayload(BaseModel):

@@ -42,6 +42,27 @@ def _coerce_int(value: Any, default: int) -> int:
             return default
 
 
+_VALID_MOA_REASONING_EFFORTS = {
+    # Mirrors hermes_constants.parse_reasoning_effort(): none disables
+    # reasoning, while the remaining values request an effort level.
+    "none",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+}
+
+# Keep the initial MoA per-reference effort override deliberately narrow. The
+# current runtime forwards this field through auxiliary ``call_llm`` as
+# ``extra_body.reasoning`` for the Codex Responses adapter. Other providers in
+# Hermes use different reasoning contracts (Anthropic adaptive thinking,
+# Gemini thinking_config, DeepSeek/Kimi top-level reasoning_effort + thinking,
+# xAI model allowlists, etc.), so preserving this field for arbitrary providers
+# would silently impose an OpenAI-shaped knob on non-OpenAI backends.
+_MOA_REASONING_EFFORT_PROVIDERS = {"openai-codex"}
+
+
 def _clean_slot(slot: Any) -> dict[str, str] | None:
     if not isinstance(slot, dict):
         return None
@@ -56,7 +77,19 @@ def _clean_slot(slot: Any) -> dict[str, str] | None:
     # an invalid slot is dropped, falling back to the preset's defaults.
     if provider.lower() == "moa":
         return None
-    return {"provider": provider, "model": model}
+    cleaned: dict[str, str] = {"provider": provider, "model": model}
+    # Optional per-slot reasoning effort. This is intentionally provider-gated:
+    # the field currently maps to the OpenAI Codex Responses reasoning shape.
+    # Non-Codex providers keep their existing defaults/configuration instead of
+    # receiving an OpenAI-shaped reasoning field they may reject or ignore.
+    effort = str(slot.get("reasoning_effort") or "").strip().lower()
+    if (
+        effort
+        and effort in _VALID_MOA_REASONING_EFFORTS
+        and provider.lower() in _MOA_REASONING_EFFORT_PROVIDERS
+    ):
+        cleaned["reasoning_effort"] = effort
+    return cleaned
 
 
 def _default_preset() -> dict[str, Any]:
