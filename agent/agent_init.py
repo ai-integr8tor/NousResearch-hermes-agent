@@ -1425,6 +1425,34 @@ def init_agent(
     compression_in_place = is_truthy_value(
         _compression_cfg.get("in_place"), default=False
     )
+    compression_controlled_rebuild = is_truthy_value(
+        _compression_cfg.get("controlled_rebuild"), default=True
+    )
+    try:
+        compression_controlled_rebuild_budget = int(
+            _compression_cfg.get("controlled_rebuild_budget", 12_000)
+        )
+    except (TypeError, ValueError):
+        if not quiet_mode:
+            print("⚠️ Invalid compression.controlled_rebuild_budget; using 12000")
+        compression_controlled_rebuild_budget = 12_000
+    if compression_controlled_rebuild_budget <= 0:
+        if not quiet_mode:
+            print("⚠️ Invalid compression.controlled_rebuild_budget; using 12000")
+        compression_controlled_rebuild_budget = 12_000
+
+    try:
+        compression_controlled_rebuild_checkpoint_budget = int(
+            _compression_cfg.get("controlled_rebuild_checkpoint_budget", 16_000)
+        )
+    except (TypeError, ValueError):
+        if not quiet_mode:
+            print("⚠️ Invalid compression.controlled_rebuild_checkpoint_budget; using 16000")
+        compression_controlled_rebuild_checkpoint_budget = 16_000
+    if compression_controlled_rebuild_checkpoint_budget <= 0:
+        if not quiet_mode:
+            print("⚠️ Invalid compression.controlled_rebuild_checkpoint_budget; using 16000")
+        compression_controlled_rebuild_checkpoint_budget = 16_000
 
     # Read optional explicit context_length override for the auxiliary
     # compression model. Custom endpoints often cannot report this via
@@ -1667,6 +1695,9 @@ def init_agent(
         )
     agent.compression_enabled = compression_enabled
     agent.compression_in_place = compression_in_place
+    agent.controlled_context_rebuild_enabled = compression_controlled_rebuild
+    agent.controlled_context_rebuild_packet_budget = compression_controlled_rebuild_budget
+    agent.controlled_context_rebuild_checkpoint_budget = compression_controlled_rebuild_checkpoint_budget
 
     # Reject models whose context window is below the minimum required
     # for reliable tool-calling workflows (64K tokens).
