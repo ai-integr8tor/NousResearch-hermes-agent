@@ -116,15 +116,40 @@ class ToolEntry:
 # timescales. Cache results for ~30 s so env-var flips via ``hermes tools``
 # or live credential file changes propagate within a turn or two without
 # requiring any explicit invalidation.
+#
+# Transient-failure suppression (issue #21658 / #5304): these probes can flap.
+# A single ``subprocess.run([docker, "version"], timeout=5)`` that times out
+# under load returns False for one call, which would silently strip the entire
+# terminal+file toolset from whatever agent is being built at that instant —
+# most visibly a delegate_task subagent, which then reports "Tool read_file
+# does not exist". To absorb such flakes WITHOUT pinning a permanently-stale
+# "available" verdict, we remember the last time each check returned True and,
+# when a fresh probe fails within a short grace window of that last success,
+# we serve the last-good True instead of caching the failure. A failure that
+# persists past the grace window is honored normally, so a backend that really
+# went down stops advertising its tools.
 # ---------------------------------------------------------------------------
 
 _CHECK_FN_TTL_SECONDS = 30.0
+# How long after a successful check a subsequent transient failure is treated
+# as a flake (last-good True is served) rather than a real outage. Kept short
+# so a genuinely-down backend is reflected within a couple of turns.
+_CHECK_FN_FAILURE_GRACE_SECONDS = 60.0
 _check_fn_cache: Dict[Callable, tuple[float, bool]] = {}
+# Monotonic timestamp of the most recent True result per check_fn.
+_check_fn_last_good: Dict[Callable, float] = {}
 _check_fn_cache_lock = threading.Lock()
 
 
 def _check_fn_cached(fn: Callable) -> bool:
-    """Return bool(fn()), TTL-cached across calls. Swallows exceptions as False."""
+    """Return bool(fn()), TTL-cached across calls.
+
+    Exceptions are swallowed as False. A transient False/exception within
+    ``_CHECK_FN_FAILURE_GRACE_SECONDS`` of the last True is suppressed (the
+    last-good True is returned and the failure is NOT cached, so the next call
+    re-probes) to keep flaky external checks (Docker daemon busy, socket
+    contention, probe timeout) from silently stripping tools mid-session.
+    """
     now = time.monotonic()
     with _check_fn_cache_lock:
         cached = _check_fn_cache.get(fn)
@@ -132,13 +157,43 @@ def _check_fn_cached(fn: Callable) -> bool:
             ts, value = cached
             if now - ts < _CHECK_FN_TTL_SECONDS:
                 return value
+
+    raised = False
     try:
         value = bool(fn())
     except Exception:
         value = False
+        raised = True
+
     with _check_fn_cache_lock:
-        _check_fn_cache[fn] = (now, value)
-    return value
+        if value:
+            _check_fn_last_good[fn] = now
+            _check_fn_cache[fn] = (now, True)
+            return True
+
+        last_good = _check_fn_last_good.get(fn)
+        if last_good is not None and now - last_good < _CHECK_FN_FAILURE_GRACE_SECONDS:
+            # Recent success → treat this failure as a flake. Serve last-good
+            # True and do NOT cache the failure, so the next call re-probes
+            # rather than pinning a stale verdict for the full TTL.
+            logger.warning(
+                "check_fn %s failed (%s) within %.0fs of last success; "
+                "treating as transient and keeping tool(s) available",
+                getattr(fn, "__qualname__", fn),
+                "raised" if raised else "returned False",
+                _CHECK_FN_FAILURE_GRACE_SECONDS,
+            )
+            return True
+
+        # No recent success (or grace expired) — honor the failure. Log it so
+        # silent tool loss in quiet mode (subagents) is diagnosable.
+        logger.warning(
+            "check_fn %s %s; dependent tools will be unavailable this turn",
+            getattr(fn, "__qualname__", fn),
+            "raised" if raised else "returned False",
+        )
+        _check_fn_cache[fn] = (now, False)
+        return False
 
 
 def invalidate_check_fn_cache() -> None:
@@ -146,6 +201,7 @@ def invalidate_check_fn_cache() -> None:
     affect tool availability (e.g. ``hermes tools enable``)."""
     with _check_fn_cache_lock:
         _check_fn_cache.clear()
+        _check_fn_last_good.clear()
 
 
 class ToolRegistry:
@@ -153,6 +209,12 @@ class ToolRegistry:
 
     def __init__(self):
         self._tools: Dict[str, ToolEntry] = {}
+        # Durable map: plugin module namespace (handler.__globals__["__name__"])
+        # -> operator opt-in for built-in override. Populated at plugin load and
+        # never cleared, so a plugin's override authorization is bound to the
+        # code that defined the handler, independent of WHEN the register() call
+        # happens (sync during load, or a delayed/threaded callback afterwards).
+        self._plugin_override_policy: Dict[str, bool] = {}
         self._toolset_checks: Dict[str, Callable] = {}
         self._toolset_aliases: Dict[str, str] = {}
         # MCP dynamic refresh can mutate the registry while other threads are
@@ -231,6 +293,39 @@ class ToolRegistry:
     # Registration
     # ------------------------------------------------------------------
 
+    def register_plugin_override_policy(self, module_namespace: str, allowed: bool) -> None:
+        """Bind a plugin module namespace to its operator opt-in for built-in
+        override. Called once per plugin at load time. Durable: never cleared,
+        so later (even threaded/delayed) register() calls from that module are
+        still gated by the same policy.
+        """
+        with self._lock:
+            self._plugin_override_policy[module_namespace] = bool(allowed)
+
+    def _plugin_owner_of(self, handler: Callable) -> Optional[str]:
+        """Return the plugin module namespace that defined *handler*, or None
+        if it was not defined in a loaded plugin module.
+
+        Authorization is bound to where the handler was DEFINED
+        (``handler.__globals__["__name__"]``), which is fixed at definition
+        time and cannot drift with the call site, thread, or timing. Lambdas
+        and nested functions inherit the defining module's globals, so a
+        plugin cannot launder an override through a callback. Built-in/MCP
+        handlers live outside the plugin namespace and return None (unchanged
+        behavior).
+        """
+        try:
+            mod = handler.__globals__.get("__name__", "")  # type: ignore[attr-defined]
+        except AttributeError:
+            return None
+        if mod in self._plugin_override_policy:
+            return mod
+        # Also gate plugin modules currently loading but not yet policy-recorded
+        # (defensive: a handler defined in the plugin namespace is plugin code).
+        if isinstance(mod, str) and mod.startswith("hermes_plugins."):
+            return mod
+        return None
+
     def register(
         self,
         name: str,
@@ -269,7 +364,22 @@ class ToolRegistry:
                         name, toolset, existing.toolset,
                     )
                 elif override:
-                    # Explicit plugin opt-in: replace the existing tool.
+                    _owner = self._plugin_owner_of(handler)
+                    if _owner is not None and not self._plugin_override_policy.get(_owner, False):
+                        logger.error(
+                            "Tool registration REJECTED: plugin %r attempted to "
+                            "override built-in tool %r (existing toolset %r) without "
+                            "operator opt-in. Set "
+                            "plugins.entries.<plugin_id>.allow_tool_override: true "
+                            "in config.yaml to allow it.",
+                            _owner, name, existing.toolset,
+                        )
+                        raise PermissionError(
+                            f"Plugin module {_owner!r} cannot override built-in "
+                            f"tool {name!r} without operator opt-in "
+                            f"(allow_tool_override)."
+                        )
+                    # Explicit opt-in (or non-plugin caller): replace the tool.
                     # Logged at INFO so the override is auditable in agent.log.
                     logger.info(
                         "Tool '%s': toolset '%s' overriding existing toolset '%s' "
