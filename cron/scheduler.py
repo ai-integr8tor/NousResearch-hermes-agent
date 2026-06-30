@@ -1648,8 +1648,11 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
             from agent.redact import redact_sensitive_text
             stdout = redact_sensitive_text(stdout)
             stderr = redact_sensitive_text(stderr)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(
+                "agent.redact failed — script output may contain secrets: %s",
+                exc,
+            )
 
         if result.returncode != 0:
             parts = [f"Script exited with code {result.returncode}"]

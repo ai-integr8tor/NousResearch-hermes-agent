@@ -198,6 +198,32 @@ class TestRunJobScript:
         assert parsed["new_prs"][0]["number"] == 42
 
 
+    def test_script_redact_failure_warns_and_returns_output(self, cron_env, monkeypatch, caplog):
+        """If agent.redact fails, _run_job_script must warn but still return the script output."""
+        from cron.scheduler import _run_job_script
+
+        script = cron_env / "scripts" / "redact_fail.py"
+        script.write_text('print("secret: ABC123")\n')
+
+        def bad_redact(text):
+            raise RuntimeError("redact boom")
+
+        monkeypatch.setattr(
+            "agent.redact.redact_sensitive_text",
+            bad_redact,
+        )
+
+        with caplog.at_level("WARNING"):
+            success, output = _run_job_script(str(script))
+
+        assert success is True
+        assert output == "secret: ABC123"
+        assert any(
+            "agent.redact failed" in record.getMessage()
+            for record in caplog.records
+        )
+
+
 class TestBuildJobPromptWithScript:
     """Test that script output is injected into the prompt."""
 
@@ -565,3 +591,4 @@ class TestRunJobEnvVarCleanup:
         assert os.environ.get("HERMES_SESSION_PLATFORM") is None
         assert os.environ.get("HERMES_SESSION_CHAT_ID") is None
         assert os.environ.get("HERMES_SESSION_CHAT_NAME") is None
+
