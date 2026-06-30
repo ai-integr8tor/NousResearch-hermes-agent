@@ -18,7 +18,7 @@ def test_session_create_rejects_at_active_session_limit(monkeypatch, tmp_path):
     home = tmp_path / ".hermes"
     home.mkdir()
     (home / "config.yaml").write_text("max_concurrent_sessions: 1\n", encoding="utf-8")
-    token = set_hermes_home_override(home)
+    override_handle = set_hermes_home_override(home)
 
     def _clear_server_sessions():
         for session in list(server._sessions.values()):
@@ -55,7 +55,7 @@ def test_session_create_rejects_at_active_session_limit(monkeypatch, tmp_path):
         server._cfg_cache = None
         server._cfg_mtime = None
         server._cfg_path = None
-        reset_hermes_home_override(token)
+        reset_hermes_home_override(override_handle)
 
 
 def test_session_context_uses_session_cwd(monkeypatch, tmp_path):
@@ -5807,6 +5807,53 @@ def test_model_options_propagates_list_exception(monkeypatch):
     assert "error" in resp
     assert resp["error"]["code"] == 5033
     assert "catalog blew up" in resp["error"]["message"]
+
+
+def test_model_options_configured_only_excludes_skeletons(monkeypatch):
+    """configured_only=true must suppress unconfigured provider skeleton
+    rows so the picker default view shows only authenticated providers."""
+    curated_providers = [
+        {
+            "slug": "nous",
+            "name": "Nous",
+            "models": ["moonshotai/kimi-k2.5"],
+            "total_models": 1,
+            "source": "built-in",
+            "is_current": False,
+            "is_user_defined": False,
+        },
+    ]
+
+    cfg = {
+        "model": {"provider": "nous", "default": "moonshotai/kimi-k2.5"},
+        "providers": {"nous": {}},
+        "custom_providers": [],
+    }
+
+    with (
+        patch("hermes_cli.config.load_config", return_value=cfg),
+        patch(
+            "hermes_cli.model_switch.list_authenticated_providers",
+            return_value=curated_providers,
+        ),
+    ):
+        resp = server._methods["model.options"](
+            99, {"session_id": "", "configured_only": True}
+        )
+
+    assert "result" in resp, resp
+    providers = resp["result"]["providers"]
+    # Only the authenticated provider should be present — no skeleton rows
+    # for unconfigured canonical providers.
+    slugs = {p["slug"] for p in providers}
+    assert "nous" in slugs
+    # Any canonical provider not in the authenticated list must be absent.
+    from hermes_cli.models import CANONICAL_PROVIDERS
+
+    for entry in CANONICAL_PROVIDERS:
+        if entry.slug == "nous":
+            continue
+        assert entry.slug not in slugs, f"unconfigured {entry.slug} should be excluded"
 
 
 # ---------------------------------------------------------------------------

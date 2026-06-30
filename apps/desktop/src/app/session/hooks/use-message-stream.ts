@@ -849,9 +849,7 @@ export function useMessageStream({
         void refreshHermesConfig()
 
         if (modelChanged || providerChanged) {
-          void queryClient.invalidateQueries({
-            queryKey: explicitSid && sessionId ? ['model-options', sessionId] : ['model-options']
-          })
+          void queryClient.invalidateQueries({ queryKey: ['model-options'] })
         }
       } else if (event.type === 'message.start') {
         if (!sessionId) {

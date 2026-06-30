@@ -112,6 +112,7 @@ def build_models_payload(
     ctx: ConfigContext,
     *,
     include_unconfigured: bool = False,
+    configured_only: bool = False,
     picker_hints: bool = False,
     canonical_order: bool = False,
     pricing: bool = False,
@@ -127,6 +128,10 @@ def build_models_payload(
     - ``include_unconfigured``: append ``CANONICAL_PROVIDERS`` rows that
       ``list_authenticated_providers`` didn't emit (TUI uses this to show
       the full provider universe in the picker).
+    - ``configured_only``: when ``True``, force ``include_unconfigured`` to
+      ``False`` so only authenticated providers are returned. Callers that
+      want the default picker view (only providers the user has configured)
+      pass this instead of negating ``include_unconfigured``.
     - ``picker_hints``: add ``authenticated``/``auth_type``/``key_env``/
       ``warning`` per row (TUI ``ModelPickerDialog`` shape).
     - ``canonical_order``: reorder canonical-slug rows to
@@ -212,10 +217,26 @@ def build_models_payload(
                     row["models"] = filtered
                     row["total_models"] = len(filtered)
 
-    if include_unconfigured:
-        rows = list(rows) + [r for r in _append_unconfigured_rows(rows, ctx) if str(r.get("slug", "")).lower() != "moa"]
+    if include_unconfigured and not configured_only:
+        rows = list(rows) + [
+            r
+            for r in _append_unconfigured_rows(rows, ctx)
+            if str(r.get("slug", "")).lower() != "moa"
+        ]
     if picker_hints:
         _apply_picker_hints(rows)
+    if configured_only:
+        # Enforce the invariant centrally: after picker_hints have set the
+        # ``authenticated`` flag, drop any row that is NOT authenticated, then
+        # tighten the default picker to providers configured in the active
+        # profile. ``list_authenticated_providers`` is intentionally broad: it
+        # can surface discovery rows from external tools, stale credential-pool
+        # entries, or generic env-derived credentials. The picker default must
+        # stay scoped to the user's configured provider list/current provider;
+        # setup/show-all paths can still pass include_unconfigured=True without
+        # configured_only to expose the broader universe.
+        rows = [r for r in rows if r.get("authenticated") is not False]
+        rows = _filter_configured_rows(rows, ctx)
     if canonical_order:
         rows = _reorder_canonical(rows)
     if pricing:
@@ -228,6 +249,60 @@ def build_models_payload(
         "model": ctx.current_model,
         "provider": ctx.current_provider,
     }
+
+
+def _normalized_provider_slugs(value: object) -> set[str]:
+    """Return slug variants a config/provider row may use in picker output."""
+    raw = str(value or "").strip()
+    if not raw:
+        return set()
+    lower = raw.lower()
+    slugs = {lower}
+    if not lower.startswith("custom:"):
+        try:
+            from hermes_cli.providers import custom_provider_slug
+
+            slugs.add(custom_provider_slug(raw).lower())
+        except Exception:
+            slugs.add(f"custom:{lower}")
+    return slugs
+
+
+def _configured_provider_slugs(ctx: ConfigContext) -> set[str]:
+    """Provider slugs explicitly configured in the active picker context."""
+    slugs: set[str] = set()
+    slugs.update(_normalized_provider_slugs(ctx.current_provider))
+
+    if isinstance(ctx.user_providers, dict):
+        for name in ctx.user_providers:
+            slugs.update(_normalized_provider_slugs(name))
+
+    for provider in ctx.custom_providers or []:
+        if not isinstance(provider, dict):
+            continue
+        for key in ("name", "id", "provider", "slug"):
+            slugs.update(_normalized_provider_slugs(provider.get(key)))
+    return slugs
+
+
+def _filter_configured_rows(rows: list[dict], ctx: ConfigContext) -> list[dict]:
+    """Keep only rows tied to providers configured in the active profile.
+
+    ``list_authenticated_providers`` is deliberately discovery-oriented and may
+    include rows from stale credential-pool records or external tools. The
+    default picker needs a narrower product invariant: show configured/current
+    providers by default, while setup/show-all paths remain broad.
+    """
+    configured = _configured_provider_slugs(ctx)
+    if not configured:
+        return []
+
+    filtered: list[dict] = []
+    for row in rows:
+        slug = str(row.get("slug") or "").strip().lower()
+        if row.get("is_current") or row.get("is_user_defined") or slug in configured:
+            filtered.append(row)
+    return filtered
 
 
 def _apply_capabilities(rows: list[dict]) -> None:

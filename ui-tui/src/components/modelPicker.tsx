@@ -41,6 +41,9 @@ export function ModelPicker({ allowPersistGlobal = true, gw, onCancel, onSelect,
   const [keyError, setKeyError] = useState('')
   // Type-to-filter query, scoped per stage (cleared on stage change).
   const [filter, setFilter] = useState('')
+  // When false (default), only authenticated providers are fetched. Toggle
+  // with Ctrl+A to reveal unconfigured providers (for inline API-key entry).
+  const [showAll, setShowAll] = useState(false)
 
   const { stdout } = useStdout()
   // Pin the picker to a stable width so the FloatBox parent (which shrinks-
@@ -49,9 +52,22 @@ export function ModelPicker({ allowPersistGlobal = true, gw, onCancel, onSelect,
   // has an actual constraint to truncate against.
   const width = Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, (stdout?.columns ?? 80) - 6))
 
+  // Request-ID guard: when showAll toggles trigger a refetch, we must ignore
+  // stale responses so an out-of-order reply from the previous toggle doesn't
+  // leave the UI showing all providers while the footer says configured-only.
   useEffect(() => {
-    gw.request<ModelOptionsResponse>('model.options', sessionId ? { session_id: sessionId } : {})
+    let cancelled = false
+    setLoading(true)
+
+    gw.request<ModelOptionsResponse>('model.options', {
+      ...(sessionId ? { session_id: sessionId } : {}),
+      configured_only: !showAll
+    })
       .then(raw => {
+        if (cancelled) {
+          return
+        }
+
         const r = asRpcResult<ModelOptionsResponse>(raw)
 
         if (!r) {
@@ -76,10 +92,17 @@ export function ModelPicker({ allowPersistGlobal = true, gw, onCancel, onSelect,
         setLoading(false)
       })
       .catch((e: unknown) => {
+        if (cancelled) {
+          return
+        }
         setErr(rpcErrorMessage(e))
         setLoading(false)
       })
-  }, [gw, sessionId])
+
+    return () => {
+      cancelled = true
+    }
+  }, [gw, sessionId, showAll])
 
   const names = useMemo(() => providerDisplayNames(providers), [providers])
 
@@ -408,6 +431,18 @@ export function ModelPicker({ allowPersistGlobal = true, gw, onCancel, onSelect,
       return
     }
 
+    // Toggle show-all providers (Ctrl+A): only in provider stage. When off
+    // (default), only authenticated providers are shown. When on, unconfigured
+    // providers appear with their setup hint (inline key entry for api_key
+    // providers). Re-fetches from the backend via the showAll dependency.
+    if (key.ctrl && ch === 'a' && stage === 'provider') {
+      setShowAll(v => !v)
+      setFilter('')
+      setProviderIdx(0)
+
+      return
+    }
+
     // Any other printable single character extends the filter.
     if (ch && !key.ctrl && !key.meta && ch.length === 1 && ch >= ' ') {
       setFilter(v => v + ch)
@@ -598,8 +633,10 @@ export function ModelPicker({ allowPersistGlobal = true, gw, onCancel, onSelect,
         <Text color={t.color.muted} wrap="truncate-end">
           persist: {allowPersistGlobal ? (persistGlobal ? 'global' : 'session') : 'session'}
           {allowPersistGlobal ? ' · ^g toggle' : ' only'}
+          {' · '}
+          {showAll ? 'all providers · ^a configured-only' : 'configured-only · ^a show all'}
         </Text>
-        <OverlayHint t={t}>↑/↓ select · Enter choose · ^d disconnect · Esc clear/back · q close</OverlayHint>
+        <OverlayHint t={t}>↑/↓ select · Enter choose · ^d disconnect · ^a toggle providers · Esc clear/back · q close</OverlayHint>
       </Box>
     )
   }

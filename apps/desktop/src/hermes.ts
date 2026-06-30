@@ -704,10 +704,25 @@ export function getUsageAnalytics(days = 30): Promise<AnalyticsResponse> {
   })
 }
 
-export function getGlobalModelOptions(opts?: { refresh?: boolean }): Promise<ModelOptionsResponse> {
+export function getGlobalModelOptions(
+  opts: { refresh?: boolean; configuredOnly?: boolean } | boolean = {}
+): Promise<ModelOptionsResponse> {
+  const options = typeof opts === 'boolean' ? { configuredOnly: opts } : opts
+  const params = new URLSearchParams()
+
+  if (options.refresh) {
+    params.set('refresh', '1')
+  }
+
+  if (options.configuredOnly) {
+    params.set('configured_only', 'true')
+  }
+
+  const query = params.toString()
+
   return window.hermesDesktop.api<ModelOptionsResponse>({
     ...profileScoped(),
-    path: opts?.refresh ? '/api/model/options?refresh=1' : '/api/model/options'
+    path: `/api/model/options${query ? `?${query}` : ''}`
   })
 }
 

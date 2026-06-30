@@ -4031,7 +4031,11 @@ _AUX_TASK_SLOTS: Tuple[str, ...] = (
 
 
 @app.get("/api/model/options")
-def get_model_options(profile: Optional[str] = None, refresh: bool = False):
+def get_model_options(
+    profile: Optional[str] = None,
+    refresh: bool = False,
+    configured_only: bool = False,
+):
     """Return authenticated providers + their curated model lists.
 
     REST equivalent of the ``model.options`` JSON-RPC on tui_gateway, so the
@@ -4046,6 +4050,10 @@ def get_model_options(profile: Optional[str] = None, refresh: bool = False):
     ``refresh`` busts the per-provider model-id disk cache so every row
     re-fetches its live catalog — used by the picker's explicit "Refresh
     Models" control. Normal opens leave it false to stay on the 1h cache.
+
+    ``configured_only`` suppresses unconfigured provider skeleton rows so
+    callers that want only configured providers (e.g. the desktop model picker
+    default view) don't receive the full provider universe.
     """
     try:
         from hermes_cli.inventory import build_models_payload, load_picker_context
@@ -4062,6 +4070,7 @@ def get_model_options(profile: Optional[str] = None, refresh: bool = False):
             return build_models_payload(
                 load_picker_context(),
                 include_unconfigured=True,
+                configured_only=configured_only,
                 picker_hints=True,
                 canonical_order=True,
                 pricing=True,

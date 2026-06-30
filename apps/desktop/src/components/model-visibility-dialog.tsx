@@ -9,6 +9,7 @@ import { Switch } from '@/components/ui/switch'
 import type { HermesGateway } from '@/hermes'
 import { getGlobalModelOptions } from '@/hermes'
 import { useI18n } from '@/i18n'
+import { modelOptionsQueryKey } from '@/lib/model-options-query'
 import { displayModelName, modelDisplayParts } from '@/lib/model-status-label'
 import {
   $visibleModels,
@@ -41,7 +42,7 @@ export function ModelVisibilityDialog({
   const stored = useStore($visibleModels)
 
   const modelOptions = useQuery({
-    queryKey: ['model-options', sessionId || 'global'],
+    queryKey: modelOptionsQueryKey('all', sessionId),
     queryFn: (): Promise<ModelOptionsResponse> => {
       if (gw && sessionId) {
         return gw.request<ModelOptionsResponse>('model.options', { session_id: sessionId })
