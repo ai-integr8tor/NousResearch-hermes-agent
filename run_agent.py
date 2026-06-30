@@ -1583,15 +1583,68 @@ class AIAgent:
                 if timestamp is not None:
                     msg["timestamp"] = timestamp
 
+    def _messages_for_persistence(self, messages: List[Dict]) -> List[Dict]:
+        """Return a persist-only view of ``messages`` with the current-turn user
+        message replaced by its clean override variant — without mutating the
+        live list or any of its dicts.
+
+        The crash-resilience early persist (``build_turn_context``) runs on the
+        *same* ``messages`` list that the model request is later built from.
+        Mutating ``messages[idx]["content"]`` in place there strips the
+        API-facing user message (observed-group context, voice prefix, …)
+        before it reaches the model, silently dropping context (#48677).
+
+        We instead swap a *copy* of the affected message into a copied list.
+        The clean copy is cached by identity for the active turn so repeated
+        persistence points (early + terminal, plus direct flush callers) reuse
+        one object — keeping the SQLite identity-dedup in
+        ``_flush_messages_to_session_db`` from writing duplicate user rows.
+        """
+        idx = getattr(self, "_persist_user_message_idx", None)
+        override = getattr(self, "_persist_user_message_override", None)
+        timestamp = getattr(self, "_persist_user_message_timestamp", None)
+        if idx is None or (override is None and timestamp is None):
+            return messages
+        if not (0 <= idx < len(messages)):
+            return messages
+        msg = messages[idx]
+        if not (isinstance(msg, dict) and msg.get("role") == "user"):
+            return messages
+        # Multimodal turns keep image/audio blocks in the live messages list.
+        # Do not replace those with the text-only override; the paired
+        # timestamp override still applies — it is metadata, not content.
+        if override is not None and isinstance(msg.get("content"), list):
+            override = None
+        if override is None and timestamp is None:
+            return messages
+
+        cache = getattr(self, "_persist_user_message_clean_cache", None)
+        if cache is not None and cache[0] is msg:
+            clean = cache[1]
+        else:
+            clean = dict(msg)
+            if override is not None:
+                clean["content"] = override
+            if timestamp is not None:
+                clean["timestamp"] = timestamp
+            self._persist_user_message_clean_cache = (msg, clean)
+
+        out = list(messages)
+        out[idx] = clean
+        return out
+
     def _persist_session(self, messages: List[Dict], conversation_history: List[Dict] = None):
         """Save session state to both JSON log and SQLite on any exit path.
 
         Ensures conversations are never lost, even on errors or early returns.
         """
         self._drop_trailing_empty_response_scaffolding(messages)
-        self._apply_persist_user_message_override(messages)
-        self._session_messages = messages
-        self._save_session_log(messages)
+        persist_messages = self._messages_for_persistence(messages)
+        self._session_messages = persist_messages
+        self._save_session_log(persist_messages)
+        # Pass the live list; the flush applies the same persist-override view
+        # itself so direct callers stay correct and the identity-dedup keys on
+        # the cached clean copy.
         self._flush_messages_to_session_db(messages, conversation_history)
 
     def _drop_trailing_empty_response_scaffolding(self, messages: List[Dict]) -> None:
@@ -1662,7 +1715,7 @@ class AIAgent:
         """
         if not self._session_db:
             return
-        self._apply_persist_user_message_override(messages)
+        messages = self._messages_for_persistence(messages)
         try:
             # Retry row creation if the earlier attempt failed transiently.
             if not self._session_db_created:
