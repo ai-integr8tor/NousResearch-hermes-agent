@@ -2355,6 +2355,7 @@ def delegate_task(
     role: Optional[str] = None,
     background: Optional[bool] = None,
     parent_agent=None,
+    model: Optional[str] = None,
 ) -> str:
     """
     Spawn one or more child agents to handle delegated tasks.
@@ -2455,7 +2456,7 @@ def delegate_task(
         task_list = tasks
     elif goal and isinstance(goal, str) and goal.strip():
         task_list = [
-            {"goal": goal, "context": context, "toolsets": toolsets, "role": top_role}
+            {"goal": goal, "context": context, "toolsets": toolsets, "role": top_role, "model": model}
         ]
     else:
         return tool_error("Provide either 'goal' (single task) or 'tasks' (batch).")
@@ -2496,26 +2497,59 @@ def delegate_task(
             # Per-task role beats top-level; normalise again so unknown
             # per-task values warn and degrade to leaf uniformly.
             effective_role = _normalize_role(t.get("role") or top_role)
+
+            # Resolve task-specific model and provider credentials if model is set
+            task_model = t.get("model") or model
+            task_creds = dict(creds)
+            if task_model:
+                from hermes_cli.runtime_provider import resolve_provider, resolve_runtime_provider
+                prov = None
+                model_name = task_model
+                parts = task_model.split("/", 1)
+                if len(parts) > 1:
+                    try:
+                        resolved_prov = resolve_provider(parts[0].lower().strip())
+                        if resolved_prov:
+                            prov = resolved_prov
+                            model_name = parts[1]
+                    except Exception:
+                        pass
+                if not prov:
+                    prov = creds.get("provider") or "auto"
+                try:
+                    runtime = resolve_runtime_provider(requested=prov, target_model=model_name)
+                    task_creds = {
+                        "model": model_name,
+                        "provider": runtime.get("provider"),
+                        "base_url": runtime.get("base_url"),
+                        "api_key": runtime.get("api_key"),
+                        "api_mode": runtime.get("api_mode"),
+                        "command": runtime.get("command"),
+                    }
+                except Exception as exc:
+                    logger.debug("Failed to resolve task-specific provider/model: %s", exc)
+                    task_creds["model"] = task_model
+
             child = _build_child_agent(
                 task_index=i,
                 goal=t["goal"],
                 context=t.get("context"),
                 toolsets=t.get("toolsets") or toolsets,
-                model=creds["model"],
+                model=task_creds["model"],
                 max_iterations=effective_max_iter,
                 task_count=n_tasks,
                 parent_agent=parent_agent,
-                override_provider=creds["provider"],
-                override_base_url=creds["base_url"],
-                override_api_key=creds["api_key"],
-                override_api_mode=creds["api_mode"],
+                override_provider=task_creds["provider"],
+                override_base_url=task_creds["base_url"],
+                override_api_key=task_creds["api_key"],
+                override_api_mode=task_creds["api_mode"],
                 override_acp_command=t.get("acp_command")
                 or acp_command
-                or creds.get("command"),
+                or task_creds.get("command"),
                 override_acp_args=(
                     task_acp_args
                     if task_acp_args is not None
-                    else (acp_args if acp_args is not None else creds.get("args"))
+                    else (acp_args if acp_args is not None else task_creds.get("args"))
                 ),
                 role=effective_role,
             )
@@ -3382,6 +3416,10 @@ DELEGATE_TASK_SCHEMA = {
                     "['terminal', 'file', 'web'] for full-stack tasks."
                 ),
             },
+            "model": {
+                "type": "string",
+                "description": "Optional model override for the delegated task (e.g. 'openrouter/deepseek/deepseek-v4-flash').",
+            },
             "tasks": {
                 "type": "array",
                 "items": {
@@ -3414,6 +3452,10 @@ DELEGATE_TASK_SCHEMA = {
                             "type": "string",
                             "enum": ["leaf", "orchestrator"],
                             "description": "Per-task role override. See top-level 'role' for semantics.",
+                        },
+                        "model": {
+                            "type": "string",
+                            "description": "Per-task model override.",
                         },
                     },
                     "required": ["goal"],
@@ -3503,6 +3545,7 @@ registry.register(
         role=args.get("role"),
         background=_model_background_value(args, kw.get("parent_agent")),
         parent_agent=kw.get("parent_agent"),
+        model=args.get("model"),
     ),
     check_fn=check_delegate_requirements,
     emoji="🔀",
