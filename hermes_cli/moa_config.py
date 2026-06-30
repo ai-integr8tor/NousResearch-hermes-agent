@@ -19,6 +19,8 @@ DEFAULT_MOA_AGGREGATOR: dict[str, str] = {
     "provider": "openrouter",
     "model": "anthropic/claude-opus-4.8",
 }
+DEFAULT_MOA_REFERENCE_TIMEOUT = 30.0
+DEFAULT_MOA_DEGRADED_REFERENCE_POLICY = "loud"
 
 
 def _coerce_float(value: Any, default: float) -> float:
@@ -40,6 +42,21 @@ def _coerce_int(value: Any, default: int) -> int:
             return int(float(value))
         except (TypeError, ValueError):
             return default
+
+
+def _coerce_timeout(value: Any, default: float) -> float:
+    parsed = _coerce_float(value, default)
+    if parsed <= 0:
+        return default
+    # References are advisory calls. Keep a hard ceiling so a broken preset
+    # cannot pin a gateway turn forever, while still allowing deep-review
+    # presets to opt into minutes instead of the 30s fast path.
+    return min(parsed, 300.0)
+
+
+def _coerce_degraded_policy(value: Any) -> str:
+    policy = str(value or DEFAULT_MOA_DEGRADED_REFERENCE_POLICY).strip().lower()
+    return policy if policy in {"loud", "silent"} else DEFAULT_MOA_DEGRADED_REFERENCE_POLICY
 
 
 def _clean_slot(slot: Any) -> dict[str, str] | None:
@@ -65,6 +82,8 @@ def _default_preset() -> dict[str, Any]:
         "aggregator": deepcopy(DEFAULT_MOA_AGGREGATOR),
         "reference_temperature": 0.6,
         "aggregator_temperature": 0.4,
+        "reference_timeout": DEFAULT_MOA_REFERENCE_TIMEOUT,
+        "degraded_reference_policy": DEFAULT_MOA_DEGRADED_REFERENCE_POLICY,
         "max_tokens": 4096,
         "enabled": True,
     }
@@ -93,6 +112,8 @@ def _normalize_preset(raw: Any) -> dict[str, Any]:
         "aggregator": aggregator,
         "reference_temperature": _coerce_float(raw.get("reference_temperature"), 0.6),
         "aggregator_temperature": _coerce_float(raw.get("aggregator_temperature"), 0.4),
+        "reference_timeout": _coerce_timeout(raw.get("reference_timeout"), DEFAULT_MOA_REFERENCE_TIMEOUT),
+        "degraded_reference_policy": _coerce_degraded_policy(raw.get("degraded_reference_policy")),
         "max_tokens": _coerce_int(raw.get("max_tokens"), 4096),
     }
 
@@ -138,6 +159,8 @@ def normalize_moa_config(raw: Any) -> dict[str, Any]:
         "aggregator": deepcopy(active["aggregator"]),
         "reference_temperature": active["reference_temperature"],
         "aggregator_temperature": active["aggregator_temperature"],
+        "reference_timeout": active["reference_timeout"],
+        "degraded_reference_policy": active["degraded_reference_policy"],
         "max_tokens": active["max_tokens"],
         "enabled": active["enabled"],
     }
