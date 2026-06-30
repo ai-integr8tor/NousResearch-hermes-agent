@@ -21,6 +21,7 @@ import threading
 
 import pytest
 
+from gateway import session_context as _session_context
 from tools import approval as A
 from tools.thread_context import propagate_context_to_thread
 
@@ -28,6 +29,15 @@ from tools.thread_context import propagate_context_to_thread
 # ---------------------------------------------------------------------------
 # 1. Context + callback propagation helper
 # ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _reset_cron_session_context():
+    token = _session_context._VAR_MAP["HERMES_CRON_SESSION"].set(_session_context._UNSET)
+    try:
+        yield
+    finally:
+        _session_context._VAR_MAP["HERMES_CRON_SESSION"].reset(token)
+
 
 def test_helper_propagates_contextvar_and_approval_callback():
     from tools import terminal_tool as TT
@@ -165,6 +175,32 @@ def test_guard_cron_deny_blocks(monkeypatch):
     res = A.check_execute_code_guard("import os", "local")
     assert res["approved"] is False
     assert res["outcome"] == "blocked"
+
+
+def test_guard_gateway_context_masks_leaked_cron_env(gw_session, monkeypatch):
+    """A leaked process-global HERMES_CRON_SESSION from a prior cron tick must
+    not force later gateway turns down the cron-deny branch."""
+    from gateway.session_context import clear_session_vars, set_session_vars
+
+    monkeypatch.setenv("HERMES_CRON_SESSION", "1")
+    monkeypatch.delenv("HERMES_GATEWAY_SESSION", raising=False)
+    monkeypatch.setattr(A, "_get_approval_mode", lambda: "manual")
+    monkeypatch.setattr(A, "_get_cron_approval_mode", lambda: "deny")
+
+    tokens = set_session_vars(
+        platform="discord",
+        chat_id="123",
+        session_key=gw_session,
+        cron_session="",
+    )
+    try:
+        _register_resolver(gw_session, "once")
+        res = A.check_execute_code_guard("import os; print(1)", "local")
+        assert res["approved"] is True
+        assert res.get("user_approved") is True
+    finally:
+        clear_session_vars(tokens)
+
 
 
 def test_guard_gateway_user_approves_is_one_shot(gw_session):

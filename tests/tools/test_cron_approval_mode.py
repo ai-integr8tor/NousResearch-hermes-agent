@@ -3,6 +3,7 @@
 import pytest
 
 import tools.approval as approval_module
+from gateway import session_context as _session_context
 from tools.approval import (
     _get_cron_approval_mode,
     check_all_command_guards,
@@ -16,7 +17,9 @@ def _clear_approval_state():
     approval_module._permanent_approved.clear()
     approval_module.clear_session("default")
     approval_module.clear_session("test-session")
+    cron_token = _session_context._VAR_MAP["HERMES_CRON_SESSION"].set(_session_context._UNSET)
     yield
+    _session_context._VAR_MAP["HERMES_CRON_SESSION"].reset(cron_token)
     approval_module._permanent_approved.clear()
     approval_module.clear_session("default")
     approval_module.clear_session("test-session")

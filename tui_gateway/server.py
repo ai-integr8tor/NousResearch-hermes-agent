@@ -1830,7 +1830,7 @@ def _set_session_context(session_key: str, cwd: str | None = None) -> list:
                 if sess.get("session_key") == session_key:
                     source = _session_source(sess)
                     break
-        return set_session_vars(session_key=session_key, source=source, cwd=resolved)
+        return set_session_vars(session_key=session_key, source=source, cwd=resolved, cron_session="")
     except Exception:
         return []
 
