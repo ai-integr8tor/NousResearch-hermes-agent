@@ -241,6 +241,12 @@ After changing MCP config, reload servers with:
 /reload-mcp
 ```
 
+On gateway startup, Hermes connects messaging platforms first and discovers MCP
+servers in the background. This keeps Slack/Telegram/email responsive even if a
+remote MCP server is slow or waiting on OAuth. MCP tools may appear a few
+seconds after the gateway reports that platforms are connected; use
+`/reload-mcp` to force a fresh reconnect after editing MCP config.
+
 ## Tool naming
 
 Server-native MCP tools become:
