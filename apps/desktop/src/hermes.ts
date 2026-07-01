@@ -637,8 +637,9 @@ export function testMessagingPlatform(platformId: string): Promise<MessagingPlat
 }
 
 export function getCronJobs(): Promise<CronJob[]> {
+  const suffix = _apiProfile ? `?profile=${encodeURIComponent(_apiProfile)}` : ''
   return window.hermesDesktop.api<CronJob[]>({
-    path: '/api/cron/jobs'
+    path: `/api/cron/jobs${suffix}`
   })
 }
 
