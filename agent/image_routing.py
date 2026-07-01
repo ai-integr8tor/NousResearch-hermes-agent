@@ -430,6 +430,21 @@ def decide_image_input_mode(
     if _explicit_aux_vision_override(cfg):
         return "text"
 
+    # Built-in providers whose standard endpoint is known to reject image input
+    # (e.g. Kimi Coding Plan /coding). Even if the capability database or a
+    # user override claims vision support, native attachment will fail, so fall
+    # back to the vision_analyze text pipeline.
+    try:
+        from agent.auxiliary_client import (
+            _normalize_aux_provider,
+            _PROVIDERS_WITHOUT_VISION,
+        )
+
+        if _normalize_aux_provider(provider) in _PROVIDERS_WITHOUT_VISION:
+            return "text"
+    except Exception:  # pragma: no cover - defensive
+        pass
+
     supports = _lookup_supports_vision(provider, model, cfg)
     if supports is True:
         return "native"

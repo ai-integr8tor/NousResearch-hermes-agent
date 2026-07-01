@@ -4196,6 +4196,41 @@ def resolve_provider_client(
                 or os.getenv("OPENAI_API_KEY", "").strip()
                 or "no-key-required"  # local servers don't need auth
             )
+            # If no explicit key and no OPENAI_API_KEY, try to infer the
+            # provider from the endpoint hostname (e.g.
+            # api.kimi.com/coding/v1 -> kimi-coding) and resolve its built-in
+            # API key from environment variables. This lets users configure
+            # auxiliary.<task>.provider + base_url without duplicating the
+            # api_key in config.yaml.
+            if custom_key == "no-key-required":
+                try:
+                    from agent.model_metadata import _infer_provider_from_url
+                    from hermes_cli.auth import (
+                        PROVIDER_REGISTRY,
+                        resolve_api_key_provider_credentials,
+                    )
+
+                    _inferred_provider = _infer_provider_from_url(custom_base)
+                    if (
+                        _inferred_provider
+                        and _inferred_provider in PROVIDER_REGISTRY
+                        and PROVIDER_REGISTRY[_inferred_provider].auth_type == "api_key"
+                        and _inferred_provider != "openrouter"
+                    ):
+                        _inferred_creds = resolve_api_key_provider_credentials(
+                            _inferred_provider
+                        )
+                        _inferred_key = str(_inferred_creds.get("api_key", "")).strip()
+                        if _inferred_key:
+                            custom_key = _inferred_key
+                            logger.debug(
+                                "resolve_provider_client: resolved %s API key from env "
+                                "for custom endpoint %s",
+                                _inferred_provider,
+                                custom_base,
+                            )
+                except Exception:
+                    pass
             if not custom_base:
                 logger.warning(
                     "resolve_provider_client: explicit custom endpoint requested "
@@ -4725,6 +4760,12 @@ def _main_model_supports_vision(provider: str, model: Optional[str]) -> bool:
     behaviour of attempting the call, so providers we haven't catalogued yet
     don't silently regress to text-only.
     """
+    provider = _normalize_aux_provider(provider)
+    if provider in _PROVIDERS_WITHOUT_VISION:
+        # Known text-only endpoints (e.g. Kimi Coding Plan /coding). The
+        # capability database may report vision for the broader provider
+        # family, but this specific endpoint rejects image input.
+        return False
     try:
         from agent.image_routing import _lookup_supports_vision
         from hermes_cli.config import load_config
@@ -4855,7 +4896,7 @@ def resolve_vision_provider_client(
         #   2. OpenRouter  (vision-capable aggregator fallback)
         #   3. Nous Portal (vision-capable aggregator fallback)
         #   4. Stop
-        main_provider = _read_main_provider()
+        main_provider = _normalize_aux_provider(_read_main_provider())
         main_model = _read_main_model()
         if main_provider and main_provider not in {"auto", ""}:
             vision_model = _PROVIDER_VISION_MODELS.get(main_provider, main_model)

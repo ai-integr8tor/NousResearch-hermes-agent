@@ -6,6 +6,7 @@ import base64
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 
 from agent.image_routing import (
     _coerce_capability_bool,
@@ -126,6 +127,23 @@ class TestDecideImageInputMode:
         }
         with patch("agent.models_dev.fetch_models_dev", return_value=registry):
             assert decide_image_input_mode("xiaomi", "mimo-v2.5-pro", {}) == "text"
+
+    @pytest.mark.parametrize("alias", ["kimi", "moonshot", "kimi-cn", "moonshot-cn"])
+    def test_auto_skips_known_text_only_providers_and_their_aliases(self, alias):
+        """Kimi Coding Plan aliases (kimi, moonshot, ...) must never be routed
+        native vision, even if the user set ``model.supports_vision: true``.
+        Their /coding endpoint rejects image input, so the text pipeline is the
+        only safe choice (#17076).
+        """
+        cfg = {"model": {"supports_vision": True}}
+        assert decide_image_input_mode(alias, "kimi-k2.7-code", cfg) == "text"
+
+    def test_auto_still_honours_override_for_other_providers(self):
+        """The text-only guard is scoped to known providers; overrides for
+        providers that can plausibly accept images are still respected.
+        """
+        cfg = {"model": {"supports_vision": True}}
+        assert decide_image_input_mode("anthropic", "claude-sonnet-4", cfg) == "native"
 
 
 # ─── _coerce_capability_bool ─────────────────────────────────────────────────

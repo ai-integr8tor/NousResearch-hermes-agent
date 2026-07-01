@@ -3772,6 +3772,39 @@ class TestVisionAutoSkipsKimiCoding:
         assert provider == "openrouter"
         assert client is fake_or_client
 
+    @pytest.mark.parametrize("alias", ["kimi", "moonshot", "kimi-cn", "moonshot-cn"])
+    def test_kimi_aliases_normalised_and_skipped(self, monkeypatch, alias):
+        """Raw config values like 'kimi' or 'moonshot' alias to 'kimi-coding',
+        so the vision auto path must normalise before checking the skip list.
+        Without normalisation the alias slips through to resolve_provider_client
+        and returns a client for the non-vision /coding endpoint (#17076).
+        """
+        fake_or_client = MagicMock(name="openrouter_client")
+
+        monkeypatch.setattr(
+            "agent.auxiliary_client._read_main_provider", lambda: alias,
+        )
+        monkeypatch.setattr(
+            "agent.auxiliary_client._read_main_model", lambda: "kimi-k2.7-code",
+        )
+        rpc_mock = MagicMock(side_effect=AssertionError(
+            f"resolve_provider_client should NOT be called for {alias!r} "
+            "on the vision auto path"))
+        monkeypatch.setattr(
+            "agent.auxiliary_client.resolve_provider_client", rpc_mock,
+        )
+        monkeypatch.setattr(
+            "agent.auxiliary_client._resolve_strict_vision_backend",
+            lambda p, m=None: (fake_or_client, "google/gemini-3-flash-preview")
+            if p == "openrouter"
+            else (None, None),
+        )
+
+        provider, client, model = resolve_vision_provider_client()
+        assert provider == "openrouter"
+        assert client is fake_or_client
+        assert model == "google/gemini-3-flash-preview"
+
     def test_explicit_override_to_kimi_coding_still_honored(self, monkeypatch):
         """When a user *explicitly* requests kimi-coding for vision (e.g.
         they know what they're doing, or are running a future build that
