@@ -5,9 +5,13 @@ before they reach log files, verbose output, or gateway logs.
 
 Short tokens (< 18 chars) are fully masked. Longer tokens preserve
 the first 6 and last 4 characters for debuggability.
+
+Supports ``basic``, ``standard``, and ``strict`` redaction levels via
+``security.redact_level`` / ``HERMES_REDACT_LEVEL``.
 """
 
 import logging
+import math
 import os
 import re
 
@@ -66,6 +70,11 @@ _SENSITIVE_BODY_KEYS = frozenset({
 # downgrade — see `_log_redaction_status()` in gateway/run.py and cli.py.
 _REDACT_ENABLED = os.getenv("HERMES_REDACT_SECRETS", "true").lower() in {"1", "true", "yes", "on"}
 
+# Snapshotted at import time alongside _REDACT_ENABLED.
+_REDACT_LEVEL = os.getenv("HERMES_REDACT_LEVEL", "basic").lower().strip()
+if _REDACT_LEVEL not in {"basic", "standard", "strict"}:
+    _REDACT_LEVEL = "basic"
+
 # Known API key prefixes -- match the prefix + contiguous token chars
 _PREFIX_PATTERNS = [
     r"sk-[A-Za-z0-9_-]{10,}",           # OpenAI / OpenRouter / Anthropic (sk-ant-*)
@@ -104,6 +113,13 @@ _PREFIX_PATTERNS = [
     r"mem0_[A-Za-z0-9]{10,}",           # Mem0 Platform API key
     r"brv_[A-Za-z0-9]{10,}",            # ByteRover API key
     r"xai-[A-Za-z0-9]{30,}",            # xAI (Grok) API key
+    r"AC[A-Za-z0-9]{32}",               # Twilio Account SID
+    r"SK[A-Za-z0-9]{32}",               # Twilio Auth Token / API Key
+    r"[A-Za-z0-9]{32}-us[0-9]{1,2}",    # Mailchimp API key (<key>-usN)
+    r"Bot\.[A-Za-z0-9_-]{24}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27}",  # Discord bot token
+    r"[A-Za-z0-9+/]{88}",               # Azure Storage Account Key (base64, 88 chars)
+    r"whsec_[A-Za-z0-9+/]{32,}",        # Stripe webhook signing secret
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:[-A-Za-z0-9+/=]{20,}",  # Azure SAS sig
 ]
 
 # ENV assignment patterns: KEY=value where KEY contains a secret-like name
@@ -432,6 +448,11 @@ def redact_sensitive_text(text: str, *, force: bool = False, code_file: bool = F
             return phone[:4] + "****" + phone[-4:]
         text = _SIGNAL_PHONE_RE.sub(_redact_phone, text)
 
+    if _REDACT_LEVEL in {"standard", "strict"}:
+        text = _redact_pii(text)
+        if _REDACT_LEVEL == "strict":
+            text = _redact_strict_pii(text)
+
     return text
 
 
@@ -491,6 +512,109 @@ def _has_http_method_substring(text: str) -> bool:
     """Cheap pre-check before scanning for access-log request targets."""
     upper = text.upper()
     return any(method in upper for method in _HTTP_METHOD_SUBSTRINGS)
+
+
+def _shannon_entropy(value: str) -> float:
+    """Calculate Shannon entropy in bits per character."""
+    if not value:
+        return 0.0
+    freq: dict[str, int] = {}
+    for ch in value:
+        freq[ch] = freq.get(ch, 0) + 1
+    length = len(value)
+    return -sum((c / length) * math.log2(c / length) for c in freq.values())
+
+
+def _luhn_valid(number: str) -> bool:
+    """Validate a credit-card string with the Luhn algorithm."""
+    digits = "".join(c for c in number if c.isdigit())
+    if len(digits) < 13 or len(digits) > 19:
+        return False
+    total = 0
+    reverse = digits[::-1]
+    for i, d in enumerate(reverse):
+        n = int(d)
+        if i % 2 == 1:
+            n *= 2
+            if n > 9:
+                n -= 9
+        total += n
+    return total % 10 == 0
+
+
+_CREDIT_CARD_RE = re.compile(
+    r"(?<!\d)"
+    r"(\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{1,4}"  # 16-digit: Visa/MC/Discover
+    r"|3[47]\d{2}[-\s]?\d{6}[-\s]?\d{5}"           # 15-digit: Amex
+    r"|3(?:0[0-5]|[68]\d)\d{11}"                    # 14-digit: Diners
+    r")"
+    r"(?!\d)"
+)
+
+_SSN_RE = re.compile(
+    r"(?<!\d)"
+    r"(?!000|666|9\d\d)"      # AAA block exclusions
+    r"(\d{3})"
+    r"[-\s]"
+    r"(?!00)"
+    r"(\d{2})"
+    r"[-\s]"
+    r"(?!0000)"
+    r"(\d{4})"
+    r"(?!\d)"
+)
+
+_IBAN_RE = re.compile(
+    r"\b([A-Z]{2}\d{2}[A-Z0-9]{4,30}|[A-Z]{2}\d{2}(?:\s[A-Z0-9]{4})+(?:\s[A-Z0-9]{1,4})?)\b"
+)
+
+_EMAIL_RE = re.compile(
+    r"(?<![{<])\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b(?![}>])"
+)
+
+_IPV4_RE = re.compile(
+    r"(?<!\d)"
+    r"((?!0\.|127\.|169\.254\.|255\.255\.255\.255)"
+    r"(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}"
+    r"(?:25[0-5]|2[0-4]\d|[01]?\d\d?))"
+    r"(?!\d)"
+)
+
+
+def _redact_pii(text: str) -> str:
+    """Apply standard-level PII redaction."""
+    def _redact_cc(m: re.Match) -> str:
+        raw = m.group(0)
+        digits = "".join(c for c in raw if c.isdigit())
+        if _luhn_valid(digits):
+            if len(digits) < 18:
+                return "****-****-****-" + digits[-4:]
+            return "***" + digits[-4:]
+        return raw
+
+    if any(c.isdigit() for c in text):
+        text = _CREDIT_CARD_RE.sub(_redact_cc, text)
+
+    if "-" in text or " " in text:
+        text = _SSN_RE.sub(r"***-**-\3", text)
+
+    if any(c.isalpha() and c.isupper() for c in text):
+        text = _IBAN_RE.sub(lambda m: m.group(0)[:4] + "****", text)
+
+    return text
+
+
+def _redact_strict_pii(text: str) -> str:
+    """Apply strict-level PII redaction."""
+    if "@" in text:
+        text = _EMAIL_RE.sub(lambda m: m.group(0).split("@")[0][:2] + "***@***", text)
+
+    if "." in text:
+        text = _IPV4_RE.sub(
+            lambda m: ".".join(m.group(1).split(".")[:2]) + ".***.***", text
+        )
+
+    return text
 
 
 class RedactingFormatter(logging.Formatter):
