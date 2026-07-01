@@ -41,12 +41,9 @@ const { adoptServedDashboardToken } = require('./dashboard-token.cjs')
 const { waitForDashboardPortAnnouncement } = require('./backend-ready.cjs')
 const { dashboardFallbackArgs, sourceDeclaresServe } = require('./backend-command.cjs')
 const { serializeJsonBody, setJsonRequestHeaders } = require('./oauth-net-request.cjs')
-const { fetchMarketplaceThemes, searchMarketplaceThemes } = require('./vscode-marketplace.cjs')
 const { buildDesktopBackendEnv, normalizeHermesHomeRoot } = require('./backend-env.cjs')
 const { readWindowsUserEnvVar } = require('./windows-user-env.cjs')
-const { readWslWindowsClipboardImage } = require('./wsl-clipboard-image.cjs')
 const { nativeOverlayWidth: computeNativeOverlayWidth } = require('./titlebar-overlay-width.cjs')
-const { readDirForIpc } = require('./fs-read-dir.cjs')
 const { readLiveUpdateMarker } = require('./update-marker.cjs')
 const {
   resolveUnpackedRelease,
@@ -57,24 +54,16 @@ const {
   collectRelaunchEnv,
   buildRelaunchScript
 } = require('./update-relaunch.cjs')
-const { gitRootForIpc } = require('./git-root.cjs')
-const { addWorktree, listBranches, listWorktrees, removeWorktree, switchBranch } = require('./git-worktree-ops.cjs')
-const {
-  fileDiffVsHead,
-  repoStatus,
-  reviewCommit,
-  reviewCommitContext,
-  reviewCreatePr,
-  reviewDiff,
-  reviewList,
-  reviewPush,
-  reviewRevParse,
-  reviewRevert,
-  reviewShipInfo,
-  reviewStage,
-  reviewUnstage
-} = require('./git-review-ops.cjs')
-const { scanGitRepos } = require('./git-repo-scan.cjs')
+const { registerGitIpc } = require('./git-ipc.cjs')
+const { registerFsIpc } = require('./fs-ipc.cjs')
+const { registerTerminalIpc } = require('./terminal-ipc.cjs')
+const { registerUpdatesIpc } = require('./updates-ipc.cjs')
+const { registerLogsIpc } = require('./logs-ipc.cjs')
+const { registerProjectDirIpc } = require('./project-dir-ipc.cjs')
+const { registerVscodeThemeIpc } = require('./vscode-theme-ipc.cjs')
+const { registerUninstallIpc } = require('./uninstall-ipc.cjs')
+const { registerVersionIpc } = require('./version-ipc.cjs')
+const { registerMediaIpc } = require('./media-ipc.cjs')
 const { OFFICIAL_REPO_HTTPS_URL, isOfficialSshRemote } = require('./update-remote.cjs')
 const { resolveBehindCount, shouldCountCommits } = require('./update-count.cjs')
 const { runRebuildWithRetry } = require('./update-rebuild.cjs')
@@ -111,9 +100,7 @@ const {
   tokenPreview
 } = require('./connection-config.cjs')
 const {
-  DATA_URL_READ_MAX_BYTES,
   DEFAULT_FETCH_TIMEOUT_MS,
-  TEXT_PREVIEW_SOURCE_MAX_BYTES,
   encryptDesktopSecret: encryptDesktopSecretStrict,
   resolveReadableFileForIpc,
   resolveRequestedPathForIpc,
@@ -1361,10 +1348,7 @@ function backendSupportsServe(backend) {
   let supported = null
   if (backend.root) {
     try {
-      const src = fs.readFileSync(
-        path.join(backend.root, 'hermes_cli', 'subcommands', 'dashboard.py'),
-        'utf8'
-      )
+      const src = fs.readFileSync(path.join(backend.root, 'hermes_cli', 'subcommands', 'dashboard.py'), 'utf8')
       supported = sourceDeclaresServe(src)
     } catch {
       supported = null // source unreadable — fall through to the probe
@@ -2292,9 +2276,7 @@ async function handOffWindowsBootstrapRecovery(reason) {
   // --repair (full venv recreate) and drove reinstall loops. The venv interpreter
   // and the bootstrap-complete marker are present earlier and are better signals.
   const haveRealInstall =
-    fileExists(venvPython) ||
-    fileExists(venvHermes) ||
-    fileExists(path.join(updateRoot, '.hermes-bootstrap-complete'))
+    fileExists(venvPython) || fileExists(venvHermes) || fileExists(path.join(updateRoot, '.hermes-bootstrap-complete'))
   const updaterArgs = haveRealInstall ? ['--update', '--branch', branch] : ['--repair', '--branch', branch]
 
   await releaseBackendLockForUpdate(updateRoot)
@@ -6522,98 +6504,18 @@ ipcMain.handle('hermes:notify', (_event, payload) => {
   return true
 })
 
-ipcMain.handle('hermes:readFileDataUrl', async (_event, filePath) => {
-  const { resolvedPath } = await resolveReadableFileForIpc(filePath, {
-    maxBytes: DATA_URL_READ_MAX_BYTES,
-    purpose: 'File preview'
-  })
-  const data = await fs.promises.readFile(resolvedPath)
-  return `data:${mimeTypeForPath(resolvedPath)};base64,${data.toString('base64')}`
-})
-
-ipcMain.handle('hermes:readFileText', async (_event, filePath) => {
-  const { resolvedPath, stat } = await resolveReadableFileForIpc(filePath, {
-    maxBytes: TEXT_PREVIEW_SOURCE_MAX_BYTES,
-    purpose: 'Text preview'
-  })
-  const ext = path.extname(resolvedPath).toLowerCase()
-  const handle = await fs.promises.open(resolvedPath, 'r')
-  const bytesToRead = Math.min(stat.size, TEXT_PREVIEW_MAX_BYTES)
-
-  try {
-    const buffer = Buffer.alloc(bytesToRead)
-    const { bytesRead } = await handle.read(buffer, 0, bytesToRead, 0)
-
-    return {
-      binary: looksBinary(buffer.subarray(0, Math.min(bytesRead, 4096))),
-      byteSize: stat.size,
-      language: PREVIEW_LANGUAGE_BY_EXT[ext] || 'text',
-      mimeType: mimeTypeForPath(resolvedPath),
-      path: resolvedPath,
-      text: buffer.subarray(0, bytesRead).toString('utf8'),
-      truncated: stat.size > TEXT_PREVIEW_MAX_BYTES
-    }
-  } finally {
-    await handle.close()
-  }
-})
-
-ipcMain.handle('hermes:selectPaths', async (_event, options = {}) => {
-  const properties = options?.directories ? ['openDirectory'] : ['openFile']
-  if (options?.multiple !== false) properties.push('multiSelections')
-
-  let resolvedDefaultPath
-  if (options?.defaultPath) {
-    try {
-      resolvedDefaultPath = path.resolve(String(options.defaultPath))
-    } catch {
-      resolvedDefaultPath = undefined
-    }
-  }
-
-  const result = await dialog.showOpenDialog(mainWindow, {
-    title: options?.title || 'Add context',
-    defaultPath: resolvedDefaultPath,
-    properties,
-    filters: Array.isArray(options?.filters) ? options.filters : undefined
-  })
-
-  if (result.canceled) return []
-  return result.filePaths
-})
-
-ipcMain.handle('hermes:writeClipboard', (_event, text) => {
-  clipboard.writeText(String(text || ''))
-  return true
-})
-
-ipcMain.handle('hermes:saveImageFromUrl', (_event, url) => saveImageFromUrl(String(url || '')))
-
-ipcMain.handle('hermes:saveImageBuffer', async (_event, payload) => {
-  const data = payload?.data
-  if (!data) throw new Error('saveImageBuffer: missing data')
-
-  const buffer = Buffer.isBuffer(data) ? data : Buffer.from(data)
-  return writeComposerImage(buffer, payload?.ext || '.png')
-})
-
-ipcMain.handle('hermes:saveClipboardImage', async () => {
-  const image = clipboard.readImage()
-  if (image && !image.isEmpty()) {
-    return writeComposerImage(image.toPNG(), '.png')
-  }
-
-  // WSL2/WSLg doesn't bridge clipboard *images* from the Windows host to the
-  // Linux clipboard Electron reads, so a host screenshot looks empty above.
-  // Pull it straight off the Windows clipboard via PowerShell as a fallback.
-  if (IS_WSL) {
-    const png = readWslWindowsClipboardImage()
-    if (png) {
-      return writeComposerImage(png, '.png')
-    }
-  }
-
-  return ''
+// File-preview/clipboard/image IPC lives in media-ipc.cjs; preview helpers,
+// image writers, and a live-main-window getter are injected.
+registerMediaIpc({
+  getMainWindow: () => mainWindow,
+  ipcMain,
+  IS_WSL,
+  looksBinary,
+  mimeTypeForPath,
+  PREVIEW_LANGUAGE_BY_EXT,
+  saveImageFromUrl,
+  TEXT_PREVIEW_MAX_BYTES,
+  writeComposerImage
 })
 
 ipcMain.handle('hermes:normalizePreviewTarget', (_event, target, baseDir) =>
@@ -6681,60 +6583,20 @@ ipcMain.handle('hermes:openPreviewInBrowser', async (_event, url) => {
 // settings mount and seeds the value into the picker; writing back persists
 // it via writeDefaultProjectDir so resolveHermesCwd picks it up on the next
 // session spawn (no app restart needed).
-ipcMain.handle('hermes:setting:defaultProjectDir:get', async () => ({
-  dir: readDefaultProjectDir(),
-  defaultLabel: app.getPath('home'),
-  resolvedCwd: resolveHermesCwd()
-}))
-
-ipcMain.handle('hermes:workspace:sanitize', async (_event, cwd) => sanitizeWorkspaceCwd(cwd))
-
-ipcMain.handle('hermes:setting:defaultProjectDir:set', async (_event, dir) => {
-  const next = typeof dir === 'string' && dir.trim() ? dir.trim() : null
-
-  if (next) {
-    try {
-      fs.mkdirSync(next, { recursive: true })
-    } catch (error) {
-      throw new Error(`Could not create directory: ${error.message}`)
-    }
-  }
-
-  writeDefaultProjectDir(next)
-
-  return { dir: next }
-})
-
-ipcMain.handle('hermes:setting:defaultProjectDir:pick', async () => {
-  const result = await dialog.showOpenDialog({
-    title: 'Choose default project directory',
-    properties: ['openDirectory', 'createDirectory'],
-    defaultPath: readDefaultProjectDir() || app.getPath('home')
-  })
-
-  if (result.canceled || result.filePaths.length === 0) {
-    return { canceled: true, dir: null }
-  }
-
-  return { canceled: false, dir: result.filePaths[0] }
+// Default-project-dir + workspace settings IPC lives in project-dir-ipc.cjs;
+// config readers/writers + cwd resolvers are injected.
+registerProjectDirIpc({
+  ipcMain,
+  readDefaultProjectDir,
+  resolveHermesCwd,
+  sanitizeWorkspaceCwd,
+  writeDefaultProjectDir
 })
 
 ipcMain.handle('hermes:fetchLinkTitle', (_event, url) => fetchLinkTitle(url))
 
-ipcMain.handle('hermes:logs:reveal', async () => {
-  try {
-    await fs.promises.mkdir(path.dirname(DESKTOP_LOG_PATH), { recursive: true })
-    if (!fileExists(DESKTOP_LOG_PATH)) {
-      await fs.promises.appendFile(DESKTOP_LOG_PATH, '')
-    }
-    shell.showItemInFolder(DESKTOP_LOG_PATH)
-    return { ok: true, path: DESKTOP_LOG_PATH }
-  } catch (error) {
-    return { ok: false, path: DESKTOP_LOG_PATH, error: error.message }
-  }
-})
-
-ipcMain.handle('hermes:logs:recent', async () => ({ path: DESKTOP_LOG_PATH, lines: hermesLog.slice(-200) }))
+// Desktop-log IPC lives in logs-ipc.cjs; log path + ring buffer are injected.
+registerLogsIpc({ DESKTOP_LOG_PATH, fileExists, hermesLog, ipcMain })
 
 function isExecutableFile(filePath) {
   if (!filePath || !path.isAbsolute(filePath)) {
@@ -6918,257 +6780,36 @@ function disposeTerminalSession(id) {
   return true
 }
 
-ipcMain.handle('hermes:fs:readDir', async (_event, dirPath) => readDirForIpc(dirPath))
+// Filesystem IPC lives in fs-ipc.cjs; main-process path helpers are injected.
+registerFsIpc({ ipcMain, directoryExists, expandUserPath })
 
-ipcMain.handle('hermes:fs:gitRoot', async (_event, startPath) => gitRootForIpc(startPath))
+// Git/worktree/review IPC lives in git-ipc.cjs; the git + gh binary resolvers
+// stay here (Windows PATH discovery) and are injected into the registrar.
+registerGitIpc({ ipcMain, resolveGitBinary, resolveGhBinary })
 
-// Reveal a path in the OS file manager (Finder / Explorer / Files).
-ipcMain.handle('hermes:fs:reveal', async (_event, targetPath) => {
-  const target = String(targetPath || '').trim()
-
-  if (!target) {
-    return false
-  }
-
-  try {
-    shell.showItemInFolder(target)
-
-    return true
-  } catch {
-    return false
-  }
+// Terminal/PTY IPC lives in terminal-ipc.cjs; the PTY runtime, session
+// registry, and shell helpers stay in the main process and are injected.
+registerTerminalIpc({
+  disposeTerminalSession,
+  ensureSpawnHelperExecutable,
+  ipcMain,
+  nodePty,
+  safeTerminalCwd,
+  terminalChannel,
+  terminalSessions,
+  terminalShellCommand,
+  terminalShellEnv
 })
 
-// Rename a file/folder in place. The renderer passes the existing path + a new
-// base name; the destination is resolved in the SAME parent dir so a rename can
-// never move the item elsewhere or traverse out. Rejects on a name collision.
-ipcMain.handle('hermes:fs:rename', async (_event, targetPath, newName) => {
-  const src = String(targetPath || '').trim()
-  const name = String(newName || '').trim()
-
-  if (!src || !name || name === '.' || name === '..' || name.includes('/') || name.includes('\\')) {
-    throw new Error('Invalid rename')
-  }
-
-  const dst = path.join(path.dirname(src), name)
-
-  if (dst === src) {
-    return { path: dst }
-  }
-
-  if (fs.existsSync(dst)) {
-    throw new Error(`"${name}" already exists`)
-  }
-
-  await fs.promises.rename(src, dst)
-
-  return { path: dst }
-})
-
-// Write a small UTF-8 text file (e.g. a project's IDEA.md at creation). The path
-// is hardened (resolveRequestedPathForIpc) and the parent must already exist —
-// this never creates directory trees or escapes the allowed roots, and content
-// is size-capped so it can't be abused as a bulk-write primitive.
-ipcMain.handle('hermes:fs:writeText', async (_event, filePath, content) => {
-  const raw = String(filePath || '').trim()
-
-  if (!raw) {
-    throw new Error('Invalid path')
-  }
-
-  const text = String(content ?? '')
-
-  if (text.length > 1_000_000) {
-    throw new Error('Content too large')
-  }
-
-  const resolved = resolveRequestedPathForIpc(expandUserPath(raw), { purpose: 'Write text file' })
-
-  if (!directoryExists(path.dirname(resolved))) {
-    throw new Error('Parent directory does not exist')
-  }
-
-  await fs.promises.writeFile(resolved, text, 'utf8')
-
-  return { path: resolved }
-})
-
-// Move a file/folder to the OS trash (recoverable) — the VS Code "Delete"
-// default. `shell.trashItem` routes to Finder/Explorer/Files trash per platform.
-ipcMain.handle('hermes:fs:trash', async (_event, targetPath) => {
-  const target = String(targetPath || '').trim()
-
-  if (!target) {
-    throw new Error('Invalid delete')
-  }
-
-  await shell.trashItem(target)
-
-  return true
-})
-
-// Git-driven worktree management ("Start work" flow). Errors surface to the
-// renderer as rejected promises so it can toast a friendly message.
-ipcMain.handle('hermes:git:worktreeList', async (_event, repoPath) => listWorktrees(repoPath, resolveGitBinary()))
-
-ipcMain.handle('hermes:git:worktreeAdd', async (_event, repoPath, options) =>
-  addWorktree(repoPath, options || {}, resolveGitBinary())
-)
-
-ipcMain.handle('hermes:git:worktreeRemove', async (_event, repoPath, worktreePath, options) =>
-  removeWorktree(repoPath, worktreePath, options || {}, resolveGitBinary())
-)
-
-ipcMain.handle('hermes:git:branchSwitch', async (_event, repoPath, branch) =>
-  switchBranch(repoPath, branch, resolveGitBinary())
-)
-
-ipcMain.handle('hermes:git:branchList', async (_event, repoPath) => listBranches(repoPath, resolveGitBinary()))
-
-// Compact repo status (branch, ahead/behind, change counts + files) for the
-// composer coding rail. Returns null on a non-repo / remote backend so the rail
-// hides cleanly rather than erroring.
-ipcMain.handle('hermes:git:repoStatus', async (_event, repoPath) => repoStatus(repoPath, resolveGitBinary()))
-
-// Codex-style review pane: list changed files for a scope, fetch one file's
-// unified diff, and stage / unstage / revert. Reads return empty on failure;
-// mutations reject so the renderer can toast.
-ipcMain.handle('hermes:git:review:list', async (_event, repoPath, scope, baseRef) =>
-  reviewList(repoPath, scope, baseRef, resolveGitBinary())
-)
-ipcMain.handle('hermes:git:review:diff', async (_event, repoPath, filePath, scope, baseRef, staged) =>
-  reviewDiff(repoPath, filePath, scope, baseRef, staged, resolveGitBinary())
-)
-// Working-tree-vs-HEAD diff for one file (the preview's "show the diff" view).
-ipcMain.handle('hermes:git:fileDiff', async (_event, repoPath, filePath) =>
-  fileDiffVsHead(repoPath, filePath, resolveGitBinary())
-)
-ipcMain.handle('hermes:git:review:stage', async (_event, repoPath, filePath) =>
-  reviewStage(repoPath, filePath ?? null, resolveGitBinary())
-)
-ipcMain.handle('hermes:git:review:unstage', async (_event, repoPath, filePath) =>
-  reviewUnstage(repoPath, filePath ?? null, resolveGitBinary())
-)
-ipcMain.handle('hermes:git:review:revert', async (_event, repoPath, filePath) =>
-  reviewRevert(repoPath, filePath ?? null, resolveGitBinary())
-)
-ipcMain.handle('hermes:git:review:revParse', async (_event, repoPath, ref) =>
-  reviewRevParse(repoPath, ref, resolveGitBinary())
-)
-ipcMain.handle('hermes:git:review:commit', async (_event, repoPath, message, push) =>
-  reviewCommit(repoPath, message, Boolean(push), resolveGitBinary())
-)
-ipcMain.handle('hermes:git:review:commitContext', async (_event, repoPath) =>
-  reviewCommitContext(repoPath, resolveGitBinary())
-)
-ipcMain.handle('hermes:git:review:push', async (_event, repoPath) => reviewPush(repoPath, resolveGitBinary()))
-ipcMain.handle('hermes:git:review:shipInfo', async (_event, repoPath) => reviewShipInfo(repoPath, resolveGhBinary()))
-ipcMain.handle('hermes:git:review:createPr', async (_event, repoPath) =>
-  reviewCreatePr(repoPath, resolveGitBinary(), resolveGhBinary())
-)
-
-// Repo-first project discovery: scan bounded roots for git repos (pure fs walk,
-// no native addon). Never throws to the renderer — failures yield an empty list.
-ipcMain.handle('hermes:git:scanRepos', async (_event, roots, options) => {
-  try {
-    return await scanGitRepos(roots || [], options || {})
-  } catch {
-    return []
-  }
-})
-
-ipcMain.handle('hermes:terminal:start', async (event, payload = {}) => {
-  if (!nodePty) {
-    throw new Error('PTY support is unavailable. Reinstall desktop dependencies and restart Hermes.')
-  }
-
-  ensureSpawnHelperExecutable()
-
-  const id = crypto.randomUUID()
-  const { args, command, name } = terminalShellCommand()
-  const cwd = safeTerminalCwd(payload?.cwd)
-  const cols = Math.max(2, Number.parseInt(String(payload?.cols || 80), 10) || 80)
-  const rows = Math.max(2, Number.parseInt(String(payload?.rows || 24), 10) || 24)
-  const ptyProcess = nodePty.spawn(command, args, {
-    cols,
-    cwd,
-    env: terminalShellEnv(),
-    name: 'xterm-256color',
-    rows
-  })
-
-  terminalSessions.set(id, { pty: ptyProcess, webContentsId: event.sender.id })
-
-  const send = (suffix, payload) => {
-    if (event.sender.isDestroyed()) {
-      return
-    }
-
-    event.sender.send(terminalChannel(id, suffix), payload)
-  }
-
-  ptyProcess.onData(data => send('data', data))
-  ptyProcess.onExit(({ exitCode, signal }) => {
-    terminalSessions.delete(id)
-    send('exit', { code: exitCode, signal: signal || null })
-  })
-  event.sender.once('destroyed', () => disposeTerminalSession(id))
-
-  return { cwd, id, shell: name }
-})
-
-ipcMain.handle('hermes:terminal:write', (_event, id, data) => {
-  const sessionInfo = terminalSessions.get(String(id || ''))
-
-  if (!sessionInfo) {
-    return false
-  }
-
-  sessionInfo.pty.write(String(data || ''))
-
-  return true
-})
-
-ipcMain.handle('hermes:terminal:resize', (_event, id, size = {}) => {
-  const sessionInfo = terminalSessions.get(String(id || ''))
-
-  if (!sessionInfo) {
-    return false
-  }
-
-  const cols = Math.max(2, Number.parseInt(String(size?.cols || 80), 10) || 80)
-  const rows = Math.max(2, Number.parseInt(String(size?.rows || 24), 10) || 24)
-
-  sessionInfo.pty.resize(cols, rows)
-
-  return true
-})
-ipcMain.handle('hermes:terminal:dispose', (_event, id) => disposeTerminalSession(String(id || '')))
-
-ipcMain.handle('hermes:updates:check', async () =>
-  checkUpdates().catch(error => ({
-    supported: true,
-    branch: readDesktopUpdateConfig().branch,
-    error: 'check-failed',
-    message: error?.message || String(error),
-    fetchedAt: Date.now()
-  }))
-)
-
-ipcMain.handle('hermes:updates:apply', async (_event, payload) =>
-  applyUpdates(payload || {}).catch(error => ({
-    ok: false,
-    error: 'apply-failed',
-    message: error?.message || String(error)
-  }))
-)
-
-ipcMain.handle('hermes:updates:branch:get', async () => readDesktopUpdateConfig())
-
-ipcMain.handle('hermes:updates:branch:set', async (_event, name) => {
-  const branch = typeof name === 'string' && name.trim() ? name.trim() : DEFAULT_UPDATE_BRANCH
-  writeDesktopUpdateConfig({ branch })
-  return { branch }
+// Auto-update IPC lives in updates-ipc.cjs; the update engine + on-disk
+// config stay in the main process and are injected.
+registerUpdatesIpc({
+  applyUpdates,
+  checkUpdates,
+  DEFAULT_UPDATE_BRANCH,
+  ipcMain,
+  readDesktopUpdateConfig,
+  writeDesktopUpdateConfig
 })
 
 // Resolve the canonical Hermes version (the one `release.py` bumps in
@@ -7206,13 +6847,8 @@ function showAboutPanelFresh() {
   app.showAboutPanel()
 }
 
-ipcMain.handle('hermes:version', async () => ({
-  appVersion: resolveHermesVersion(),
-  electronVersion: process.versions.electron,
-  nodeVersion: process.versions.node,
-  platform: process.platform,
-  hermesRoot: resolveUpdateRoot()
-}))
+// App-version IPC lives in version-ipc.cjs; the version + root resolvers are injected.
+registerVersionIpc({ ipcMain, resolveHermesVersion, resolveUpdateRoot })
 
 // ===========================================================================
 // Uninstall — remove the Chat GUI (and optionally the agent / user data).
@@ -7405,18 +7041,11 @@ async function runDesktopUninstall(mode) {
   return { ok: true, mode, willRemoveAppBundle: Boolean(removeBundle), scriptPath }
 }
 
-ipcMain.handle('hermes:uninstall:summary', async () => getUninstallSummary())
-ipcMain.handle('hermes:uninstall:run', async (_event, payload) => {
-  const mode = payload && typeof payload === 'object' ? payload.mode : payload
-  return runDesktopUninstall(String(mode || ''))
-})
+// Uninstall IPC lives in uninstall-ipc.cjs; the uninstall engine is injected.
+registerUninstallIpc({ getUninstallSummary, ipcMain, runDesktopUninstall })
 
-// Download a VS Code Marketplace extension and return the raw color-theme JSON
-// it contributes. No theme code is executed — we only read JSON from the .vsix.
-ipcMain.handle('hermes:vscode-theme:fetch', async (_event, id) => fetchMarketplaceThemes(String(id || '')))
-
-// Search the Marketplace for color-theme extensions (empty query = top installs).
-ipcMain.handle('hermes:vscode-theme:search', async (_event, query) => searchMarketplaceThemes(String(query || ''), 20))
+// VS Code Marketplace theme IPC lives in vscode-theme-ipc.cjs.
+registerVscodeThemeIpc({ ipcMain })
 
 // ---------------------------------------------------------------------------
 // hermes:// deep links (e.g. hermes://blueprint/morning-brief?time=08:00).
