@@ -340,10 +340,10 @@ class TestBaseUrlValidation:
         from hermes_cli.main import _model_flow_api_key_provider
         from hermes_cli.config import load_config, get_env_value
 
-        # User types a shell command instead of a URL at the base URL prompt
+        # User chooses replace, then types a shell command instead of a URL.
         with patch("hermes_cli.auth._prompt_model_selection", return_value="MiniMax-M2"), \
              patch("hermes_cli.auth.deactivate_provider"), \
-             patch("builtins.input", return_value="nano ~/.hermes/.env"):
+             patch("builtins.input", side_effect=["", "r", "nano ~/.hermes/.env"]):
             _model_flow_api_key_provider(load_config(), "minimax", "old-model")
 
         # The garbage value should NOT have been saved
@@ -365,12 +365,14 @@ class TestBaseUrlValidation:
 
         from hermes_cli.main import _model_flow_api_key_provider
         from hermes_cli.config import load_config, get_env_value
-
+        
         with patch("hermes_cli.auth._prompt_model_selection", return_value="MiniMax-M2"), \
              patch("hermes_cli.auth.deactivate_provider"), \
-             patch("builtins.input", return_value="https://custom.minimax.example/v1"):
+             patch(
+                 "builtins.input",
+                 side_effect=["", "r", "https://custom.minimax.example/v1"],
+             ):
             _model_flow_api_key_provider(load_config(), "minimax", "old-model")
-
         saved = get_env_value("MINIMAX_BASE_URL") or ""
         assert saved == "https://custom.minimax.example/v1"
 
@@ -556,3 +558,75 @@ class TestZaiEndpointPicker:
 
         assert captured["default"] == expected_default
 
+
+class TestBaseUrlChoices:
+    """Generic API-key providers should support Keep / Replace / Clear."""
+
+    def test_keep_base_url_is_default(self, config_home, monkeypatch):
+        """Pressing Enter at the K/R/C prompt keeps the existing base URL."""
+        from hermes_cli.auth import PROVIDER_REGISTRY
+
+        pconfig = PROVIDER_REGISTRY.get("minimax")
+        if not pconfig:
+            pytest.skip("minimax not in PROVIDER_REGISTRY")
+
+        monkeypatch.setenv("MINIMAX_API_KEY", "test-key")
+        monkeypatch.setenv("MINIMAX_BASE_URL", "https://existing.minimax.example/v1")
+
+        from hermes_cli.main import _model_flow_api_key_provider
+        from hermes_cli.config import load_config, get_env_value
+
+        with patch("hermes_cli.auth._prompt_model_selection", return_value="MiniMax-M2"), \
+             patch("hermes_cli.auth.deactivate_provider"), \
+             patch("builtins.input", return_value=""):
+            _model_flow_api_key_provider(load_config(), "minimax", "old-model")
+
+        saved = get_env_value("MINIMAX_BASE_URL") or ""
+        assert saved == "https://existing.minimax.example/v1"
+
+    def test_replace_base_url_prompts_for_new_url(self, config_home, monkeypatch):
+        """Choosing R replaces the configured base URL."""
+        from hermes_cli.auth import PROVIDER_REGISTRY
+
+        pconfig = PROVIDER_REGISTRY.get("minimax")
+        if not pconfig:
+            pytest.skip("minimax not in PROVIDER_REGISTRY")
+
+        monkeypatch.setenv("MINIMAX_API_KEY", "test-key")
+        monkeypatch.setenv("MINIMAX_BASE_URL", "https://existing.minimax.example/v1")
+
+        from hermes_cli.main import _model_flow_api_key_provider
+        from hermes_cli.config import load_config, get_env_value
+
+        with patch("hermes_cli.auth._prompt_model_selection", return_value="MiniMax-M2"), \
+             patch("hermes_cli.auth.deactivate_provider"), \
+             patch(
+                 "builtins.input",
+                 side_effect=["", "r", "https://replacement.minimax.example/v1"],
+             ):
+            _model_flow_api_key_provider(load_config(), "minimax", "old-model")
+
+        saved = get_env_value("MINIMAX_BASE_URL") or ""
+        assert saved == "https://replacement.minimax.example/v1"
+
+    def test_clear_base_url_saves_empty_value(self, config_home, monkeypatch):
+        """Choosing C clears the configured base URL."""
+        from hermes_cli.auth import PROVIDER_REGISTRY
+
+        pconfig = PROVIDER_REGISTRY.get("minimax")
+        if not pconfig:
+            pytest.skip("minimax not in PROVIDER_REGISTRY")
+
+        monkeypatch.setenv("MINIMAX_API_KEY", "test-key")
+        monkeypatch.setenv("MINIMAX_BASE_URL", "https://existing.minimax.example/v1")
+
+        from hermes_cli.main import _model_flow_api_key_provider
+        from hermes_cli.config import load_config, get_env_value
+
+        with patch("hermes_cli.auth._prompt_model_selection", return_value="MiniMax-M2"), \
+             patch("hermes_cli.auth.deactivate_provider"), \
+             patch("builtins.input", side_effect=["", "c"]):
+            _model_flow_api_key_provider(load_config(), "minimax", "old-model")
+
+        saved = get_env_value("MINIMAX_BASE_URL") or ""
+        assert saved == ""

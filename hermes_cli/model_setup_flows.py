@@ -2594,7 +2594,7 @@ def _model_flow_api_key_provider(config, provider_id, current_model=""):
 
     if provider_id == "zai":
         # Z.AI has four official endpoints (Global, China, Coding Plan
-        # Global, Coding Plan China) with separate billing paths.  Present
+        # Global, Coding Plan China) with separate billing paths. Present
         # a picker instead of a plain text input so users can explicitly
         # choose the endpoint that matches their key type.
         chosen_base = _select_zai_endpoint(effective_base)
@@ -2602,19 +2602,41 @@ def _model_flow_api_key_provider(config, provider_id, current_model=""):
             save_env_value(base_url_env, chosen_base)
         effective_base = chosen_base
     else:
+        if effective_base:
+            print(f"  Base URL: {effective_base}")
         try:
-            override = input(f"Base URL [{effective_base}]: ").strip()
+            base_choice = (
+                input("  [K]eep / [R]eplace / [C]lear (default K): ")
+                .strip()
+                .lower()
+            )
         except (KeyboardInterrupt, EOFError):
             print()
-            override = ""
-        if override and base_url_env:
-            if not override.startswith(("http://", "https://")):
-                print(
-                    "  Invalid URL — must start with http:// or https://. Keeping current value."
-                )
-            else:
-                save_env_value(base_url_env, override)
-                effective_base = override
+            base_choice = "k"
+
+        if base_choice.startswith("r"):
+            try:
+                override = input(f"Base URL [{effective_base}]: ").strip()
+            except (KeyboardInterrupt, EOFError):
+                print()
+                override = ""
+
+            if override:
+                if not override.startswith(("http://", "https://")):
+                    print(
+                        "  Invalid URL — must start with http:// or https://. "
+                        "Keeping current value."
+                    )
+                else:
+                    if base_url_env:
+                        save_env_value(base_url_env, override)
+                    effective_base = override
+
+        elif base_choice.startswith("c"):
+            if base_url_env:
+                save_env_value(base_url_env, "")
+            effective_base = ""
+      
 
     # Model selection — resolution order:
     #   1. models.dev registry (cached, filtered for agentic/tool-capable models)
