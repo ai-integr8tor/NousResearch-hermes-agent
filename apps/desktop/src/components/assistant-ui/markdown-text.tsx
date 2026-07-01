@@ -34,6 +34,7 @@ import {
   mediaKind,
   mediaName,
   mediaPathFromMarkdownHref,
+  mediaPathFromMarkdownImageSrc,
   mediaStreamUrl
 } from '@/lib/media'
 import { previewTargetFromMarkdownHref } from '@/lib/preview-targets'
@@ -183,7 +184,7 @@ function MediaAttachment({ path }: { path: string }) {
   if (kind === 'image' && src) {
     return (
       <span className="block">
-        <MarkdownImage alt={name} src={src} />
+        <ImagePreview alt={name} src={src} />
       </span>
     )
   }
@@ -290,7 +291,7 @@ function MarkdownLink({ children, className, href, ...props }: ComponentProps<'a
   )
 }
 
-function MarkdownImage({ className, src, alt, ...props }: ComponentProps<'img'>) {
+function ImagePreview({ className, src, alt, ...props }: ComponentProps<'img'>) {
   return (
     <ZoomableImage
       alt={alt}
@@ -304,6 +305,16 @@ function MarkdownImage({ className, src, alt, ...props }: ComponentProps<'img'>)
       {...props}
     />
   )
+}
+
+function MarkdownImage({ className, src, alt, ...props }: ComponentProps<'img'>) {
+  const mediaPath = mediaPathFromMarkdownImageSrc(src)
+
+  if (mediaPath) {
+    return <MediaAttachment path={mediaPath} />
+  }
+
+  return <ImagePreview alt={alt} className={className} src={src} {...props} />
 }
 
 // Steady character-reveal for streaming text: decouples visible cadence from
