@@ -12070,6 +12070,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         text itself is already delivered — this only handles file attachments
         that the normal _process_message_background path would have caught.
         """
+        logger.info("[DEBUG] _deliver_media_from_response called: response=%r chat=%s", response[:100], event.source.chat_id)
         from pathlib import Path
         from urllib.parse import quote as _quote
 
@@ -13201,7 +13202,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
     # ------------------------------------------------------------------
 
     _APPROVAL_TIMEOUT_SECONDS = 300  # 5 minutes
-
 
 
     # Built-in messaging platforms where the ``/update`` command is allowed.
@@ -16454,9 +16454,23 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         # first message that can never be updated, resulting in
                         # duplicate messages (partial + final).
                         _adapter_supports_edit = getattr(_adapter, "SUPPORTS_MESSAGE_EDITING", True)
-                        if not _adapter_supports_edit:
+                        # Adapters that can't edit messages but provide a
+                        # native-streaming transport (e.g. WeCom's
+                        # msgtype: "stream" via send_stream_frame) get
+                        # past the gate — the consumer's native branch
+                        # delivers the full turn through that transport.
+                        _adapter_supports_native_stream = bool(getattr(
+                            _adapter, "SUPPORTS_NATIVE_STREAMING", False,
+                        ))
+                        if not _adapter_supports_edit and not _adapter_supports_native_stream:
                             raise RuntimeError("skip streaming for non-editable platform")
                         _effective_cursor = _scfg.cursor
+                        # Native-only platforms render their own typing
+                        # animation while the stream is live; suppress the
+                        # consumer-injected cursor so the user doesn't see
+                        # a stray ▉ alongside the platform's UI.
+                        if not _adapter_supports_edit and _adapter_supports_native_stream:
+                            _effective_cursor = ""
                         # Some Matrix clients render the streaming cursor
                         # as a visible tofu/white-box artifact.  Keep
                         # streaming text on Matrix, but suppress the cursor.
@@ -16948,6 +16962,39 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 # Typing resumes in _handle_approve_command/_handle_deny_command.
                 _status_adapter.pause_typing_for_chat(_status_chat_id)
 
+                # For WeCom native streaming: signal the stream consumer to close
+                # the current stream before showing the approval prompt.
+                # This goes through the consumer's queue for serial processing,
+                # avoiding race conditions with pending deltas.
+                _sc = stream_consumer_holder[0] if stream_consumer_holder else None
+                _boundary_ok = True
+                if _sc and getattr(_sc, "_use_native_streaming", False):
+                    _cancelled_flag = None
+                    try:
+                        _boundary_result = _sc.close_for_approval_prompt()
+                        # close_for_approval_prompt returns (future, cancelled_flag) or just future
+                        if isinstance(_boundary_result, tuple):
+                            _boundary_future, _cancelled_flag = _boundary_result
+                        else:
+                            _boundary_future = _boundary_result
+                        # Wait for consumer to process the boundary
+                        if hasattr(_boundary_future, "result"):
+                            _boundary_ok = _boundary_future.result(timeout=10)
+                            if not _boundary_ok:
+                                logger.warning(
+                                    "Approval boundary failed to close stream properly — "
+                                    "approval prompt may still appear in typing bubble"
+                                )
+                    except (TimeoutError, Exception) as _boundary_err:
+                        _boundary_ok = False
+                        # Mark as cancelled for backward compat (the boundary
+                        # handler no longer reads this flag — it always finalizes).
+                        if _cancelled_flag is not None:
+                            _cancelled_flag["cancelled"] = True
+                        logger.warning(
+                            "Approval boundary timed out or failed: %s", _boundary_err,
+                        )
+
                 cmd = approval_data.get("command", "")
                 desc = approval_data.get("description", "dangerous command")
 
@@ -17004,11 +17051,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     f"for the session, `{_p}approve always` to approve permanently, or `{_p}deny` to cancel."
                 )
                 try:
+                    # Mark as approval prompt so WeCom routes through control lane
+                    _approval_metadata = dict(_status_thread_metadata or {})
+                    _approval_metadata["is_approval_prompt"] = True
+
                     _approval_send_fut = safe_schedule_threadsafe(
                         _status_adapter.send(
                             _status_chat_id,
                             msg,
-                            metadata=_status_thread_metadata,
+                            metadata=_approval_metadata,
                         ),
                         _loop_for_step,
                         logger=logger,
