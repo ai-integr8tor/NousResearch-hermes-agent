@@ -13266,27 +13266,32 @@ def main():
             if not sessions:
                 print("No sessions found.")
                 return
+            from rich.table import Table
+            from rich.console import Console
+
             has_titles = any(s.get("title") for s in sessions)
+            table = Table(show_header=True, header_style="bold", box=None, padding=(0, 1))
+            table.add_column("Last Active", width=13, no_wrap=True)
+            table.add_column("ID", width=24, no_wrap=True)
             if has_titles:
-                print(f"{'Title':<32} {'Preview':<40} {'Last Active':<13} {'ID'}")
-                print("─" * 110)
+                table.add_column("Title", width=32, no_wrap=True)
+                table.add_column("Preview")
             else:
-                print(f"{'Preview':<50} {'Last Active':<13} {'Src':<6} {'ID'}")
-                print("─" * 95)
+                table.add_column("Preview")
+                table.add_column("Src", width=6, no_wrap=True)
+
             for s in sessions:
                 last_active = _relative_time(s.get("last_active"))
-                preview = (
-                    s.get("preview", "")[:38]
-                    if has_titles
-                    else s.get("preview", "")[:48]
-                )
+                sid = s["id"]
                 if has_titles:
                     title = (s.get("title") or "—")[:30]
-                    sid = s["id"]
-                    print(f"{title:<32} {preview:<40} {last_active:<13} {sid}")
+                    preview = (s.get("preview", "") or "")[:80]
+                    table.add_row(last_active, sid, title, preview)
                 else:
-                    sid = s["id"]
-                    print(f"{preview:<50} {last_active:<13} {s['source']:<6} {sid}")
+                    preview = (s.get("preview", "") or "")[:80]
+                    table.add_row(last_active, sid, preview, s["source"])
+
+            Console().print(table)
 
         elif action == "export":
             if args.session_id:

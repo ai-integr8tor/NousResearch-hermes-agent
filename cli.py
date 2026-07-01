@@ -6548,6 +6548,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             return False
 
         from hermes_cli.main import _relative_time
+        from rich.table import Table
 
         print()
         if reason == "history":
@@ -6555,13 +6556,21 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         else:
             print("  Recent sessions:")
         print()
-        print(f"  {'#':<3} {'Title':<32} {'Preview':<40} {'Last Active':<13} {'ID'}")
-        print(f"  {'─' * 3} {'─' * 32} {'─' * 40} {'─' * 13} {'─' * 24}")
+
+        table = Table(show_header=True, header_style="bold", box=None, padding=(0, 1))
+        table.add_column("#", justify="right", width=3, no_wrap=True)
+        table.add_column("Last Active", width=13, no_wrap=True)
+        table.add_column("ID", width=24, no_wrap=True)
+        table.add_column("Title / Preview")
+
         for idx, session in enumerate(sessions, start=1):
             title = session.get("title") or "—"
-            preview = (session.get("preview") or "")[:38]
+            preview = (session.get("preview") or "")[:80]
+            combined = f"{title} — {preview}" if preview else title
             last_active = _relative_time(session.get("last_active"))
-            print(f"  {idx:<3} {title:<32} {preview:<40} {last_active:<13} {session['id']}")
+            table.add_row(str(idx), last_active, session["id"], combined)
+
+        Console().print(table)
         print()
         print("  Use /resume <number>, /resume <session id>, or /resume <session title> to continue.")
         print("  Example: /resume 2")
