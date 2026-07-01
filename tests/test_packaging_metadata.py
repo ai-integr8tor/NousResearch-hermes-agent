@@ -265,3 +265,39 @@ def test_locale_catalogs_ship_in_both_wheel_and_sdist():
     on_disk = list((REPO_ROOT / "locales").glob("*.yaml"))
     assert on_disk, "expected locales/*.yaml catalogs on disk"
 
+
+def test_dockerfile_bakes_feishu_extra():
+    """Regression test for #50205.
+
+    The published Docker image disables lazy installs
+    (HERMES_DISABLE_LAZY_INSTALLS=1) and makes the venv read-only, so every
+    messaging adapter must be installed at build time. The [messaging] extra
+    carries telegram/discord/slack but NOT lark-oapi, and [all] left feishu
+    to lazy-install only — so the Dockerfile's `uv sync` must pass
+    `--extra feishu` explicitly or Feishu silently fails to connect in Docker.
+    """
+    dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    # Fold `\`-continued lines so a future reformat of the build command
+    # (line wraps, or an env-var prefix like `RUN FOO=bar uv sync ...`) still
+    # presents as one logical line. Then anchor on a `RUN` directive that runs
+    # `uv sync --no-install-project`, so an abbreviated `# uv sync ...`
+    # doc-comment higher up can't match first and mask the real build line.
+    logical = re.sub(r"\\\n\s*", " ", dockerfile)
+    m = re.search(
+        r"^RUN .*?\buv sync\b[^\n]*--no-install-project[^\n]*",
+        logical,
+        re.MULTILINE,
+    )
+    assert m, "Dockerfile must contain the production `RUN uv sync` line"
+    sync_line = m.group(0)
+    assert "--extra feishu" in sync_line, (
+        "Dockerfile `uv sync` must include `--extra feishu` so lark-oapi is "
+        "baked into the image — lazy installs are disabled and the venv is "
+        "read-only, so Feishu cannot self-install at runtime (#50205)"
+    )
+    data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    feishu = data["project"]["optional-dependencies"].get("feishu", [])
+    assert any(dep.startswith("lark-oapi") for dep in feishu), (
+        "[feishu] extra must pin lark-oapi for the Docker bake to pull it"
+    )
+
