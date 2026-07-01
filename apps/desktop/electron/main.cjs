@@ -6455,6 +6455,85 @@ async function mergeRemoteProfileSessions(searchParams, remoteProfiles) {
   return { ...base, sessions: merged.slice(offset, offset + limit), total, profile_totals: profileTotals }
 }
 
+// Profile-scoped SETTINGS endpoints have the same remote hazard as per-session
+// requests: in global-remote mode a single shared backend serves every profile,
+// disambiguated only by ?profile=. The renderer sends these with a bare path and
+// the profile only in request.profile — which ensureBackend() can't act on when
+// there's just one backend — so they silently read/write the remote's DEFAULT
+// profile no matter which profile the rail shows. Mirror
+// interceptSessionRequestForRemote: in global-remote mode, append ?profile= and
+// route through the shared backend. Backends already honor the query param
+// (web_server.py: _profile_scope(body.profile or profile)); this is the desktop
+// analogue of the dashboard's withManagementProfile() (web/src/lib/api.ts), and
+// PROFILE_SCOPED_REMOTE_PREFIXES is kept identical to its PROFILE_SCOPED_PREFIXES.
+const PROFILE_SCOPED_REMOTE_PREFIXES = [
+  '/api/analytics',
+  '/api/skills',
+  '/api/tools/toolsets',
+  '/api/config',
+  '/api/env',
+  '/api/mcp',
+  '/api/messaging/platforms',
+  '/api/model/info',
+  '/api/model/set',
+  '/api/model/auxiliary',
+  '/api/model/options'
+]
+
+async function interceptProfileScopedSettingForRemote(request) {
+  if (!globalRemoteActive()) {
+    return undefined
+  }
+  if (typeof request?.path !== 'string') {
+    return undefined
+  }
+
+  // Default profile is exactly what the bare path already resolves to on the
+  // shared backend, so there's nothing to rewrite (empty === default here).
+  const profile = (request.profile || '').trim()
+  if (!profile || profile === 'default') {
+    return undefined
+  }
+
+  // A profile with its own remote override is served by its OWN backend, where
+  // the bare path already hits the right state.db — let ensureBackend(profile)
+  // handle it (matches interceptSessionRequestForRemote's override branch).
+  if (profileHasRemoteOverride(profile)) {
+    return undefined
+  }
+
+  let parsed
+  try {
+    parsed = new URL(request.path, 'http://x')
+  } catch {
+    return undefined
+  }
+
+  const { pathname, search, searchParams } = parsed
+  // An explicit ?profile= already on the path wins — don't double-scope.
+  if (searchParams.has('profile')) {
+    return undefined
+  }
+  const matches = PROFILE_SCOPED_REMOTE_PREFIXES.some(
+    prefix => pathname === prefix || pathname.startsWith(`${prefix}/`)
+  )
+  if (!matches) {
+    return undefined
+  }
+
+  // Keep any existing query and append profile= so the single backend opens the
+  // right state.db. Handlers read it from the query (a typed body.profile still
+  // wins where present), so request.body is forwarded untouched — we never
+  // mutate typed request bodies (e.g. /api/config's {config}).
+  const sep = search ? '&' : '?'
+  const path = `${pathname}${search}${sep}profile=${encodeURIComponent(profile)}`
+  const method = (request.method || 'GET').toUpperCase()
+  if (method === 'GET') {
+    return fetchJsonForProfile(null, path)
+  }
+  return requestJsonForProfile(null, path, method, request.body)
+}
+
 ipcMain.handle('hermes:api', async (_event, request) => {
   // Remote-profile session requests would otherwise hit the local primary off
   // each profile's on-disk state.db — fine for local profiles, but a remote
@@ -6463,6 +6542,14 @@ ipcMain.handle('hermes:api', async (_event, request) => {
   const rerouted = await interceptSessionRequestForRemote(request)
   if (rerouted !== undefined) {
     return rerouted
+  }
+
+  // Profile-scoped settings (skills/tools/config/env/model/…) need the same
+  // remote rewrite as sessions; without it they hit the remote's default
+  // profile. See interceptProfileScopedSettingForRemote.
+  const settingsRerouted = await interceptProfileScopedSettingForRemote(request)
+  if (settingsRerouted !== undefined) {
+    return settingsRerouted
   }
 
   await prepareProfileDeleteRequest(request)
