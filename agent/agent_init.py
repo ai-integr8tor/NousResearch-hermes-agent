@@ -417,8 +417,14 @@ def init_agent(
     # AIAgent is created for every gateway request, so without the guard
     # each message leaks one OS thread and the process eventually exhausts
     # the system thread limit (RuntimeError: can't start new thread).
-    if (agent.provider == "openrouter" or agent._is_openrouter_url()) and \
-            not _ra()._openrouter_prewarm_done.is_set():
+    _skip_or_meta = os.getenv("HERMES_SKIP_OPENROUTER_METADATA", "").strip().lower() in {
+        "1", "true", "yes",
+    }
+    if (
+        not _skip_or_meta
+        and (agent.provider == "openrouter" or agent._is_openrouter_url())
+        and not _ra()._openrouter_prewarm_done.is_set()
+    ):
         _ra()._openrouter_prewarm_done.set()
         threading.Thread(
             target=fetch_model_metadata,

@@ -1078,6 +1078,8 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_start_callback=None,
         tool_complete_callback=None,
         gateway_session_key: Optional[str] = None,
+        client_correlation: Optional[Dict[str, str]] = None,
+        bound_skill_ids: Optional[frozenset[str]] = None,
     ) -> Any:
         """
         Create an AIAgent instance using the gateway's runtime config.
@@ -1148,6 +1150,10 @@ class APIServerAdapter(BasePlatformAdapter):
             reasoning_config=reasoning_config,
             gateway_session_key=gateway_session_key,
         )
+        if client_correlation:
+            agent._client_correlation = dict(client_correlation)
+        if bound_skill_ids:
+            agent._bound_skill_ids = set(bound_skill_ids)
         return agent
 
     # ------------------------------------------------------------------
@@ -1962,6 +1968,20 @@ class APIServerAdapter(BasePlatformAdapter):
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:29]}"
         model_name = body.get("model", self._model_name)
         created = int(time.time())
+        from gateway.client_correlation import (
+            format_correlation_log_suffix,
+            parse_bound_skills_header,
+            parse_correlation_headers,
+        )
+
+        client_correlation = parse_correlation_headers(request.headers)
+        bound_skill_ids = parse_bound_skills_header(request.headers)
+        if client_correlation:
+            logger.info(
+                "[Perf] chat_completions start%s stream=%s",
+                format_correlation_log_suffix(client_correlation, session_id=session_id),
+                stream,
+            )
 
         if stream:
             import queue as _q
@@ -2045,6 +2065,8 @@ class APIServerAdapter(BasePlatformAdapter):
                 tool_complete_callback=_on_tool_complete,
                 agent_ref=agent_ref,
                 gateway_session_key=gateway_session_key,
+                client_correlation=client_correlation or None,
+                bound_skill_ids=bound_skill_ids or None,
             ))
             # Ensure SSE drain loops can terminate without relying on polling
             # agent_task.done(), which can race with queue timeout checks.
@@ -2064,6 +2086,8 @@ class APIServerAdapter(BasePlatformAdapter):
                 ephemeral_system_prompt=system_prompt,
                 session_id=session_id,
                 gateway_session_key=gateway_session_key,
+                client_correlation=client_correlation or None,
+                bound_skill_ids=bound_skill_ids or None,
             )
 
         idempotency_key = request.headers.get("Idempotency-Key")
@@ -3790,6 +3814,8 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_complete_callback=None,
         agent_ref: Optional[list] = None,
         gateway_session_key: Optional[str] = None,
+        client_correlation: Optional[Dict[str, str]] = None,
+        bound_skill_ids: Optional[frozenset[str]] = None,
     ) -> tuple:
         """
         Create an agent and run a conversation in a thread executor.
@@ -3803,6 +3829,7 @@ class APIServerAdapter(BasePlatformAdapter):
         another thread to stop in-progress LLM calls.
         """
         loop = asyncio.get_running_loop()
+        from gateway.client_correlation import format_correlation_log_suffix
 
         def _run():
             from gateway.session_context import clear_session_vars
@@ -3821,6 +3848,8 @@ class APIServerAdapter(BasePlatformAdapter):
                     tool_start_callback=tool_start_callback,
                     tool_complete_callback=tool_complete_callback,
                     gateway_session_key=gateway_session_key,
+                    client_correlation=client_correlation,
+                    bound_skill_ids=bound_skill_ids,
                 )
                 if agent_ref is not None:
                     agent_ref[0] = agent
@@ -3841,6 +3870,18 @@ class APIServerAdapter(BasePlatformAdapter):
                 _eff_sid = getattr(agent, "session_id", session_id)
                 if isinstance(_eff_sid, str) and _eff_sid:
                     result["session_id"] = _eff_sid
+                _suffix = format_correlation_log_suffix(
+                    client_correlation,
+                    session_id=_eff_sid if isinstance(_eff_sid, str) else session_id,
+                )
+                if _suffix:
+                    logger.info(
+                        "[Perf] chat_completions done%s in=%d out=%d total=%d",
+                        _suffix,
+                        usage.get("input_tokens", 0),
+                        usage.get("output_tokens", 0),
+                        usage.get("total_tokens", 0),
+                    )
                 return result, usage
             finally:
                 clear_session_vars(tokens)
