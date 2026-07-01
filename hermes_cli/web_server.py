@@ -845,6 +845,7 @@ class EnvVarReveal(BaseModel):
 
 class MemoryProviderConfigUpdate(BaseModel):
     values: Dict[str, str] = {}
+    profile: Optional[str] = None
 
 
 class OpenVikingSetupUpdate(BaseModel):
@@ -852,6 +853,7 @@ class OpenVikingSetupUpdate(BaseModel):
     save_mode: str = "profile"
     profile_name: str = ""
     profile_path: str = ""
+    overwrite: bool = False
     profile: Optional[str] = None
 
 
@@ -4011,68 +4013,74 @@ def _coerce_field_value(field: ProviderField, raw: str) -> str:
 
 
 @app.get("/api/memory/providers/{name}/config")
-async def get_memory_provider_config(name: str):
-    provider = get_memory_provider(name)
-    if provider is None:
-        # Undeclared providers (e.g. builtin) have no config surface. Return an
-        # empty schema so the generic panel simply renders nothing.
-        return {"name": name, "label": name, "fields": []}
-    return _memory_provider_payload(provider)
+async def get_memory_provider_config(name: str, profile: Optional[str] = None):
+    with _config_profile_scope(profile):
+        provider = get_memory_provider(name)
+        if provider is None:
+            # Undeclared providers (e.g. builtin) have no config surface. Return an
+            # empty schema so the generic panel simply renders nothing.
+            return {"name": name, "label": name, "fields": []}
+        return _memory_provider_payload(provider)
 
 
 @app.put("/api/memory/providers/{name}/config")
-async def update_memory_provider_config(name: str, body: MemoryProviderConfigUpdate):
-    provider = get_memory_provider(name)
-    if provider is None:
-        raise HTTPException(status_code=404, detail=f"Unknown memory provider: {name}")
+async def update_memory_provider_config(
+    name: str,
+    body: MemoryProviderConfigUpdate,
+    profile: Optional[str] = None,
+):
+    with _config_profile_scope(body.profile or profile):
+        provider = get_memory_provider(name)
+        if provider is None:
+            raise HTTPException(status_code=404, detail=f"Unknown memory provider: {name}")
 
-    values = body.values or {}
+        values = body.values or {}
 
-    try:
-        existing = _read_memory_provider_file(provider)
-        json_values: Dict[str, Any] = {}
-        secrets: Dict[str, str] = {}
+        try:
+            existing = _read_memory_provider_file(provider)
+            json_values: Dict[str, Any] = {}
+            secrets: Dict[str, str] = {}
 
-        for field in provider.fields:
-            if field.is_secret:
-                submitted = (values.get(field.key) or "").strip()
-                if submitted and field.env_key:
-                    secrets[field.env_key] = submitted
-                continue
+            for field in provider.fields:
+                if field.is_secret:
+                    submitted = (values.get(field.key) or "").strip()
+                    if submitted and field.env_key:
+                        secrets[field.env_key] = submitted
+                    continue
 
-            raw = (
-                values[field.key]
-                if field.key in values
-                else str(existing.get(field.key, field.default))
-            )
-            json_values[field.key] = _coerce_field_value(field, raw)
+                raw = (
+                    values[field.key]
+                    if field.key in values
+                    else str(existing.get(field.key, field.default))
+                )
+                json_values[field.key] = _coerce_field_value(field, raw)
 
-        config = load_config()
-        memory_config = config.get("memory")
-        if not isinstance(memory_config, dict):
-            memory_config = {}
-            config["memory"] = memory_config
-        memory_config["provider"] = provider.name
-        save_config(config)
+            config = load_config()
+            memory_config = config.get("memory")
+            if not isinstance(memory_config, dict):
+                memory_config = {}
+                config["memory"] = memory_config
+            memory_config["provider"] = provider.name
+            save_config(config)
 
-        path = _memory_provider_config_path(provider)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        existing.update(json_values)
-        from utils import atomic_json_write
+            path = _memory_provider_config_path(provider)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            existing.update(json_values)
+            from utils import atomic_json_write
 
-        atomic_json_write(path, existing, mode=0o600)
+            atomic_json_write(path, existing, mode=0o600)
 
-        for env_key, secret in secrets.items():
-            save_env_value(env_key, secret)
+            for env_key, secret in secrets.items():
+                save_env_value(env_key, secret)
 
-        return {"ok": True}
-    except HTTPException:
-        raise
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception:
-        _log.exception("PUT /api/memory/providers/%s/config failed", name)
-        raise HTTPException(status_code=500, detail="Internal server error")
+            return {"ok": True}
+        except HTTPException:
+            raise
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception:
+            _log.exception("PUT /api/memory/providers/%s/config failed", name)
+            raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/api/memory/providers/openviking/setup")
@@ -4080,15 +4088,18 @@ async def get_openviking_setup(profile: Optional[str] = None):
     try:
         import plugins.memory.openviking as openviking
 
-        with _config_profile_scope(profile):
-            config = load_config()
-            memory_config = config.get("memory") if isinstance(config, dict) else {}
-            provider_config = (
-                memory_config.get("openviking", {})
-                if isinstance(memory_config, dict)
-                else {}
-            )
-            return openviking.get_desktop_openviking_setup(provider_config)
+        def _run():
+            with _config_profile_scope(profile):
+                config = load_config()
+                memory_config = config.get("memory") if isinstance(config, dict) else {}
+                provider_config = (
+                    memory_config.get("openviking", {})
+                    if isinstance(memory_config, dict)
+                    else {}
+                )
+                return openviking.get_desktop_openviking_setup(provider_config)
+
+        return await asyncio.to_thread(_run)
     except HTTPException:
         raise
     except Exception:
@@ -4101,12 +4112,15 @@ async def validate_openviking_setup(body: OpenVikingValidateRequest, profile: Op
     try:
         import plugins.memory.openviking as openviking
 
-        with _config_profile_scope(body.profile or profile):
-            return openviking.validate_desktop_openviking_setup(
-                body.values,
-                require_api_key=body.require_api_key,
-                profile_path=body.profile_path,
-            )
+        def _run():
+            with _config_profile_scope(body.profile or profile):
+                return openviking.validate_desktop_openviking_setup(
+                    body.values,
+                    require_api_key=body.require_api_key,
+                    profile_path=body.profile_path,
+                )
+
+        return await asyncio.to_thread(_run)
     except HTTPException:
         raise
     except ValueError as exc:
@@ -4121,24 +4135,30 @@ async def update_openviking_setup(body: OpenVikingSetupUpdate, profile: Optional
     try:
         import plugins.memory.openviking as openviking
 
-        with _config_profile_scope(body.profile or profile):
-            config = load_config()
-            result = openviking.save_desktop_openviking_setup(
-                config=config,
-                hermes_home=get_hermes_home(),
-                values=body.values,
-                save_mode=body.save_mode,
-                profile_name=body.profile_name,
-                profile_path=body.profile_path,
-            )
-            save_config(config)
-            from hermes_cli.config import reload_env
+        def _run():
+            with _config_profile_scope(body.profile or profile):
+                config = load_config()
+                result = openviking.save_desktop_openviking_setup(
+                    config=config,
+                    hermes_home=get_hermes_home(),
+                    values=body.values,
+                    save_mode=body.save_mode,
+                    profile_name=body.profile_name,
+                    profile_path=body.profile_path,
+                    overwrite=body.overwrite,
+                )
+                save_config(config)
+                from hermes_cli.config import reload_env
 
-            reload_env()
-            return result
+                reload_env()
+                return result
+
+        return await asyncio.to_thread(_run)
     except HTTPException:
         raise
     except ValueError as exc:
+        if exc.__class__.__name__ == "_OpenVikingProfileConflictError":
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception:
         _log.exception("PUT /api/memory/providers/openviking/setup failed")
@@ -4150,8 +4170,11 @@ async def start_openviking_local(body: OpenVikingStartLocalRequest, profile: Opt
     try:
         import plugins.memory.openviking as openviking
 
-        with _config_profile_scope(body.profile or profile):
-            return openviking.start_desktop_openviking_local(body.url)
+        def _run():
+            with _config_profile_scope(body.profile or profile):
+                return openviking.start_desktop_openviking_local(body.url)
+
+        return await asyncio.to_thread(_run)
     except HTTPException:
         raise
     except ValueError as exc:

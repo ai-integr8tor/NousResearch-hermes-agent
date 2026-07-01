@@ -429,6 +429,62 @@ class TestWebServerEndpoints:
             "recall_budget": "high",
         }
 
+    def test_memory_provider_config_uses_requested_profile(self, monkeypatch):
+        from hermes_constants import get_hermes_home
+        from hermes_cli import profiles
+        from hermes_cli.config import save_config
+
+        default_home = get_hermes_home()
+        profiles_root = default_home / "profiles"
+        worker_home = profiles_root / "worker_alpha"
+        worker_home.mkdir(parents=True, exist_ok=True)
+        (worker_home / "config.yaml").write_text("{}\n", encoding="utf-8")
+
+        save_config({"memory": {"provider": "builtin"}})
+        monkeypatch.setattr(profiles, "_get_default_hermes_home", lambda: default_home)
+        monkeypatch.setattr(profiles, "_get_profiles_root", lambda: profiles_root)
+
+        resp = self.client.put(
+            "/api/memory/providers/hindsight/config",
+            params={"profile": "worker_alpha"},
+            json={
+                "values": {
+                    "mode": "local_external",
+                    "api_url": "http://worker.local:8888",
+                    "api_key": "worker-secret",
+                    "bank_id": "worker-bank",
+                    "recall_budget": "high",
+                }
+            },
+        )
+
+        assert resp.status_code == 200
+        worker_config = yaml.safe_load((worker_home / "config.yaml").read_text(encoding="utf-8"))
+        assert worker_config["memory"]["provider"] == "hindsight"
+        default_config = yaml.safe_load((default_home / "config.yaml").read_text(encoding="utf-8"))
+        assert default_config["memory"] == {"provider": "builtin"}
+        assert (worker_home / ".env").read_text(encoding="utf-8") == (
+            "HINDSIGHT_API_KEY=worker-secret\n"
+        )
+
+        provider_config_path = worker_home / "hindsight" / "config.json"
+        assert json.loads(provider_config_path.read_text(encoding="utf-8")) == {
+            "mode": "local_external",
+            "api_url": "http://worker.local:8888",
+            "bank_id": "worker-bank",
+            "recall_budget": "high",
+        }
+
+        get_resp = self.client.get(
+            "/api/memory/providers/hindsight/config",
+            params={"profile": "worker_alpha"},
+        )
+        assert get_resp.status_code == 200
+        fields = self._provider_field_map(get_resp.json())
+        assert fields["api_url"]["value"] == "http://worker.local:8888"
+        assert fields["api_key"]["is_set"] is True
+        assert fields["api_key"]["value"] == ""
+
     def test_put_memory_provider_config_rejects_unsupported_select_value(self):
         resp = self.client.put(
             "/api/memory/providers/hindsight/config",
@@ -625,6 +681,96 @@ class TestWebServerEndpoints:
         assert "OPENVIKING_ACTOR_PEER_ID" not in env
         assert "OPENVIKING_ENDPOINT" not in env
         assert "OPENVIKING_AGENT" not in env
+
+    def test_put_openviking_setup_rejects_colliding_profile_name(self, monkeypatch, tmp_path):
+        import plugins.memory.openviking as openviking_module
+
+        monkeypatch.setattr(openviking_module.Path, "home", staticmethod(lambda: tmp_path))
+        profile_path = tmp_path / ".openviking" / "ovcli.conf.VPS"
+        profile_path.parent.mkdir()
+        profile_path.write_text(
+            json.dumps({
+                "url": "https://old.example",
+                "api_key": "old-key",
+                "actor_peer_id": "old-agent",
+            }),
+            encoding="utf-8",
+        )
+
+        resp = self.client.put(
+            "/api/memory/providers/openviking/setup",
+            json={
+                "save_mode": "profile",
+                "profile_name": "VPS",
+                "values": {
+                    "url": "https://new.example",
+                    "api_key": "new-key",
+                    "actor_peer_id": "new-agent",
+                },
+            },
+        )
+
+        assert resp.status_code == 409
+        assert "already exists" in resp.json()["detail"]
+        assert json.loads(profile_path.read_text(encoding="utf-8")) == {
+            "url": "https://old.example",
+            "api_key": "old-key",
+            "actor_peer_id": "old-agent",
+        }
+
+    def test_openviking_setup_endpoints_offload_blocking_plugin_calls(self, monkeypatch):
+        import plugins.memory.openviking as openviking_module
+
+        calls = []
+
+        def assert_worker_thread(tag):
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                calls.append(tag)
+                return
+            raise AssertionError(f"{tag} ran on the async event loop")
+
+        def fake_setup(provider_config):
+            assert_worker_thread("setup")
+            return {
+                "defaults": {
+                    "url": "http://127.0.0.1:1933",
+                    "service_url": "https://service.example",
+                    "actor_peer_id": "hermes",
+                },
+                "active": {"source": "hermes", "url": "https://vps.example"},
+                "health": {"status": "healthy", "label": "Healthy", "message": ""},
+                "profiles": [],
+                "legacy_env_present": [],
+            }
+
+        def fake_validate(values, *, require_api_key=None, profile_path=""):
+            assert_worker_thread("validate")
+            return {"ok": True, "message": "", "role": "user"}
+
+        def fake_start(url):
+            assert_worker_thread("start")
+            return {"ok": True, "message": "started"}
+
+        monkeypatch.setattr(openviking_module, "get_desktop_openviking_setup", fake_setup)
+        monkeypatch.setattr(openviking_module, "validate_desktop_openviking_setup", fake_validate)
+        monkeypatch.setattr(openviking_module, "start_desktop_openviking_local", fake_start)
+
+        setup_resp = self.client.get("/api/memory/providers/openviking/setup")
+        validate_resp = self.client.post(
+            "/api/memory/providers/openviking/validate",
+            json={"values": {"url": "https://openviking.example"}},
+        )
+        start_resp = self.client.post(
+            "/api/memory/providers/openviking/start-local",
+            json={"url": "http://localhost:1933"},
+        )
+
+        assert setup_resp.status_code == 200
+        assert validate_resp.status_code == 200
+        assert start_resp.status_code == 200
+        assert calls == ["setup", "validate", "start"]
 
     def test_put_openviking_setup_writes_requested_profile_config(self, monkeypatch, tmp_path):
         from hermes_constants import get_hermes_home
