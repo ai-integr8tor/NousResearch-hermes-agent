@@ -6,6 +6,8 @@ import json
 import logging
 import os
 import threading
+import platform as _platform
+import re as _re
 from pathlib import Path
 
 from agent.file_safety import get_read_block_error
@@ -302,12 +304,48 @@ def _resolve_base_dir(task_id: str = "default") -> Path:
     return base.resolve()
 
 
+_IS_WINDOWS = _platform.system() == "Windows"
+
+
+def _normalize_msys_path(filepath: str) -> str:
+    """Normalize MSYS / Git Bash style paths to native form on Windows.
+
+    On Windows, ``pathlib.Path`` treats ``/d/Project/file`` as an absolute
+    path on the *current drive* (root ``\`` with no drive letter), resolving
+    it to e.g. ``D:\d\Project\file`` instead of ``D:\Project\file``.
+
+    This function converts MSYS-style drive paths (``/c/Users/...``,
+    ``/cygdrive/d/...``, ``/mnt/c/...``) to native Windows form before
+    ``Path`` construction, matching the conversion already applied by
+    ``_msys_to_windows_path`` in ``tools/environments/local.py`` and
+    ``_normalize_git_bash_path`` in ``cli.py``.
+
+    No-op on non-Windows platforms and for paths that are not in MSYS form.
+    """
+    if not _IS_WINDOWS or not filepath:
+        return filepath
+    # /c/Users/... or /C/Users/...  (also handles bare /c/ = drive root)
+    m = _re.match(r"^/([a-zA-Z])/(.*)$", filepath)
+    if m:
+        drive = m.group(1).upper()
+        rest = m.group(2).replace("/", os.sep)
+        return f"{drive}:{os.sep}{rest}" if rest else f"{drive}:{os.sep}"
+    # /cygdrive/c/... or /mnt/c/...
+    m = _re.match(r"^/(?:cygdrive|mnt)/([a-zA-Z])/(.*)$", filepath)
+    if m:
+        drive = m.group(1).upper()
+        rest = m.group(2).replace("/", os.sep)
+        return f"{drive}:{os.sep}{rest}" if rest else f"{drive}:{os.sep}"
+    return filepath
+
+
 def _resolve_path_for_task(filepath: str, task_id: str = "default") -> Path:
     """Resolve *filepath* against the task's absolute base directory.
 
     See :func:`_resolve_base_dir` for how the base is chosen. Absolute input
     paths are returned resolved-but-unanchored.
     """
+    filepath = _normalize_msys_path(filepath)
     p = Path(_expand_tilde(filepath))
     if p.is_absolute():
         return p.resolve()
@@ -330,7 +368,8 @@ def _path_resolution_warning(filepath: str, resolved: Path, task_id: str = "defa
     (no ``cd`` run yet) is warned on the very first write.
     """
     try:
-        if Path(_expand_tilde(filepath)).is_absolute():
+        normalized = _normalize_msys_path(filepath)
+        if Path(_expand_tilde(normalized)).is_absolute():
             return None
         workspace_root = _authoritative_workspace_root(task_id)
         if not workspace_root:
@@ -342,11 +381,12 @@ def _path_resolution_warning(filepath: str, resolved: Path, task_id: str = "defa
             return None  # Inside the workspace — expected.
         except ValueError:
             return (
-                f"Relative path {filepath!r} resolved to {str(resolved)!r}, which is "
+                f"Path {filepath!r} resolved to {str(resolved)!r}, which is "
                 f"OUTSIDE the active workspace ({str(root)!r}). The edit will land in "
                 f"a different directory than the terminal's cwd. If this is not "
                 f"intended (e.g. a git-worktree session writing into the main "
-                f"checkout), pass an absolute path under the workspace instead."
+                f"checkout), pass a native absolute path (e.g. D:/Project/file "
+                f"on Windows) under the workspace instead."
             )
     except Exception:
         return None
