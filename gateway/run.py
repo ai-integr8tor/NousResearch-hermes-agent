@@ -14119,9 +14119,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 reply_to_message_id=message_id,
                 adapter=adapter,
             )
+            _restart_text = t("gateway.restart_success")
+            # Category suppression (suppress: lifecycle) blanks this to "".
+            if not (_restart_text and _restart_text.strip()):
+                return None
             result = await adapter.send(
                 str(chat_id),
-                t("gateway.restart_success"),
+                _restart_text,
                 metadata=_non_conversational_metadata(metadata, platform=platform),
             )
             # adapter.send() catches provider errors (e.g. "Chat not found")
@@ -14163,6 +14167,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         delivered: set[tuple[str, str, Optional[str]]] = set()
         skipped = skip_targets or set()
         message = t("gateway.gateway_online")
+        # Category suppression (gateway.system_messages.suppress: lifecycle)
+        # blanks this to ""; skip the whole online broadcast then.
+        if not (message and message.strip()):
+            return delivered
 
         for platform, adapter in self.adapters.items():
             home = self.config.get_home_channel(platform)
@@ -18564,7 +18572,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 )
                 try:
                     _notify_res = None
-                    if _heartbeat_msg_id:
+                    # Category suppression (gateway.system_messages.suppress: progress)
+                    # blanks the heartbeat to ""; skip the edit/send so no empty
+                    # progress bubble is delivered.
+                    _hb_visible = bool(_heartbeat_text and _heartbeat_text.strip())
+                    if _heartbeat_msg_id and _hb_visible:
                         try:
                             _notify_res = await _notify_adapter.edit_message(
                                 source.chat_id,
@@ -18574,7 +18586,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         except Exception as _ee:
                             logger.debug("Heartbeat edit failed: %s", _ee)
                             _notify_res = None
-                    if not (_notify_res and getattr(_notify_res, "success", False)):
+                    if _hb_visible and not (_notify_res and getattr(_notify_res, "success", False)):
                         _notify_res = await _notify_adapter.send(
                             source.chat_id,
                             _heartbeat_text,
