@@ -53,6 +53,17 @@ def test_opencode_go_known_model_accepted():
     assert result["message"] is None
 
 
+
+
+@_patched
+def test_opencode_go_current_docs_model_accepted():
+    """Newer OpenCode Go docs models must be in the curated fallback."""
+    result = validate_requested_model("deepseek-v4-flash", "opencode-go")
+    assert result["accepted"] is True
+    assert result["persist"] is True
+    assert result["recognized"] is True
+    assert result["message"] is None
+
 @_patched
 def test_opencode_go_known_model_case_insensitive():
     """Catalog lookup is case-insensitive."""

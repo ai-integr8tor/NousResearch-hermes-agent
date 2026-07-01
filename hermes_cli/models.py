@@ -436,19 +436,19 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "nemotron-3-ultra-free",
     ],
     "opencode-go": [
-        "kimi-k2.6",
-        "kimi-k2.5",
         "glm-5.1",
         "glm-5",
+        "kimi-k2.7-code",
+        "kimi-k2.6",
         "mimo-v2.5-pro",
         "mimo-v2.5",
-        "mimo-v2-pro",
-        "mimo-v2-omni",
+        "minimax-m3",
         "minimax-m2.7",
-        "minimax-m2.5",
         "qwen3.7-max",
+        "qwen3.7-plus",
         "qwen3.6-plus",
-        "qwen3.5-plus",
+        "deepseek-v4-pro",
+        "deepseek-v4-flash",
     ],
     "kilocode": [
         "anthropic/claude-opus-4.6",
@@ -3376,8 +3376,8 @@ def opencode_model_api_mode(provider_id: Optional[str], model_id: Optional[str])
 
     - GPT-5 / Codex models on Zen use ``/v1/responses``
     - Claude models on Zen use ``/v1/messages``
-    - MiniMax models on Go use ``/v1/messages``
-    - GLM / Kimi on Go use ``/v1/chat/completions``
+    - MiniMax models and Qwen3.7 Max/Plus on Go use ``/v1/messages``
+    - GLM / Kimi / DeepSeek / MiMo on Go use ``/v1/chat/completions``
     - Other Zen models (Gemini, GLM, Kimi, MiniMax, Qwen, etc.) use
       ``/v1/chat/completions``
 
@@ -3391,7 +3391,7 @@ def opencode_model_api_mode(provider_id: Optional[str], model_id: Optional[str])
     if provider == "opencode-go":
         if normalized.startswith("minimax-"):
             return "anthropic_messages"
-        if normalized.startswith("qwen3.7-max"):
+        if normalized.startswith(("qwen3.7-max", "qwen3.7-plus")):
             return "anthropic_messages"
         return "chat_completions"
 
