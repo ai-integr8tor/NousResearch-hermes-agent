@@ -789,7 +789,7 @@ def _resolve_plugin_key_and_source(name: str) -> Optional[tuple]:
     entries = _discover_all_plugins()
     for entry in entries:
         # entry = (name, version, description, source, dir_path, key)
-        if name == entry[5] or name == entry[0]:
+        if name == entry[5] or name == entry[0] or name == Path(entry[4]).name:
             return (entry[5], entry[3])
     leaf_matches = [
         (entry[5], entry[3]) for entry in entries
@@ -902,7 +902,7 @@ def _resolve_tool_override_grant(
         )
         try:
             answer = console.input(prompt).strip().lower()
-        except (EOFError, KeyboardInterrupt):
+        except (EOFError, KeyboardInterrupt, OSError):
             answer = ""
         allow_tool_override = answer in {"y", "yes"}
 
