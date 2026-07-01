@@ -47,7 +47,7 @@ import type {
   ToolsetInfo
 } from '@/types/hermes'
 
-const DEFAULT_GATEWAY_REQUEST_TIMEOUT_MS = 30_000
+const DEFAULT_GATEWAY_REQUEST_TIMEOUT_MS = 120_000
 const SESSION_LIST_REQUEST_TIMEOUT_MS = 60_000
 // prompt.submit is effectively fire-and-forget: turn completion is signaled by
 // stream / message.complete events, NOT by the RPC return. A long turn (MoA
