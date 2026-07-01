@@ -3956,7 +3956,9 @@ def parallel_search_sources(
     *on_source_done* is an optional callback ``(source_id, count) -> None``
     invoked as each source completes — useful for progress indicators.
     """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from queue import Empty, Queue
+    from threading import Event, Thread
+    from time import monotonic
 
     per_source_limits = per_source_limits or {}
 
@@ -4000,43 +4002,61 @@ def parallel_search_sources(
     if not active:
         return all_results, source_counts, timed_out_ids
 
-    # NOTE: a `with ThreadPoolExecutor(...) as pool` block calls
-    # ``shutdown(wait=True)`` on exit, which blocks until every submitted
-    # worker finishes — so a single slow source (e.g. ClawHub) keeps the
-    # caller blocked for minutes and renders ``overall_timeout`` a no-op.
-    # Manage the executor manually and shut it down with ``wait=False`` so
-    # the timeout is actually honoured.
-    pool = ThreadPoolExecutor(max_workers=min(len(active), 8))
-    futures = {}
-    for src in active:
-        lim = per_source_limits.get(src.source_id(), 50)
-        fut = pool.submit(_search_one_source, src, query, lim)
-        futures[fut] = src.source_id()
+    active_entries = [
+        (src.source_id(), src, per_source_limits.get(src.source_id(), 50))
+        for src in active
+    ]
+    active_ids = [sid for sid, _src, _lim in active_entries]
+    pending_ids = set(active_ids)
+    tasks: Queue = Queue()
+    results_queue: Queue = Queue()
+    stop_search = Event()
 
-    try:
+    for entry in active_entries:
+        tasks.put(entry)
+
+    def worker() -> None:
+        while not stop_search.is_set():
+            try:
+                _sid, src, lim = tasks.get_nowait()
+            except Empty:
+                return
+            try:
+                results_queue.put(_search_one_source(src, query, lim))
+            finally:
+                tasks.task_done()
+
+    for _ in range(min(len(active_entries), 8)):
+        Thread(target=worker, name="skills-hub-search", daemon=True).start()
+
+    deadline = monotonic() + overall_timeout
+    while pending_ids:
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            break
         try:
-            for fut in as_completed(futures, timeout=overall_timeout):
-                try:
-                    sid, results = fut.result(timeout=0)
-                    source_counts[sid] = len(results)
-                    all_results.extend(results)
-                    if on_source_done:
-                        on_source_done(sid, len(results))
-                except Exception:
-                    pass
-        except TimeoutError:
-            timed_out_ids = [
-                futures[f] for f in futures if not f.done()
-            ]
-            if timed_out_ids:
-                logger.debug(
-                    "Skills browse timed out waiting for: %s",
-                    ", ".join(timed_out_ids),
-                )
-    finally:
-        # wait=False so a slow source cannot block the caller's return;
-        # cancel_futures drops not-yet-started work.
-        pool.shutdown(wait=False, cancel_futures=True)
+            sid, results = results_queue.get(timeout=remaining)
+        except Empty:
+            break
+
+        if sid not in pending_ids:
+            continue
+        pending_ids.remove(sid)
+        source_counts[sid] = len(results)
+        all_results.extend(results)
+        try:
+            if on_source_done:
+                on_source_done(sid, len(results))
+        except Exception:
+            pass
+
+    if pending_ids:
+        stop_search.set()
+        timed_out_ids = [sid for sid in active_ids if sid in pending_ids]
+        logger.debug(
+            "Skills browse timed out waiting for: %s",
+            ", ".join(timed_out_ids),
+        )
 
     return all_results, source_counts, timed_out_ids
 
