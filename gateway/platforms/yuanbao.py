@@ -3349,6 +3349,7 @@ class ConnectionManager:
                     ping_interval=None,
                     ping_timeout=None,
                     close_timeout=5,
+                    max_size=16 * 1024 * 1024,  # 16 MiB cap to prevent OOM (#53142)
                 ),
                 timeout=CONNECT_TIMEOUT_SECONDS,
             )
@@ -3836,6 +3837,7 @@ class ConnectionManager:
                         ping_interval=None,
                         ping_timeout=None,
                         close_timeout=5,
+                    max_size=16 * 1024 * 1024,  # 16 MiB cap to prevent OOM (#53142)
                     ),
                     timeout=CONNECT_TIMEOUT_SECONDS,
                 )
