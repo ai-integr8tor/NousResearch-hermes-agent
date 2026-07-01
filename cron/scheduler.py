@@ -1387,6 +1387,19 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
             )
             in_channel_surface = False
 
+        if in_channel_surface:
+            # Force flat delivery (D2): an in_channel surface must ignore any
+            # inherited origin/target thread_id, or the flat continuable
+            # session seeded below (thread_id=None, via
+            # _seed_cron_channel_session) never matches where the brief is
+            # actually delivered — route_thread_id further down in this loop,
+            # and the standalone no-live-adapter fallback, both still read
+            # `thread_id` and would otherwise route into the origin thread
+            # instead of flat into the channel. Must stay AFTER
+            # mirror_this_target / origin_user_id are computed above — those
+            # need the ORIGINAL thread_id to match the origin conversation.
+            thread_id = None
+
         # For an in_channel delivery the flat continuation session is created
         # explicitly below (the shipped mirror only APPENDS to an existing
         # session, and the flat channel row is otherwise absent for a

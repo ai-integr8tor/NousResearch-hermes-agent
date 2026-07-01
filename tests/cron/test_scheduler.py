@@ -4315,6 +4315,39 @@ class TestCronContinuableSurfaceInChannel:
         mirror_mock.assert_called_once()
         assert mirror_mock.call_args.kwargs.get("thread_id") is None
 
+    def test_in_channel_from_origin_thread_delivers_flat_not_to_thread(self):
+        """Regression: a job scheduled from INSIDE a Slack thread (origin carries
+        a thread_id) must still deliver FLAT when cron_continuable_surface is
+        in_channel — not into the origin thread. Without clearing the inherited
+        thread_id, the live-adapter route (DeliveryRouter._deliver_to_platform)
+        folds target.thread_id into send_metadata['thread_id'], so the brief
+        would land in the origin thread while the seeded continuable session
+        (thread_id=None, asserted above) never matches where it actually went."""
+        adapter = self._slack_adapter(supports_inchannel=True)
+        _, mirror_mock = self._run_inchannel_delivery(
+            {"cron_continuable_surface": "in_channel"}, adapter,
+            origin={
+                "platform": "slack", "chat_id": "C123", "user_id": "U_HUMAN",
+                "thread_id": "999.888",
+            },
+        )
+        # The thread-open branch must still be skipped (in_channel behavior).
+        adapter.send.assert_awaited_once()
+        _, send_kwargs = adapter.send.await_args
+        send_metadata = send_kwargs.get("metadata") or {}
+        assert "thread_id" not in send_metadata, (
+            "in_channel delivery must be flat — the origin's thread_id must "
+            "not be forwarded to the adapter, even though the job was "
+            "scheduled from inside that thread"
+        )
+        # The seeded continuable session must match where the brief actually
+        # landed: flat (thread_id=None), not the origin thread.
+        adapter._session_store.get_or_create_session.assert_called_once()
+        seeded = adapter._session_store.get_or_create_session.call_args[0][0]
+        assert seeded.thread_id is None
+        mirror_mock.assert_called_once()
+        assert mirror_mock.call_args.kwargs.get("thread_id") is None
+
     def test_thread_mode_default_still_opens_thread(self):
         """G1 regression: the default (thread) mode is byte-identical — the
         thread-open branch still fires when no surface key is set."""
