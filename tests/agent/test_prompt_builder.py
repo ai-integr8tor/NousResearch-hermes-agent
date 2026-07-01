@@ -18,6 +18,7 @@ from agent.prompt_builder import (
     build_skills_system_prompt,
     build_nous_subscription_prompt,
     build_context_files_prompt,
+    load_soul_md,
     CONTEXT_FILE_MAX_CHARS,
     _dynamic_context_file_max_chars,
     _get_context_file_max_chars,
@@ -1646,3 +1647,96 @@ class TestParallelToolCallGuidance:
 # =========================================================================
 
 
+
+
+# =========================================================================
+# load_soul_md — per-profile resolution
+# =========================================================================
+
+
+class TestLoadSoulMdProfile:
+    """load_soul_md() should resolve per-profile SOUL.md files so a profile
+    can customize its identity without touching the global default. Honors
+    ``profile.yaml.soul_path`` to support a renamed file like CEO.soul.md.
+    """
+
+    def _build_hermes_home(self, tmp_path, *, profiles=None, default_name="SOUL.md"):
+        """Helper: set up a fake HERMES_HOME with default SOUL + per-profile dirs."""
+        # Default SOUL at root
+        (tmp_path / default_name).write_text("# Default\n\nDefault identity.", encoding="utf-8")
+        for name, content, soul_filename in profiles or []:
+            pdir = tmp_path / "profiles" / name
+            pdir.mkdir(parents=True, exist_ok=True)
+            (pdir / soul_filename).write_text(content, encoding="utf-8")
+        return tmp_path
+
+    def test_no_profile_uses_root_soul(self, tmp_path, monkeypatch):
+        """Backward compat: load_soul_md() (no profile) reads <HERMES_HOME>/SOUL.md."""
+        from hermes_constants import get_hermes_home
+        root = self._build_hermes_home(tmp_path, default_name="SOUL.md")
+        monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: root)
+        content = load_soul_md()
+        assert content is not None
+        assert "Default identity" in content
+
+    def test_profile_uses_profile_soul(self, tmp_path, monkeypatch):
+        """load_soul_md(profile="yangyang") reads <HERMES_HOME>/profiles/yangyang/SOUL.md."""
+        from hermes_constants import get_hermes_home
+        root = self._build_hermes_home(
+            tmp_path,
+            default_name="SOUL.md",
+            profiles=[("yangyang", "# Yangyang\n\nYangyang identity.", "SOUL.md")],
+        )
+        monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: root)
+        content = load_soul_md(profile="yangyang")
+        assert content is not None
+        assert "Yangyang identity" in content
+
+    def test_profile_honors_soul_path_in_profile_yaml(self, tmp_path, monkeypatch):
+        """profile.yaml.soul_path lets a profile rename the SOUL file
+        (e.g. CEO.soul.md instead of SOUL.md)."""
+        from hermes_constants import get_hermes_home
+        # Build a profile that ONLY has the custom-named SOUL, no SOUL.md
+        pdir = tmp_path / "profiles" / "default"
+        pdir.mkdir(parents=True, exist_ok=True)
+        (pdir / "CEO.soul.md").write_text(
+            "# CEO\n\nCEO identity via soul_path override.", encoding="utf-8"
+        )
+        (pdir / "profile.yaml").write_text("soul_path: CEO.soul.md\n", encoding="utf-8")
+        # Make a sibling root SOUL to prove the resolver picks the right one
+        (tmp_path / "SOUL.md").write_text("# Default root\n\nWRONG identity.", encoding="utf-8")
+        monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: tmp_path)
+        content = load_soul_md(profile="default")
+        assert content is not None
+        assert "CEO identity" in content
+        assert "WRONG identity" not in content
+
+    def test_profile_with_no_soul_falls_back_to_root(self, tmp_path, monkeypatch):
+        """If a profile is given but has no per-profile SOUL file, fall back
+        to the root SOUL.md. This preserves behavior for setups where the
+        default profile uses the legacy root-level SOUL.md."""
+        from hermes_constants import get_hermes_home
+        root = self._build_hermes_home(tmp_path, default_name="SOUL.md")
+        # profiles/ghost/ exists but has no SOUL
+        (root / "profiles" / "ghost").mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: root)
+        content = load_soul_md(profile="ghost")
+        assert content is not None
+        assert "Default identity" in content
+
+    def test_no_soul_anywhere_returns_none(self, tmp_path, monkeypatch):
+        """If no SOUL file exists at all, return None (caller falls back to
+        DEFAULT_AGENT_IDENTITY — see build_system_prompt_parts)."""
+        from hermes_constants import get_hermes_home
+        monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: tmp_path)
+        assert load_soul_md() is None
+        assert load_soul_md(profile="default") is None
+        assert load_soul_md(profile="ghost") is None
+
+    def test_empty_soul_file_returns_none(self, tmp_path, monkeypatch):
+        """A SOUL.md that exists but is empty (or only whitespace) is
+        treated as 'no soul' — same as DEFAULT_AGENT_IDENTITY fallback path."""
+        from hermes_constants import get_hermes_home
+        (tmp_path / "SOUL.md").write_text("   \n\n", encoding="utf-8")
+        monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: tmp_path)
+        assert load_soul_md() is None

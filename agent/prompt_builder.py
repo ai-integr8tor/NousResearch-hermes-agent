@@ -1793,12 +1793,26 @@ def _truncate_content(
     return head + marker + tail
 
 
-def load_soul_md(context_length: Optional[int] = None) -> Optional[str]:
-    """Load SOUL.md from HERMES_HOME and return its content, or None.
+def load_soul_md(
+    context_length: Optional[int] = None,
+    profile: Optional[str] = None,
+) -> Optional[str]:
+    """Load SOUL.md for the given profile (or the default profile).
 
     Used as the agent identity (slot #1 in the system prompt).  When this
     returns content, ``build_context_files_prompt`` should be called with
     ``skip_soul=True`` so SOUL.md isn't injected twice.
+
+    Resolution order:
+      1. ``profile.yaml.soul_path`` (relative to the profile dir) — lets
+         a profile rename the file away from the conventional ``SOUL.md``
+         (e.g. ``soul_path: CEO.soul.md`` for the default profile).
+      2. ``<HERMES_HOME>/profiles/<profile>/SOUL.md`` — the conventional
+         per-profile location used by every existing profile.
+      3. ``<HERMES_HOME>/SOUL.md`` — the legacy default-profile location
+         when no profile was given or the per-profile file is missing.
+
+    Returns None if no SOUL file is found.
     """
     try:
         from hermes_cli.config import ensure_hermes_home
@@ -1806,16 +1820,64 @@ def load_soul_md(context_length: Optional[int] = None) -> Optional[str]:
     except Exception as e:
         logger.debug("Could not ensure HERMES_HOME before loading SOUL.md: %s", e)
 
-    soul_path = get_hermes_home() / "SOUL.md"
+    from hermes_constants import get_hermes_home
+    soul_path: Optional[Path] = None
+    label = "SOUL.md"
+    if profile:
+        # Per-profile lookup. HERMES_HOME may be the root or already a
+        # profile dir (gateway sets it per profile when spawning agents),
+        # so we anchor from the root to keep behavior consistent.
+        hermes_root = get_hermes_home()
+        # If HERMES_HOME itself is a profile dir, walk up to the root so
+        # `hermes_root / "profiles" / profile` still resolves correctly.
+        if hermes_root.name and (hermes_root / "SOUL.md").exists() is False and (
+            hermes_root.parent / "pairing"
+        ).is_dir() is False and (hermes_root / "profiles").is_dir() is False:
+            # Heuristic: profile-shaped homes end in `profiles/<name>`. If
+            # we look one level up and the per-profile ``pairing`` exists
+            # there, treat the parent as the root. Keeps load_soul_md
+            # correct whether the gateway sets HERMES_HOME=root or root/profile.
+            anchor = hermes_root
+            if (anchor / "pairing").is_dir() and (
+                anchor / "profiles"
+            ).is_dir() is False:
+                anchor = anchor.parent
+            hermes_root = anchor
+        profile_dir = hermes_root / "profiles" / profile
+        # 1) honor a custom soul_path from profile.yaml
+        profile_yaml = profile_dir / "profile.yaml"
+        if profile_yaml.exists():
+            try:
+                import yaml
+                with profile_yaml.open(encoding="utf-8") as f:
+                    meta = yaml.safe_load(f) or {}
+                custom = meta.get("soul_path")
+                if custom and isinstance(custom, str) and custom.strip():
+                    candidate = profile_dir / custom
+                    if candidate.exists():
+                        soul_path = candidate
+                        label = custom
+            except Exception as e:
+                logger.debug("Could not read profile.yaml soul_path: %s", e)
+        # 2) conventional per-profile SOUL.md
+        if soul_path is None:
+            candidate = profile_dir / "SOUL.md"
+            if candidate.exists():
+                soul_path = candidate
+
+    if soul_path is None:
+        # 3) legacy global default
+        soul_path = get_hermes_home() / "SOUL.md"
+
     if not soul_path.exists():
         return None
     try:
         content = soul_path.read_text(encoding="utf-8").strip()
         if not content:
             return None
-        content = _scan_context_content(content, "SOUL.md")
+        content = _scan_context_content(content, label)
         content = _truncate_content(
-            content, "SOUL.md", context_length=context_length,
+            content, label, context_length=context_length,
             read_path=str(soul_path),
         )
         return content
