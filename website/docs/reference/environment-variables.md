@@ -76,6 +76,8 @@ Hermes reads environment variables from the process environment and, for user-ma
 | `ALIBABA_CODING_PLAN_BASE_URL` | Override the Qwen Coding Plan base URL |
 | `DEEPSEEK_API_KEY` | DeepSeek API key for direct DeepSeek access ([platform.deepseek.com](https://platform.deepseek.com/api_keys)) |
 | `DEEPSEEK_BASE_URL` | Custom DeepSeek API base URL |
+| `AVIAN_API_KEY` | Avian API key for OpenAI-compatible inference ([avian.io](https://avian.io)) |
+| `AVIAN_BASE_URL` | Custom Avian API base URL |
 | `NOVITA_API_KEY` | NovitaAI API key — AI-native cloud for Model API, Agent Sandbox, and GPU Cloud ([novita.ai/settings/key-management](https://novita.ai/settings/key-management)) |
 | `NOVITA_BASE_URL` | Override NovitaAI base URL (default: `https://api.novita.ai/openai/v1`) |
 | `NVIDIA_API_KEY` | NVIDIA NIM API key — Nemotron and open models ([build.nvidia.com](https://build.nvidia.com)) |
