@@ -30,12 +30,13 @@ Hermes 开箱即支持多个 AI 推理提供商。使用 `hermes model` 进行�
 | **Parallel** | `PARALLEL_API_KEY` | ✔ | ✔ | — |
 | **Tavily** | `TAVILY_API_KEY` | ✔ | ✔ | ✔ |
 | **Exa** | `EXA_API_KEY` | ✔ | ✔ | — |
+| **Keenable** | `KEENABLE_API_KEY` | ✔ | ✔ | — |
 
 快速配置示例：
 
 ```yaml
 web:
-  backend: firecrawl    # firecrawl | searxng | brave-free | ddgs | tavily | exa | parallel | xai
+  backend: firecrawl    # firecrawl | searxng | brave-free | ddgs | tavily | exa | keenable | parallel | xai
 ```
 
 若未设置 `web.backend`，后端将根据可用的 API key 自动检测。也支持通过 `FIRECRAWL_API_URL` 使用自托管的 Firecrawl。

@@ -24,6 +24,7 @@ Hermes Agent 内置两个可供模型调用的网页工具，由多个提供商�
 | **DDGS (DuckDuckGo)** | —（无需密钥） | ✔ | — | ✔ 免费 |
 | **Tavily** | `TAVILY_API_KEY` | ✔ | ✔ | 1 000 次搜索/月 |
 | **Exa** | `EXA_API_KEY` | ✔ | ✔ | 1 000 次搜索/月 |
+| **Keenable** | `KEENABLE_API_KEY` | ✔ | ✔ | 免费层级（有速率限制） |
 | **Parallel** | `PARALLEL_API_KEY` | ✔ | ✔ | 付费 |
 | **xAI (Grok)** | `XAI_API_KEY` 或 `hermes auth login xai-oauth` | ✔ | — | 付费（SuperGrok 或按 token 计费） |
 
@@ -261,6 +262,19 @@ EXA_API_KEY=your-exa-key-here
 
 ---
 
+### Keenable
+
+专为 agent 设计的低延迟网络搜索和网页转 markdown 提取。搜索和提取均通过已发布的 REST API（`GET /v1/search`、`GET /v1/fetch`）调用。
+
+```bash
+# ~/.hermes/.env
+KEENABLE_API_KEY=your-keenable-key-here
+```
+
+免费层级**无需密钥**即可使用——选择 keenable 作为后端后，它会调用 Keenable 的 `/public` 端点（有速率限制）。在 [keenable.ai/signup](https://keenable.ai/signup) 获取 `KEENABLE_API_KEY` 可提高限额。keenable 仅在显式选择时启用，绝不会作为无配置时的默认后端。
+
+---
+
 ### Parallel
 
 具备深度研究能力的 AI 原生搜索和提取。
@@ -361,6 +375,7 @@ web:
 | `PARALLEL_API_KEY` | parallel |
 | `TAVILY_API_KEY` | tavily |
 | `EXA_API_KEY` | exa |
+| `KEENABLE_API_KEY` | keenable |
 | `SEARXNG_URL` | searxng |
 
 xAI Web Search **不在**自动检测链中——设置了 `XAI_API_KEY`（或通过 xAI Grok OAuth 登录）不会自动将网页流量路由至 xAI，因为这些凭证同时用于推理/TTS/图像生成，用户可能希望为网页使用不同的后端。请通过 `web.backend: "xai"` 显式启用。
