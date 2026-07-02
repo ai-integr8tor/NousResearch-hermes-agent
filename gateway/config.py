@@ -18,6 +18,7 @@ from enum import Enum
 
 from hermes_cli.config import get_hermes_home
 from utils import env_int, is_truthy_value
+from agent.secret_scope import get_secret
 
 logger = logging.getLogger(__name__)
 
@@ -1268,7 +1269,7 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
         return platform_config
     
     # Telegram
-    telegram_token = os.getenv("TELEGRAM_BOT_TOKEN")
+    telegram_token = get_secret("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
     if telegram_token:
         telegram_config = _enable_from_env(Platform.TELEGRAM)
         telegram_config.token = telegram_token
@@ -1298,7 +1299,7 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
         )
     
     # Discord
-    discord_token = os.getenv("DISCORD_BOT_TOKEN")
+    discord_token = get_secret("DISCORD_BOT_TOKEN") or os.getenv("DISCORD_BOT_TOKEN")
     if discord_token:
         discord_config = _enable_from_env(Platform.DISCORD)
         discord_config.token = discord_token
@@ -1346,7 +1347,7 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
     # outbound, public webhook inbound. Both adapters can run in parallel
     # against different phone numbers.
     whatsapp_cloud_phone_id = os.getenv("WHATSAPP_CLOUD_PHONE_NUMBER_ID")
-    whatsapp_cloud_token = os.getenv("WHATSAPP_CLOUD_ACCESS_TOKEN")
+    whatsapp_cloud_token = get_secret("WHATSAPP_CLOUD_ACCESS_TOKEN") or os.getenv("WHATSAPP_CLOUD_ACCESS_TOKEN")
     if whatsapp_cloud_phone_id and whatsapp_cloud_token:
         if Platform.WHATSAPP_CLOUD not in config.platforms:
             config.platforms[Platform.WHATSAPP_CLOUD] = PlatformConfig()
@@ -1397,7 +1398,7 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
         )
 
     # Slack
-    slack_token = os.getenv("SLACK_BOT_TOKEN")
+    slack_token = get_secret("SLACK_BOT_TOKEN") or os.getenv("SLACK_BOT_TOKEN")
     if slack_token:
         if Platform.SLACK not in config.platforms:
             # No yaml config for Slack — env-only setup, enable it
@@ -1430,8 +1431,8 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
         )
     
     # Signal
-    signal_url = os.getenv("SIGNAL_HTTP_URL")
-    signal_account = os.getenv("SIGNAL_ACCOUNT")
+    signal_url = get_secret("SIGNAL_HTTP_URL") or os.getenv("SIGNAL_HTTP_URL")
+    signal_account = get_secret("SIGNAL_ACCOUNT") or os.getenv("SIGNAL_ACCOUNT")
     if signal_url and signal_account:
         signal_config = _enable_from_env(Platform.SIGNAL)
         signal_config.extra.update({
@@ -1449,7 +1450,7 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
         )
 
     # Mattermost
-    mattermost_token = os.getenv("MATTERMOST_TOKEN")
+    mattermost_token = get_secret("MATTERMOST_TOKEN") or os.getenv("MATTERMOST_TOKEN")
     if mattermost_token:
         mattermost_url = os.getenv("MATTERMOST_URL", "")
         if not mattermost_url:
@@ -1467,7 +1468,7 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
         )
 
     # Matrix
-    matrix_token = os.getenv("MATRIX_ACCESS_TOKEN")
+    matrix_token = get_secret("MATRIX_ACCESS_TOKEN") or os.getenv("MATRIX_ACCESS_TOKEN")
     matrix_homeserver = os.getenv("MATRIX_HOMESERVER", "")
     if matrix_token or os.getenv("MATRIX_PASSWORD"):
         if not matrix_homeserver:
@@ -1503,7 +1504,7 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
         )
 
     # Home Assistant
-    hass_token = os.getenv("HASS_TOKEN")
+    hass_token = get_secret("HASS_TOKEN") or os.getenv("HASS_TOKEN")
     if hass_token:
         if Platform.HOMEASSISTANT not in config.platforms:
             config.platforms[Platform.HOMEASSISTANT] = PlatformConfig()
@@ -1514,8 +1515,8 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
             config.platforms[Platform.HOMEASSISTANT].extra["url"] = hass_url
 
     # Email
-    email_addr = os.getenv("EMAIL_ADDRESS")
-    email_pwd = os.getenv("EMAIL_PASSWORD")
+    email_addr = get_secret("EMAIL_ADDRESS") or os.getenv("EMAIL_ADDRESS")
+    email_pwd = get_secret("EMAIL_PASSWORD") or os.getenv("EMAIL_PASSWORD")
     email_imap = os.getenv("EMAIL_IMAP_HOST")
     email_smtp = os.getenv("EMAIL_SMTP_HOST")
     if all([email_addr, email_pwd, email_imap, email_smtp]):
@@ -1537,7 +1538,7 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
         )
 
     # SMS (Twilio)
-    twilio_sid = os.getenv("TWILIO_ACCOUNT_SID")
+    twilio_sid = get_secret("TWILIO_ACCOUNT_SID") or os.getenv("TWILIO_ACCOUNT_SID")
     if twilio_sid:
         if Platform.SMS not in config.platforms:
             config.platforms[Platform.SMS] = PlatformConfig()
