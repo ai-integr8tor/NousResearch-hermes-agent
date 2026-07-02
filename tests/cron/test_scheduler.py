@@ -2646,6 +2646,37 @@ class TestBuildJobPromptSilentHint:
         assert system_pos < prompt_pos
 
 
+    def test_expands_date_tokens_before_agent_prompt(self):
+        import datetime as _dt
+        from cron import date_tokens
+
+        fixed = _dt.datetime(2026, 6, 18, 12, 0)
+        original_now = date_tokens._now_pt
+        date_tokens._now_pt = lambda: fixed
+        shell_token = chr(36) + "(date +%Y-%m-%d)"
+        try:
+            result = _build_job_prompt({"prompt": f"Write <TODAY> and {shell_token}"})
+        finally:
+            date_tokens._now_pt = original_now
+        assert "2026-06-18" in result
+        assert "<TODAY>" not in result
+        assert shell_token not in result
+
+    def test_date_token_expansion_failure_preserves_prompt(self, monkeypatch):
+        from cron import date_tokens
+
+        original = "Write <TODAY> without losing this prompt"
+        monkeypatch.setattr(
+            date_tokens,
+            "expand_cron_date_tokens",
+            lambda text: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+
+        result = _build_job_prompt({"prompt": original})
+
+        assert original in result
+
+
 class TestParseWakeGate:
     """Unit tests for _parse_wake_gate — pure function, no side effects."""
 

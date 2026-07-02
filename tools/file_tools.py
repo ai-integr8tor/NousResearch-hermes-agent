@@ -5,6 +5,7 @@ import errno
 import json
 import logging
 import os
+import tempfile
 import threading
 from pathlib import Path
 
@@ -199,7 +200,7 @@ def _get_live_tracking_cwd(task_id: str = "default") -> str | None:
         container_key = task_id
 
     with _file_ops_lock:
-        cached = _file_ops_cache.get(container_key) or _file_ops_cache.get(task_id)
+        cached = _file_ops_cache.get(task_id) or _file_ops_cache.get(container_key)
     if cached is not None:
         env = getattr(cached, "env", None)
         live_cwd = _live_cwd_if_owned(env, task_id)
@@ -513,19 +514,10 @@ def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None
     except (OSError, ValueError):
         resolved = filepath
     normalized = os.path.normpath(_expand_tilde(filepath))
-    _err = (
-        f"Refusing to write to sensitive system path: {filepath}\n"
-        "Use the terminal tool with sudo if you need to modify system files."
-    )
-    for prefix in _SENSITIVE_PATH_PREFIXES:
-        if resolved.startswith(prefix) or normalized.startswith(prefix):
-            return _err
-    if resolved in _SENSITIVE_EXACT_PATHS or normalized in _SENSITIVE_EXACT_PATHS:
-        return _err
-    # Prevent agents from modifying the Hermes config file directly.
-    # approvals.mode and other security settings live here; a malicious or
-    # prompt-injected agent could silently disable exec approval by writing to
-    # this file.
+    # Prevent agents from modifying the Hermes config file directly. This
+    # check must run before the temp-root exemption because tests, custom
+    # deployments, and redirected HERMES_HOME configurations can legitimately
+    # place the protected config under the platform temp directory.
     hermes_config = _get_hermes_config_resolved()
     if hermes_config and (resolved == hermes_config or normalized == hermes_config):
         return (
@@ -533,6 +525,31 @@ def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None
             "Agent cannot modify security-sensitive configuration. "
             "Edit ~/.hermes/config.yaml directly or use 'hermes config' instead."
         )
+    _err = (
+        f"Refusing to write to sensitive system path: {filepath}\n"
+        "Use the terminal tool with sudo if you need to modify system files."
+    )
+    if resolved in _SENSITIVE_EXACT_PATHS or normalized in _SENSITIVE_EXACT_PATHS:
+        return _err
+    try:
+        temp_root = os.path.realpath(tempfile.gettempdir())
+    except Exception:
+        temp_root = ""
+    temp_root_prefix = temp_root.rstrip(os.sep) + os.sep
+    if temp_root == os.sep or any(
+        prefix.rstrip(os.sep) == temp_root
+        or prefix.startswith(temp_root_prefix)
+        for prefix in _SENSITIVE_PATH_PREFIXES
+    ):
+        temp_root = ""
+    if temp_root and (
+        resolved == temp_root
+        or resolved.startswith(temp_root.rstrip(os.sep) + os.sep)
+    ):
+        return None
+    for prefix in _SENSITIVE_PATH_PREFIXES:
+        if resolved.startswith(prefix) or normalized.startswith(prefix):
+            return _err
     return None
 
 
