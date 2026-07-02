@@ -7,7 +7,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { sessionTitle } from '@/lib/chat-runtime'
 import { cn } from '@/lib/utils'
-import { $attentionSessionIds, $sessions, $workingSessionIds } from '@/store/session'
+import { $attentionSessionIds, $runtimeIdByStoredSessionId, $sessions, $workingSessionIds } from '@/store/session'
 import { $subagentsBySession, activeSubagentCount, buildSubagentTree, failedSubagentCount, type SubagentNode } from '@/store/subagents'
 import { $todosBySession, todoListActive } from '@/store/todos'
 import type { SessionInfo } from '@/types/hermes'
@@ -21,6 +21,8 @@ type LiveTodoStatus = 'cancelled' | 'completed' | 'in_progress' | 'pending'
 
 interface LiveTaskSession {
   id: string
+  routeId: null | string
+  runtimeId: null | string
   session: null | SessionInfo
   title: string
   busy: boolean
@@ -49,6 +51,14 @@ function sessionLabel(session: null | SessionInfo, sessionId: string): string {
   }
 
   return sessionTitle(session)
+}
+
+function sessionTimestampMs(session: null | SessionInfo): number {
+  if (!session) {
+    return 0
+  }
+
+  return Math.max(session.last_active || 0, session.started_at || 0) * 1000
 }
 
 function taskStatusTone(status: LiveTodoStatus): string {
@@ -176,45 +186,54 @@ export function TasksView({ setStatusbarItemGroup: _setStatusbarItemGroup, ...pr
   const subagentsBySession = useStore($subagentsBySession)
   const workingSessionIds = useStore($workingSessionIds)
   const attentionSessionIds = useStore($attentionSessionIds)
+  const runtimeIdByStoredSessionId = useStore($runtimeIdByStoredSessionId)
   const [query, setQuery] = useState('')
 
   const liveSessions = useMemo(() => {
-    const sessionsById = new Map(sessions.map(session => [session.id, session]))
+    const sessionsByStoredId = new Map<string, SessionInfo>()
+
+    for (const session of sessions) {
+      sessionsByStoredId.set(session.id, session)
+
+      if (session._lineage_root_id) {
+        sessionsByStoredId.set(session._lineage_root_id, session)
+      }
+    }
+
+    const storedIdByRuntimeSessionId = new Map(Object.entries(runtimeIdByStoredSessionId).map(([storedId, runtimeId]) => [runtimeId, storedId]))
 
     const sessionIds = new Set<string>([
       ...workingSessionIds,
       ...attentionSessionIds,
-      ...Object.keys(todosBySession),
-      ...Object.keys(subagentsBySession)
+      ...Object.keys(todosBySession).map(runtimeId => storedIdByRuntimeSessionId.get(runtimeId) ?? `runtime:${runtimeId}`),
+      ...Object.keys(subagentsBySession).map(runtimeId => storedIdByRuntimeSessionId.get(runtimeId) ?? `runtime:${runtimeId}`)
     ])
 
     const rows: LiveTaskSession[] = []
 
-    for (const sessionId of sessionIds) {
-      const session = sessionsById.get(sessionId) ?? null
-      const todos = (todosBySession[sessionId] ?? []).filter(todo => todo.id && todo.content)
-      const subagents = subagentsBySession[sessionId] ?? []
+    for (const key of sessionIds) {
+      const runtimeId = key.startsWith('runtime:') ? key.slice('runtime:'.length) : (runtimeIdByStoredSessionId[key] ?? null)
+      const storedId = key.startsWith('runtime:') ? (storedIdByRuntimeSessionId.get(runtimeId) ?? null) : key
+      const session = storedId ? (sessionsByStoredId.get(storedId) ?? null) : null
+      const todos = ((runtimeId ? todosBySession[runtimeId] : []) ?? []).filter(todo => todo.id && todo.content)
+      const subagents = (runtimeId ? subagentsBySession[runtimeId] : []) ?? []
       const activeTodos = todos.filter(todo => ACTIVE_TODO_STATUSES.has(todo.status))
       const activeSubagents = activeSubagentCount(subagents)
       const failedSubagents = failedSubagentCount(subagents)
-      const busy = workingSessionIds.includes(sessionId)
-      const needsInput = attentionSessionIds.includes(sessionId)
+      const busy = storedId ? workingSessionIds.includes(storedId) : false
+      const needsInput = storedId ? attentionSessionIds.includes(storedId) : false
       const live = busy || needsInput || todoListActive(todos) || activeSubagents > 0
 
       if (!live) {
         continue
       }
 
-      const updatedAt = Math.max(
-        session?.last_active ?? 0,
-        ...subagents.map(item => item.updatedAt),
-        Date.now() - (busy ? 0 : 1)
-      )
-
       rows.push({
-        id: sessionId,
+        id: storedId ?? runtimeId ?? key,
+        routeId: session?.id ?? storedId,
+        runtimeId,
         session,
-        title: sessionLabel(session, sessionId),
+        title: sessionLabel(session, storedId ?? runtimeId ?? key),
         busy,
         needsInput,
         todos,
@@ -222,7 +241,7 @@ export function TasksView({ setStatusbarItemGroup: _setStatusbarItemGroup, ...pr
         subagents: buildSubagentTree(subagents),
         activeSubagentCount: activeSubagents,
         failedSubagentCount: failedSubagents,
-        updatedAt
+        updatedAt: Math.max(sessionTimestampMs(session), ...subagents.map(item => item.updatedAt), 0)
       })
     }
 
@@ -232,7 +251,7 @@ export function TasksView({ setStatusbarItemGroup: _setStatusbarItemGroup, ...pr
 
       return rightScore - leftScore || right.updatedAt - left.updatedAt || left.title.localeCompare(right.title)
     })
-  }, [attentionSessionIds, sessions, subagentsBySession, todosBySession, workingSessionIds])
+  }, [attentionSessionIds, runtimeIdByStoredSessionId, sessions, subagentsBySession, todosBySession, workingSessionIds])
 
   const normalizedQuery = query.trim().toLowerCase()
 
@@ -318,7 +337,13 @@ export function TasksView({ setStatusbarItemGroup: _setStatusbarItemGroup, ...pr
                     </div>
                   </div>
 
-                  <Button onClick={() => navigate(sessionRoute(entry.id))} size="sm" type="button" variant="outline">
+                  <Button
+                    disabled={!entry.routeId}
+                    onClick={() => entry.routeId && navigate(sessionRoute(entry.routeId))}
+                    size="sm"
+                    type="button"
+                    variant="outline"
+                  >
                     Open session
                   </Button>
                 </div>
