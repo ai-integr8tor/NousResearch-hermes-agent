@@ -1045,34 +1045,53 @@ def _filter_plugin_entries(entries: list, args: Any, enabled: set, disabled: set
     return filtered
 
 
-def cmd_list(args: Any | None = None) -> None:
-    """List all plugins (bundled + user) with enabled/disabled state."""
+def _print_legacy_plugins_json(entries: list, enabled: set, disabled: set) -> None:
+    """Emit the backwards-compatible ``hermes plugins list --json`` payload."""
+    payload = [
+        {
+            "name": name,
+            "status": _plugin_status(name, enabled, disabled, key=key),
+            "version": str(version),
+            "description": description,
+            "source": source,
+        }
+        for name, version, description, source, _dir, key in entries
+    ]
+    print(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def cmd_list(args: Any | None = None, *, json_output: bool | None = None) -> None:
+    """List all plugins.
+
+    ``json_output=True`` is the programmatic stable-inventory contract used by
+    the Web/API surface. The CLI flag ``hermes plugins list --json`` keeps its
+    existing shallow array payload for compatibility with scripts.
+    """
+    if json_output is True:
+        from hermes_cli.plugins import list_plugin_inventory
+
+        print(json.dumps(list_plugin_inventory(), indent=2, sort_keys=True))
+        return
+
     from rich.console import Console
     from rich.table import Table
 
     console = Console()
     entries = _discover_all_plugins()
     if not entries:
-        console.print("[dim]No plugins installed.[/dim]")
-        console.print("[dim]Install with:[/dim] hermes plugins install owner/repo")
+        if bool(getattr(args, "json", False)):
+            print("[]")
+        else:
+            console.print("[dim]No plugins installed.[/dim]")
+            console.print("[dim]Install with:[/dim] hermes plugins install owner/repo")
         return
 
     enabled = _get_enabled_set()
     disabled = _get_disabled_set()
     entries = _filter_plugin_entries(entries, args, enabled, disabled)
 
-    if getattr(args, "json", False):
-        payload = [
-            {
-                "name": name,
-                "status": _plugin_status(name, enabled, disabled, key=key),
-                "version": str(version),
-                "description": description,
-                "source": source,
-            }
-            for name, version, description, source, _dir, key in entries
-        ]
-        print(json.dumps(payload, indent=2))
+    if bool(getattr(args, "json", False)):
+        _print_legacy_plugins_json(entries, enabled, disabled)
         return
 
     if getattr(args, "plain", False):

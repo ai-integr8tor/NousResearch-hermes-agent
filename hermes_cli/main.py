@@ -12774,9 +12774,6 @@ def main():
     _bundles_register(bundles_parser)
     bundles_parser.set_defaults(func=bundles_command)
 
-    # =========================================================================
-    # plugins command  (parser built in hermes_cli/subcommands/plugins.py)
-    # =========================================================================
     build_plugins_parser(subparsers, cmd_plugins=cmd_plugins)
 
     # =========================================================================
