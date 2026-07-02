@@ -6,8 +6,10 @@ const test = require('node:test')
 const { pathToFileURL } = require('node:url')
 
 const {
+  AUDIO_TRANSCRIPTION_TIMEOUT_MS,
   DEFAULT_FETCH_TIMEOUT_MS,
   encryptDesktopSecret,
+  resolveApiRequestTimeoutMs,
   resolveDirectoryForIpc,
   resolveReadableFileForIpc,
   resolveRequestedPathForIpc,
@@ -27,6 +29,13 @@ test('resolveTimeoutMs falls back to defaults and accepts overrides', () => {
   assert.equal(resolveTimeoutMs(0), DEFAULT_FETCH_TIMEOUT_MS)
   assert.equal(resolveTimeoutMs(-25), DEFAULT_FETCH_TIMEOUT_MS)
   assert.equal(resolveTimeoutMs('2750'), 2750)
+})
+
+test('resolveApiRequestTimeoutMs gives voice transcription a longer default only for that endpoint', () => {
+  assert.equal(resolveApiRequestTimeoutMs({ path: '/api/audio/transcribe' }), AUDIO_TRANSCRIPTION_TIMEOUT_MS)
+  assert.equal(resolveApiRequestTimeoutMs({ path: '/api/audio/transcribe?profile=default' }), AUDIO_TRANSCRIPTION_TIMEOUT_MS)
+  assert.equal(resolveApiRequestTimeoutMs({ path: '/api/status' }), DEFAULT_FETCH_TIMEOUT_MS)
+  assert.equal(resolveApiRequestTimeoutMs({ path: '/api/audio/transcribe', timeoutMs: 5_000 }), 5_000)
 })
 
 test('encryptDesktopSecret requires available secure storage', () => {
