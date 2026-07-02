@@ -278,6 +278,8 @@ from hermes_cli.subcommands.login import build_login_parser
 from hermes_cli.subcommands.logout import build_logout_parser
 from hermes_cli.subcommands.auth import build_auth_parser
 from hermes_cli.subcommands.status import build_status_parser
+from hermes_cli.goal_cli import build_parser as build_goal_parser
+from hermes_cli.runtime_cli import build_parser as build_runtime_parser
 from hermes_cli.subcommands.webhook import build_webhook_parser
 from hermes_cli.subcommands.hooks import build_hooks_parser
 from hermes_cli.subcommands.doctor import build_doctor_parser
@@ -1297,7 +1299,10 @@ def _resolve_session_by_name_or_id(name_or_id: str) -> Optional[str]:
             # Project forward through compression chain so resumes land on
             # the live tip instead of a dead compressed parent.
             try:
-                resolved_id = db.get_compression_tip(resolved_id) or resolved_id
+                resolved_id = (
+                    db.get_compression_tip(resolved_id, emit_lineage_event=True)
+                    or resolved_id
+                )
             except Exception:
                 pass
 
@@ -2211,9 +2216,46 @@ def _resolve_use_tui(args) -> bool:
         return False
 
 
+def _is_noninteractive_slash_invocation(args) -> bool:
+    slash = getattr(args, "slash", None)
+    if slash:
+        return True
+    query = getattr(args, "query", None)
+    if not isinstance(query, str) or getattr(args, "image", None):
+        return False
+    try:
+        from hermes_cli.slash_dispatch import classify_slash_text
+
+        return classify_slash_text(query).looks_like_command
+    except Exception:
+        return False
+
+
 def cmd_chat(args):
     """Run interactive chat CLI."""
+    try:
+        from hermes_cli.query_input import QueryInputError, resolve_query_input
+
+        resolved_query, query_source = resolve_query_input(
+            query=getattr(args, "query", None),
+            slash=getattr(args, "slash", None),
+            query_file=getattr(args, "query_file", None),
+            stdin_query=bool(getattr(args, "stdin_query", False)),
+        )
+    except QueryInputError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(2)
+    if query_source is not None:
+        args.query = resolved_query
+        if query_source != "slash":
+            args.slash = None
+        args.query_file = None
+        args.stdin_query = False
+
     use_tui = _resolve_use_tui(args)
+    noninteractive_slash = _is_noninteractive_slash_invocation(args)
+    if noninteractive_slash:
+        use_tui = False
 
     # Resolve --continue into --resume with the latest session or by name
     continue_val = getattr(args, "continue_last", None)
@@ -2273,7 +2315,7 @@ def cmd_chat(args):
         pass
 
     # First-run guard: check if any provider is configured before launching
-    if not _has_any_provider_configured():
+    if not noninteractive_slash and not _has_any_provider_configured():
         print()
         print(
             "It looks like Hermes isn't configured yet -- no API keys or providers found."
@@ -2368,6 +2410,9 @@ def cmd_chat(args):
             verbose=getattr(args, "verbose", None),
             quiet=getattr(args, "quiet", False),
             query=getattr(args, "query", None),
+            slash=getattr(args, "slash", None),
+            query_file=getattr(args, "query_file", None),
+            stdin_query=getattr(args, "stdin_query", False),
             image=getattr(args, "image", None),
             worktree=getattr(args, "worktree", False),
             checkpoints=getattr(args, "checkpoints", False),
@@ -2388,6 +2433,9 @@ def cmd_chat(args):
         "verbose": getattr(args, "verbose", None),
         "quiet": getattr(args, "quiet", False),
         "query": args.query,
+        "slash": getattr(args, "slash", None),
+        "query_file": getattr(args, "query_file", None),
+        "stdin_query": getattr(args, "stdin_query", False),
         "image": getattr(args, "image", None),
         "resume": getattr(args, "resume", None),
         "worktree": getattr(args, "worktree", False),
@@ -4260,6 +4308,13 @@ def cmd_kanban(args):
     from hermes_cli.kanban import kanban_command
 
     return kanban_command(args)
+
+
+def cmd_closure(args):
+    """Show max-iteration closure artifacts."""
+    from hermes_cli.closure_cli import cmd_closure as _cmd_closure
+
+    return _cmd_closure(args)
 
 
 def cmd_project(args):
@@ -11923,18 +11978,18 @@ def _build_provider_choices() -> list[str]:
 # to parse.
 _BUILTIN_SUBCOMMANDS = frozenset(
     {
-        "acp", "auth", "backup", "bundles", "checkpoints", "claw", "completion",
+        "acp", "auth", "backup", "bundles", "checkpoints", "claw", "closure", "completion",
         "computer-use",
         "config", "cron", "curator", "dashboard", "serve", "debug", "doctor",
         "dump", "fallback", "gateway", "hooks", "import", "insights",
-        "gui", "desktop", "kanban", "login", "logout", "logs", "lsp", "mcp", "memory", "migrate", "moa",
+        "goal", "gui", "desktop", "kanban", "login", "logout", "logs", "lsp", "mcp", "memory", "migrate", "moa",
         "journey", "memory-graph", "learning",
         "model", "pairing", "pets", "plugins", "portal", "postinstall", "profile",
         "project", "proxy",
         "prompt-size",
         "send", "sessions", "setup",
         "skills", "slack", "status", "tools", "uninstall", "update",
-        "version", "webhook", "whatsapp", "whatsapp-cloud", "chat", "secrets", "security",
+        "runtime", "version", "webhook", "whatsapp", "whatsapp-cloud", "chat", "secrets", "security",
         # Help-ish invocations — plugin commands not being listed in
         # top-level --help is an acceptable trade-off for skipping an
         # expensive eager import of every bundled plugin module.
@@ -12122,6 +12177,9 @@ def _prepare_agent_startup(args) -> None:
 def _set_chat_arg_defaults(args) -> None:
     for attr, default in [
         ("query", None),
+        ("slash", None),
+        ("query_file", None),
+        ("stdin_query", False),
         ("model", None),
         ("provider", None),
         ("toolsets", None),
@@ -12190,7 +12248,14 @@ def _try_termux_fast_cli_launch() -> bool:
 
     if args.command in {None, "chat"}:
         _set_chat_arg_defaults(args)
-        interactive_prompt = not getattr(args, "query", None) and not getattr(args, "image", None)
+        noninteractive_slash = _is_noninteractive_slash_invocation(args)
+        interactive_prompt = (
+            not getattr(args, "query", None)
+            and not getattr(args, "slash", None)
+            and not getattr(args, "query_file", None)
+            and not getattr(args, "stdin_query", False)
+            and not getattr(args, "image", None)
+        )
         if interactive_prompt:
             # Bare Termux CLI should reach the prompt first and do agent-only
             # discovery on the first submitted turn instead of before input.
@@ -12199,7 +12264,7 @@ def _try_termux_fast_cli_launch() -> bool:
             os.environ["HERMES_FAST_STARTUP_BANNER"] = "1"
             if getattr(args, "accept_hooks", False):
                 os.environ["HERMES_ACCEPT_HOOKS"] = "1"
-        else:
+        elif not noninteractive_slash:
             _prepare_agent_startup(args)
         cmd_chat(args)
         return True
@@ -12240,6 +12305,8 @@ def _try_termux_fast_tui_launch() -> bool:
     if getattr(args, "version", False) or getattr(args, "oneshot", None):
         return False
     if getattr(args, "command", None) not in {None, "chat"}:
+        return False
+    if _is_noninteractive_slash_invocation(args):
         return False
     if not _resolve_use_tui(args):
         return False
@@ -12659,6 +12726,16 @@ def main():
     build_status_parser(subparsers, cmd_status=cmd_status)
 
     # =========================================================================
+    # goal command  (parser built in hermes_cli/goal_cli.py)
+    # =========================================================================
+    build_goal_parser(subparsers)
+
+    # =========================================================================
+    # runtime command  (parser built in hermes_cli/runtime_cli.py)
+    # =========================================================================
+    build_runtime_parser(subparsers)
+
+    # =========================================================================
     # cron command  (parser built in hermes_cli/subcommands/cron.py)
     # =========================================================================
     build_cron_parser(subparsers, cmd_cron=cmd_cron)
@@ -12681,6 +12758,10 @@ def main():
 
     kanban_parser = _build_kanban_parser(subparsers)
     kanban_parser.set_defaults(func=cmd_kanban)
+
+    from hermes_cli.closure_cli import build_closure_parser
+
+    build_closure_parser(subparsers)
 
     # =========================================================================
     # project command — named, multi-folder workspaces
