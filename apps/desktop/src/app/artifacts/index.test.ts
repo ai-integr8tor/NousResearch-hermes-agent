@@ -59,4 +59,21 @@ describe('collectArtifactsForSession', () => {
       value: 'https://example.com/changelog/latest'
     })
   })
+
+  it('excludes pip cache wheel paths from tool output', () => {
+    const artifacts = collectArtifactsForSession(makeSession(), [
+      {
+        content: [
+          'Using cached wheel:',
+          '/Users/alice/Library/Caches/pip/wheels/aa/bb/cc/anthropic-0.68.0-py3-none-any.whl',
+          'Saved wheel to file:///C:/Users/Alice/AppData/Local/pip/Cache/wheels/11/22/openai-2.24.0-py3-none-any.whl',
+          'Generated report: /tmp/hermes-session/report.pdf'
+        ].join('\n'),
+        role: 'tool',
+        timestamp: 4000
+      }
+    ])
+
+    expect(artifacts.map(artifact => artifact.value)).toEqual(['/tmp/hermes-session/report.pdf'])
+  })
 })
