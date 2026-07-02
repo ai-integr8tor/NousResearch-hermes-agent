@@ -290,9 +290,9 @@ class TestBlueBubblesHelpers:
         adapter = _make_adapter(monkeypatch)
         assert adapter.webhook_events == ["new-message", "updated-message"]
 
-    def test_typing_indicators_default_off(self, monkeypatch):
+    def test_typing_indicators_default_on(self, monkeypatch):
         adapter = _make_adapter(monkeypatch)
-        assert adapter.typing_indicators is False
+        assert adapter.typing_indicators is True
 
     def test_auto_react_default_on_without_delayed_ack(self, monkeypatch):
         adapter = _make_adapter(monkeypatch)
@@ -317,7 +317,7 @@ class TestBlueBubblesHelpers:
 
         assert adapter.auto_react is True
         assert adapter.auto_react_type == "like"
-        assert adapter.typing_indicators is False
+        assert adapter.typing_indicators is True
         assert adapter.webhook_events == ["new-message", "updated-message"]
 
     def test_dedup_key_prefers_message_guid_and_text_hash(self, monkeypatch):
@@ -330,8 +330,31 @@ class TestBlueBubblesHelpers:
         assert first != second
 
     @pytest.mark.asyncio
-    async def test_send_typing_noops_by_default(self, monkeypatch):
+    async def test_send_typing_posts_by_default(self, monkeypatch):
         adapter = _make_adapter(monkeypatch)
+        adapter._private_api_enabled = True
+        adapter._helper_connected = True
+        posts = []
+
+        class Client:
+            async def post(self, *args, **kwargs):
+                posts.append((args, kwargs))
+
+        adapter.client = Client()
+
+        async def fake_resolve_chat_guid(chat_id):
+            return "iMessage;-;user@example.com"
+
+        monkeypatch.setattr(adapter, "_resolve_chat_guid", fake_resolve_chat_guid)
+
+        await adapter.send_typing("user@example.com")
+
+        assert len(posts) == 1
+        assert posts[0][0][0].endswith("/api/v1/chat/iMessage%3B-%3Buser%40example.com/typing?password=secret")
+
+    @pytest.mark.asyncio
+    async def test_send_typing_noops_when_configured_off(self, monkeypatch):
+        adapter = _make_adapter(monkeypatch, typing_indicators=False)
         adapter._private_api_enabled = True
         adapter._helper_connected = True
         posts = []

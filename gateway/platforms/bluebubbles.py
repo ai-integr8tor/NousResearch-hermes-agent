@@ -181,7 +181,7 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         self.webhook_events = self._configured_webhook_events(extra)
         self.typing_indicators = _bool_setting(
             extra.get("typing_indicators"),
-            default=False,
+            default=True,
         )
         self.auto_react = _bool_setting(
             extra.get("auto_react"),
