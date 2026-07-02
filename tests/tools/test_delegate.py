@@ -1158,10 +1158,23 @@ class TestDelegationCredentialResolution(unittest.TestCase):
         }
         creds = _resolve_delegation_credentials(cfg, parent)
         self.assertEqual(creds["model"], "qwen2.5-coder")
-        self.assertEqual(creds["provider"], "custom")
+        self.assertEqual(creds["provider"], "openrouter")
         self.assertEqual(creds["base_url"], "http://localhost:1234/v1")
         self.assertEqual(creds["api_key"], "local-key")
         self.assertEqual(creds["api_mode"], "chat_completions")
+
+    def test_opencode_go_provider_preserved_when_base_url_set(self):
+        # Regression for #51540: provider must not be hardcoded to "custom" when
+        # delegation.base_url is set alongside delegation.provider.
+        parent = _make_mock_parent(depth=0)
+        cfg = {
+            "model": "deepseek-v4-flash",
+            "provider": "opencode-go",
+            "base_url": "https://opencode.ai/zen/go/v1",
+        }
+        creds = _resolve_delegation_credentials(cfg, parent)
+        self.assertEqual(creds["provider"], "opencode-go")
+        self.assertEqual(creds["model"], "deepseek-v4-flash")
 
     def test_direct_endpoint_auto_detects_anthropic_messages_suffix(self):
         # Issue #10213: Azure AI Foundry exposes Anthropic-compatible models at
