@@ -195,6 +195,115 @@ class TestPostFailure:
         assert adapter._pending_actions == {}
 
 
+class TestThreadRouting:
+    """Interactive prompts must land inside the active thread when
+    ``reply_mode == "thread"`` and the gateway hands us a thread root via
+    ``metadata`` — and must stay flat otherwise.
+
+    This is the behavior contract for the "approvals belong in the thread,
+    not the parent channel" fix: the gateway already passes
+    ``metadata=_status_thread_metadata`` to every prompt send, so the only
+    thing the adapter owns is honoring that root.
+    """
+
+    @staticmethod
+    def _posted_payload(adapter) -> dict:
+        # _api_post(path, payload) — payload is the second positional arg.
+        return adapter._api_post.call_args.args[1]
+
+    def _thread_adapter(self):
+        adapter = _make_adapter()
+        adapter._reply_mode = "thread"
+        adapter._api_post = AsyncMock(return_value={"id": "posted"})
+        # _resolve_root_id GETs the candidate post; an empty body means the
+        # candidate is already a thread root, so it is used verbatim.
+        adapter._api_get = AsyncMock(return_value={})
+        return adapter
+
+    @pytest.mark.asyncio
+    async def test_exec_approval_posts_in_thread(self):
+        adapter = self._thread_adapter()
+        await adapter.send_exec_approval(
+            "ch1", "rm -rf /", "s1", metadata={"thread_id": "root123"},
+        )
+        assert self._posted_payload(adapter)["root_id"] == "root123"
+
+    @pytest.mark.asyncio
+    async def test_slash_confirm_posts_in_thread(self):
+        adapter = self._thread_adapter()
+        await adapter.send_slash_confirm(
+            "ch1", "Title", "body", "s1", "cid1", metadata={"thread_id": "root123"},
+        )
+        assert self._posted_payload(adapter)["root_id"] == "root123"
+
+    @pytest.mark.asyncio
+    async def test_update_prompt_posts_in_thread(self):
+        adapter = self._thread_adapter()
+        await adapter.send_update_prompt(
+            "ch1", "Proceed?", metadata={"thread_id": "root123"},
+        )
+        assert self._posted_payload(adapter)["root_id"] == "root123"
+
+    @pytest.mark.asyncio
+    async def test_clarify_buttons_post_in_thread(self):
+        adapter = self._thread_adapter()
+        await adapter.send_clarify(
+            "ch1", "Pick", ["A", "B"], "cl1", "s1", metadata={"thread_id": "root123"},
+        )
+        assert self._posted_payload(adapter)["root_id"] == "root123"
+
+    @pytest.mark.asyncio
+    async def test_clarify_open_ended_posts_in_thread(self):
+        # The open-ended (no choices) clarify path posts plain text, not a
+        # button attachment — it must still honor the thread root.
+        adapter = self._thread_adapter()
+        await adapter.send_clarify(
+            "ch1", "What?", None, "cl1", "s1", metadata={"thread_id": "root123"},
+        )
+        assert self._posted_payload(adapter)["root_id"] == "root123"
+
+    @pytest.mark.asyncio
+    async def test_reply_to_message_id_used_as_thread_root(self):
+        # When the gateway only supplies root_id (e.g. some send paths), it is
+        # honored the same as thread_id.
+        adapter = self._thread_adapter()
+        await adapter.send_exec_approval(
+            "ch1", "cmd", "s1", metadata={"root_id": "root456"},
+        )
+        assert self._posted_payload(adapter)["root_id"] == "root456"
+
+    @pytest.mark.asyncio
+    async def test_reply_root_resolved_to_thread_parent(self):
+        # If the supplied candidate is itself a reply, Mattermost requires the
+        # *parent* root_id — using the reply's own id raises "Invalid RootId".
+        adapter = self._thread_adapter()
+        adapter._api_get = AsyncMock(return_value={"id": "reply789", "root_id": "parent000"})
+        await adapter.send_exec_approval(
+            "ch1", "cmd", "s1", metadata={"thread_id": "reply789"},
+        )
+        assert self._posted_payload(adapter)["root_id"] == "parent000"
+
+    @pytest.mark.asyncio
+    async def test_flat_when_reply_mode_off(self):
+        # reply_mode defaults to "off": even with a thread root in metadata,
+        # no root_id is attached — prompts stay flat in the channel.
+        adapter = _make_adapter()
+        assert adapter._reply_mode != "thread"
+        adapter._api_post = AsyncMock(return_value={"id": "posted"})
+        adapter._api_get = AsyncMock(return_value={})
+        await adapter.send_exec_approval(
+            "ch1", "cmd", "s1", metadata={"thread_id": "root123"},
+        )
+        assert "root_id" not in self._posted_payload(adapter)
+
+    @pytest.mark.asyncio
+    async def test_no_metadata_stays_flat(self):
+        # thread mode but no thread root to attach to → flat, no root_id.
+        adapter = self._thread_adapter()
+        await adapter.send_exec_approval("ch1", "cmd", "s1", metadata=None)
+        assert "root_id" not in self._posted_payload(adapter)
+
+
 class TestPendingActionsCap:
     @pytest.mark.asyncio
     async def test_evicts_oldest_when_cap_reached(self):
