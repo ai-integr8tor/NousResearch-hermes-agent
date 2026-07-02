@@ -12,6 +12,25 @@ def _types(blocks):
     return [b["type"] for b in blocks]
 
 
+def _italic_texts(node):
+    """Recursively collect ``text`` values of every element carrying
+    ``style.italic`` anywhere in a Block Kit structure."""
+    found = []
+    if isinstance(node, dict):
+        style = node.get("style")
+        # ``style`` is a dict on inline text elements ({"italic": True}) but a
+        # bare string on list containers ("bullet"/"ordered") — only inspect
+        # the dict form.
+        if isinstance(style, dict) and style.get("italic"):
+            found.append(node.get("text", ""))
+        for value in node.values():
+            found.extend(_italic_texts(value))
+    elif isinstance(node, list):
+        for item in node:
+            found.extend(_italic_texts(item))
+    return found
+
+
 class TestRenderBlocksBasics:
     def test_empty_returns_none(self):
         assert render_blocks("") is None
@@ -89,6 +108,29 @@ class TestInlineFormatting:
             if el.get("style", {}).get("bold")
         ]
         assert styled, "expected a bold-styled text element in the list item"
+
+    def test_intraword_underscore_not_italic(self):
+        # CommonMark forbids ``_`` emphasis at intra-word positions, so
+        # snake_case identifiers must never open an italic span. Previously the
+        # italic regex ran from the ``_`` in ``max_tokens`` to the ``_`` in
+        # ``top_p``, italicizing ``tokens and top``.
+        blocks = render_blocks("- set max_tokens and top_p")
+        # Walk the rendered rich_text elements (like the bold/boundary tests)
+        # rather than substring-matching ``str(blocks)``: no element anywhere
+        # in the structure may carry ``style.italic`` for this input.
+        assert _italic_texts(blocks) == []
+
+    def test_boundary_underscore_still_italic(self):
+        # ``_`` at word boundaries is legitimate emphasis and must still render.
+        blocks = render_blocks("- a _real italic_ here")
+        rich = [b for b in blocks if b["type"] == "rich_text"][0]
+        section = rich["elements"][0]["elements"][0]
+        styled = [
+            el for el in section["elements"]
+            if el.get("style", {}).get("italic")
+        ]
+        assert styled, "expected an italic-styled element for boundary underscores"
+        assert any("real italic" in el.get("text", "") for el in styled)
 
 
 class TestTables:
