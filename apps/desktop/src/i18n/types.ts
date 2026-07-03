@@ -1458,6 +1458,8 @@ export interface Translations {
     applyingClose: string
     errorTitle: string
     errorBody: string
+    handoffFailedTitle: string
+    handoffFailedBody: string
     notNow: string
     applyStatus: {
       preparing: string
