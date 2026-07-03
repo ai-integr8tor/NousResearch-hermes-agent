@@ -745,6 +745,47 @@ def test_custom_provider_live_model_probe_uses_extra_headers(monkeypatch):
     assert gateway_prov["models"] == ["gateway-model"]
 
 
+def test_switch_model_validation_uses_custom_provider_extra_headers(monkeypatch):
+    """custom_providers[].extra_headers must reach the validation probe."""
+    captured = {}
+
+    def fake_validate(*args, **kwargs):
+        captured.update(kwargs)
+        return {"accepted": True, "persist": True, "recognized": True, "message": None}
+
+    monkeypatch.setattr("hermes_cli.models.validate_requested_model", fake_validate)
+    monkeypatch.setattr("hermes_cli.models.detect_provider_for_model", lambda *a, **k: None)
+    monkeypatch.setattr("hermes_cli.model_switch.get_model_info", lambda *a, **k: None)
+    monkeypatch.setattr("hermes_cli.model_switch.get_model_capabilities", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "hermes_cli.runtime_provider.resolve_runtime_provider",
+        lambda *a, **k: {
+            "api_key": "local-key",
+            "base_url": "http://localhost:8081/v1",
+            "api_mode": "openai_chat",
+        },
+    )
+
+    result = switch_model(
+        raw_input="gateway-model",
+        current_provider="custom:llm-proxy",
+        current_model="old-model",
+        current_base_url="http://localhost:8081/v1",
+        current_api_key="local-key",
+        custom_providers=[
+            {
+                "name": "LLM Proxy",
+                "api_key": "local-key",
+                "base_url": "http://localhost:8081/v1",
+                "extra_headers": {"X-Tenant": "alpha"},
+            }
+        ],
+    )
+
+    assert result.success is True
+    assert captured["request_headers"] == {"X-Tenant": "alpha"}
+
+
 def test_same_endpoint_different_extra_headers_not_collapsed(monkeypatch):
     """Entries sharing (api_url, credential, api_mode) but declaring different
     extra_headers must NOT collapse into one picker row — each is a distinct

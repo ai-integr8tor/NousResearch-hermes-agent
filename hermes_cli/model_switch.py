@@ -1220,12 +1220,18 @@ def switch_model(
 
     # --- Validate ---
     try:
+        validation_headers = _provider_extra_headers(
+            target_provider,
+            user_providers=user_providers,
+            custom_providers=custom_providers,
+        )
         validation = validate_requested_model(
             new_model,
             target_provider,
             api_key=api_key,
             base_url=base_url,
             api_mode=api_mode or None,
+            request_headers=validation_headers or None,
         )
     except Exception as e:
         validation = {
@@ -1367,6 +1373,35 @@ def _extra_headers_from_config(entry: Any) -> dict[str, str]:
     from hermes_cli.config import normalize_extra_headers
 
     return normalize_extra_headers(entry.get("extra_headers"))
+
+
+def _provider_extra_headers(
+    provider: str,
+    *,
+    user_providers: dict | None = None,
+    custom_providers: list[dict[str, Any]] | None = None,
+) -> dict[str, str]:
+    """Return configured extra headers for a resolved provider slug."""
+    resolved = (provider or "").strip().lower()
+    if not resolved:
+        return {}
+
+    if isinstance(user_providers, dict):
+        for key, entry in user_providers.items():
+            if str(key).strip().lower() == resolved:
+                return _extra_headers_from_config(entry)
+
+    if isinstance(custom_providers, list):
+        for entry in custom_providers:
+            if not isinstance(entry, dict):
+                continue
+            name = str(entry.get("name") or "").strip()
+            slug = custom_provider_slug(name) if name else ""
+            if name.lower() == resolved or slug == resolved:
+                headers = _extra_headers_from_config(entry)
+                if headers:
+                    return headers
+    return {}
 
 
 def prewarm_picker_cache_async() -> Optional["_threading.Thread"]:
