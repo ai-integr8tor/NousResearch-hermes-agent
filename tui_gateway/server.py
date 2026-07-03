@@ -2835,6 +2835,7 @@ def _compress_session_history(
     approx_tokens: int | None = None,
     before_messages: list | None = None,
     history_version: int | None = None,
+    force_in_place: bool | None = None,
 ) -> tuple[int, dict]:
     from agent.model_metadata import estimate_request_tokens_rough
 
@@ -2869,6 +2870,7 @@ def _compress_session_history(
         None,
         approx_tokens=approx_tokens,
         focus_topic=focus_topic or None,
+        force_in_place=force_in_place,
     )
     with session["history_lock"]:
         if int(session.get("history_version", 0)) != history_version:
@@ -12478,7 +12480,7 @@ def _mirror_slash_side_effects(sid: str, session: dict, command: str) -> str:
     # worker thread running agent.run_conversation is using.  Parity
     # with the session.compress / session.undo guards and the gateway
     # runner's running-agent /model guard.
-    _MUTATES_WHILE_RUNNING = {"model", "personality", "prompt", "compress"}
+    _MUTATES_WHILE_RUNNING = {"model", "personality", "prompt", "compress", "childcompress"}
     if name in _MUTATES_WHILE_RUNNING and session.get("running"):
         return f"session busy — /interrupt the current turn before running /{name}"
 
@@ -12494,12 +12496,14 @@ def _mirror_slash_side_effects(sid: str, session: dict, command: str) -> str:
             new_prompt = _prompt_text((cfg.get("agent") or {}).get("system_prompt", ""))
             agent.ephemeral_system_prompt = new_prompt or None
             agent._cached_system_prompt = None
-        elif name == "compress" and agent:
+        elif name in {"compress", "childcompress"} and agent:
             # Mirror the session.compress RPC: build a before/after summary so
             # the user gets feedback (#46686). The slash path previously just
             # compressed + emitted session.info and returned "", so the TUI
             # showed no "compressed N → M messages / ~X → ~Y tokens" stats
-            # while CLI and gateway both did.
+            # while CLI and gateway both did. ``/compress --child`` and
+            # ``/childcompress`` use the same mechanics but force the legacy
+            # child-session rotation path even when compression.in_place is on.
             from agent.manual_compression_feedback import summarize_manual_compression
             from agent.model_metadata import estimate_request_tokens_rough
 
@@ -12516,7 +12520,17 @@ def _mirror_slash_side_effects(sid: str, session: dict, command: str) -> str:
                 else 0
             )
 
-            _compress_session_history(session, arg)
+            from hermes_cli.partial_compress import extract_compress_flags
+            arg, _preview, _aggressive, _child_requested = extract_compress_flags(arg)
+            if _preview or _aggressive:
+                return ""
+            _force_in_place = False if name == "childcompress" or _child_requested else None
+
+            _compress_session_history(
+                session,
+                arg,
+                force_in_place=_force_in_place,
+            )
             _sync_session_key_after_compress(sid, session)
 
             with session["history_lock"]:

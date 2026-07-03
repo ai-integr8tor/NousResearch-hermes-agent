@@ -3048,7 +3048,12 @@ class GatewaySlashCommandsMixin:
                 example = t("gateway.footer.example_line", preview=preview)
         return t("gateway.footer.saved", state=state, example=example)
 
-    async def _handle_compress_command(self, event: MessageEvent) -> str:
+    async def _handle_compress_command(
+        self,
+        event: MessageEvent,
+        *,
+        force_in_place: Optional[bool] = None,
+    ) -> str:
         """Handle /compress command -- manually compress conversation context.
 
         Accepts an optional focus topic: ``/compress <focus>`` guides the
@@ -3060,6 +3065,11 @@ class GatewaySlashCommandsMixin:
         (default 2), kept verbatim. Inspired by Claude Code's Rewind
         "Summarize up to here" action (v2.1.139, May 2026,
         https://code.claude.com/docs/en/whats-new/2026-w20).
+
+        ``/compress --child`` and ``/childcompress`` run the same compression
+        operation but force the legacy child-session continuation path for this
+        call, without changing the user's global ``compression.in_place``
+        setting.
         """
         source = event.source
         session_entry = self.session_store.get_or_create_session(source)
@@ -3078,9 +3088,11 @@ class GatewaySlashCommandsMixin:
             summarize_compress_preview,
         )
         _raw_args = (event.get_command_args() or "").strip()
-        # Strip --preview/--dry-run/--aggressive before positional parsing
+        # Strip --preview/--dry-run/--aggressive/--child before positional parsing
         # so the flags coexist with 'here [N]' / focus-topic forms.
-        _raw_args, _preview, _aggressive = extract_compress_flags(_raw_args)
+        _raw_args, _preview, _aggressive, _child_requested = extract_compress_flags(_raw_args)
+        if _child_requested:
+            force_in_place = False
         partial, keep_last, focus_topic = parse_partial_compress_args(_raw_args)
 
         _agg_note = ""
@@ -3201,7 +3213,14 @@ class GatewaySlashCommandsMixin:
                 loop = asyncio.get_running_loop()
                 compressed, _ = await loop.run_in_executor(
                     None,
-                    lambda: tmp_agent._compress_context(head, "", approx_tokens=approx_tokens, focus_topic=focus_topic, force=True)
+                    lambda: tmp_agent._compress_context(
+                        head,
+                        "",
+                        approx_tokens=approx_tokens,
+                        focus_topic=focus_topic,
+                        force=True,
+                        force_in_place=force_in_place,
+                    ),
                 )
 
                 # Re-append the verbatim tail after the compressed head,

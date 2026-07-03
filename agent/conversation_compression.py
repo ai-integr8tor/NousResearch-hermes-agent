@@ -400,8 +400,9 @@ def compress_context(
     task_id: str = "default",
     focus_topic: Optional[str] = None,
     force: bool = False,
+    force_in_place: Optional[bool] = None,
 ) -> Tuple[list, str]:
-    """Compress conversation context and split the session in SQLite.
+    """Compress conversation context in-place or by legacy session rotation.
 
     Args:
         agent: The owning :class:`AIAgent`.
@@ -416,6 +417,11 @@ def compress_context(
             by the manual ``/compress`` slash command so users can retry
             immediately after an auto-compress abort.  Auto-compress
             callers use the default ``False``.
+        force_in_place: Optional one-shot override for the compaction mode.
+            ``None`` follows ``agent.compression_in_place``. ``False`` forces
+            legacy session rotation even when ``compression.in_place`` is
+            enabled (used by ``/compress --child`` and ``/childcompress``).
+            ``True`` forces same-session compaction for this call.
 
     Returns:
         ``(compressed_messages, new_system_prompt)`` tuple.  When
@@ -446,8 +452,15 @@ def compress_context(
     # keeps the SAME session_id — no end_session, no parent_session_id child, no
     # `name #N` renumber, no contextvar/env/logging re-sync, no memory/context-
     # engine session-switch. The conversation keeps one durable id for life,
-    # eliminating the session-rotation bug cluster. Default False during rollout.
-    in_place = bool(getattr(agent, "compression_in_place", False))
+    # eliminating the session-rotation bug cluster. Default True as of #38763.
+    # ``force_in_place`` is a per-call override for explicit UI surfaces such as
+    # ``/compress --child`` that deliberately want the legacy child-session
+    # continuation path without changing the global config.
+    in_place = bool(
+        getattr(agent, "compression_in_place", False)
+        if force_in_place is None
+        else force_in_place
+    )
     # Set True once the in-place DB write actually completes (the DB block can
     # raise and skip it). Surfaced to the gateway via agent._last_compaction_in_place.
     compacted_in_place = False

@@ -5242,6 +5242,7 @@ def test_mirror_slash_side_effects_rejects_mutating_commands_while_running(monke
         ("/personality default", "personality"),
         ("/prompt", "prompt"),
         ("/compress", "compress"),
+        ("/childcompress", "childcompress"),
     ]:
         warning = server._mirror_slash_side_effects("sid", session, cmd)
         assert (
@@ -5315,6 +5316,86 @@ def test_mirror_slash_compress_does_not_prelock_history(monkeypatch):
     assert "Compressed:" in warning
     assert "6 → 1 messages" in warning
     assert "tokens" in warning
+
+
+def test_mirror_slash_childcompress_forces_rotation_override(monkeypatch):
+    """Desktop/TUI /childcompress mirrors /compress but forces legacy child
+    session rotation on the live agent."""
+    import types
+
+    seen: dict[str, object] = {"force_in_place": "unset"}
+    emitted = []
+
+    def _fake_compress(session, focus_topic=None, **kwargs):
+        seen["focus_topic"] = focus_topic
+        seen["force_in_place"] = kwargs.get("force_in_place")
+        session["history"] = [{"role": "user", "content": "summary"}]
+        return (5, {"total": 0})
+
+    monkeypatch.setattr(server, "_compress_session_history", _fake_compress)
+    monkeypatch.setattr(server, "_sync_session_key_after_compress", lambda *_a, **_k: None)
+    monkeypatch.setattr(server, "_session_info", lambda _agent, *a: {"model": "x"})
+    monkeypatch.setattr(server, "_emit", lambda *args: emitted.append(args))
+
+    session = _session(running=False)
+    session["history"] = [{"role": "user", "content": f"m{i}"} for i in range(6)]
+    session["agent"] = types.SimpleNamespace(model="x", _cached_system_prompt="", tools=None)
+
+    warning = server._mirror_slash_side_effects("sid", session, "/childcompress database")
+
+    assert seen["focus_topic"] == "database"
+    assert seen["force_in_place"] is False
+    assert ("session.info", "sid", {"model": "x"}) in emitted
+    assert "Compressed:" in warning
+
+
+def test_mirror_slash_compress_child_flag_forces_rotation_override(monkeypatch):
+    """Desktop/TUI /compress --child strips the flag and forces rotation."""
+    import types
+
+    seen: dict[str, object] = {"force_in_place": "unset"}
+
+    def _fake_compress(_session, focus_topic=None, **kwargs):
+        seen["focus_topic"] = focus_topic
+        seen["force_in_place"] = kwargs.get("force_in_place")
+        _session["history"] = [{"role": "user", "content": "summary"}]
+        return (5, {"total": 0})
+
+    monkeypatch.setattr(server, "_compress_session_history", _fake_compress)
+    monkeypatch.setattr(server, "_sync_session_key_after_compress", lambda *_a, **_k: None)
+    monkeypatch.setattr(server, "_session_info", lambda _agent, *a: {"model": "x"})
+    monkeypatch.setattr(server, "_emit", lambda *_a, **_k: None)
+
+    session = _session(running=False)
+    session["history"] = [{"role": "user", "content": f"m{i}"} for i in range(6)]
+    session["agent"] = types.SimpleNamespace(model="x", _cached_system_prompt="", tools=None)
+
+    server._mirror_slash_side_effects("sid", session, "/compress --child database")
+
+    assert seen["focus_topic"] == "database"
+    assert seen["force_in_place"] is False
+
+
+def test_mirror_slash_compress_preview_is_side_effect_free(monkeypatch):
+    """The live Desktop mirror must not mutate history for preview/dry-run."""
+    import types
+
+    called = {"compress": False}
+
+    def _fake_compress(*_a, **_k):
+        called["compress"] = True
+        return (0, {})
+
+    monkeypatch.setattr(server, "_compress_session_history", _fake_compress)
+
+    session = _session(running=False)
+    session["history"] = [{"role": "user", "content": f"m{i}"} for i in range(6)]
+    session["agent"] = types.SimpleNamespace(model="x", _cached_system_prompt="", tools=None)
+
+    warning = server._mirror_slash_side_effects("sid", session, "/compress --child --preview")
+
+    assert warning == ""
+    assert called["compress"] is False
 
 
 # ---------------------------------------------------------------------------

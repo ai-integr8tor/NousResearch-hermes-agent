@@ -5,8 +5,8 @@ message list and rebuilds the system prompt but keeps the SAME ``session_id``:
 no ``end_session``, no ``parent_session_id`` child row, no ``name #N`` title
 renumber, no flush-cursor reset. This eliminates the session-rotation bug
 cluster (#33618 /goal loss, #14238 lost response, #33907 orphans, #45117 search
-gaps, #42228 null cwd). When the flag is False (default), rotation behaves
-exactly as before.
+gaps, #42228 null cwd). When the flag is False, rotation behaves
+exactly as the explicit opt-out path.
 """
 
 import os
@@ -216,6 +216,42 @@ class TestRotationFallbackWhenFlagOff:
             # Flush cursor reset for the new row.
             assert agent._last_flushed_db_idx == 0
             # Rotation mode does NOT set the in-place signal.
+            assert getattr(agent, "_last_compaction_in_place", False) is False
+
+    def test_force_rotation_override_even_when_configured_in_place(self):
+        """Explicit child compression can force legacy rotation for one call."""
+        from hermes_state import SessionDB
+        from agent.conversation_compression import compress_context
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = SessionDB(db_path=Path(tmp) / "t.db")
+            sid = "20260619_131000_force"
+            _seed(db, sid, "forced")
+            agent = _make_agent(db, sid, in_place=True)
+
+            messages = [{"role": "user", "content": f"m{i}"} for i in range(8)]
+            compress_context(
+                agent,
+                messages,
+                approx_tokens=100_000,
+                system_message="sys",
+                force_in_place=False,
+            )
+
+            new_sid = getattr(agent, "session_id", "")
+            assert new_sid and new_sid != sid
+            parent = db.get_session(sid)
+            assert parent is not None
+            assert parent["end_reason"] == "compression"
+            conn = db._conn
+            assert conn is not None
+            child = conn.execute(
+                "SELECT id, title FROM sessions WHERE parent_session_id = ?",
+                (sid,),
+            ).fetchone()
+            assert child is not None
+            assert child["id"] == new_sid
+            assert child["title"] == "forced #2"
             assert getattr(agent, "_last_compaction_in_place", False) is False
 
 

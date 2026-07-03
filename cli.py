@@ -8602,6 +8602,8 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             self._handle_fast_command(cmd_original)
         elif canonical == "compress":
             self._manual_compress(cmd_original)
+        elif canonical == "childcompress":
+            self._manual_compress(cmd_original, force_in_place=False)
         elif canonical == "usage":
             self._show_usage()
         elif canonical == "credits":
@@ -9287,7 +9289,12 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         self._reasoning_preview_buf = getattr(self, "_reasoning_preview_buf", "") + reasoning_text
         self._flush_reasoning_preview(force=False)
 
-    def _manual_compress(self, cmd_original: str = ""):
+    def _manual_compress(
+        self,
+        cmd_original: str = "",
+        *,
+        force_in_place: Optional[bool] = None,
+    ):
         """Manually trigger context compression on the current conversation.
 
         Two modes:
@@ -9304,6 +9311,10 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
           https://code.claude.com/docs/en/whats-new/2026-w20). Lets the
           user pick the compression boundary instead of leaving it to
           the automatic token-budget heuristic.
+        * ``/compress --child`` / ``/childcompress`` — run the same
+          compression operation but force the legacy child-session
+          continuation path for this call, even when
+          ``compression.in_place`` is enabled globally.
         """
         if not self.conversation_history or len(self.conversation_history) < 4:
             print("(._.) Not enough conversation to compress (need at least 4 messages).")
@@ -9332,9 +9343,11 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             if len(_parts) > 1:
                 raw_args = _parts[1].strip()
 
-        # Strip --preview/--dry-run/--aggressive before positional parsing
+        # Strip --preview/--dry-run/--aggressive/--child before positional parsing
         # so the flags coexist with 'here [N]' / focus-topic forms.
-        raw_args, preview, aggressive = extract_compress_flags(raw_args)
+        raw_args, preview, aggressive, child_requested = extract_compress_flags(raw_args)
+        if child_requested:
+            force_in_place = False
         partial, keep_last, focus_topic = parse_partial_compress_args(raw_args)
         focus_topic = focus_topic or ""
 
@@ -9423,6 +9436,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                     approx_tokens=approx_tokens,
                     focus_topic=focus_topic or None,
                     force=True,
+                    force_in_place=force_in_place,
                 )
                 # Re-append the verbatim tail after the compressed head.
                 # The split guarantees `tail` begins on a user turn, so the

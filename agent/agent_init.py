@@ -1456,7 +1456,7 @@ def init_agent(
     # agent/conversation_compression.py. Consumed by compress_context(), not the
     # compressor, so it rides on the agent.
     compression_in_place = is_truthy_value(
-        _compression_cfg.get("in_place"), default=False
+        _compression_cfg.get("in_place"), default=True
     )
 
     # Read optional explicit context_length override for the auxiliary
