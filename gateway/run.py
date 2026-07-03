@@ -3951,6 +3951,79 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
     def _running_agent_count(self) -> int:
         return len(self._running_agents)
 
+    def _active_agent_details(self) -> list[dict[str, Any]]:
+        """Return bounded, content-free diagnostics for active gateway turns."""
+        now = time.time()
+        running_agents = getattr(self, "_running_agents", {}) or {}
+        running_started = getattr(self, "_running_agents_ts", {}) or {}
+        session_entries = {}
+        try:
+            store = getattr(self, "session_store", None)
+            session_entries = getattr(store, "_entries", {}) or {}
+        except Exception:
+            session_entries = {}
+
+        details: list[dict[str, Any]] = []
+        for session_key, agent in running_agents.items():
+            started = running_started.get(session_key, now)
+            try:
+                elapsed = max(0, int(now - float(started)))
+            except (TypeError, ValueError):
+                elapsed = 0
+
+            row: dict[str, Any] = {
+                "session_key": session_key,
+                "elapsed_seconds": elapsed,
+                "state": (
+                    "starting"
+                    if agent is _AGENT_PENDING_SENTINEL
+                    else "running"
+                ),
+            }
+
+            entry = (
+                session_entries.get(session_key)
+                if isinstance(session_entries, dict)
+                else None
+            )
+            source = getattr(entry, "origin", None) if entry is not None else None
+            platform = getattr(source, "platform", None)
+            if platform is not None:
+                row["platform"] = getattr(platform, "value", str(platform))
+            elif isinstance(session_key, str):
+                parts = session_key.split(":")
+                if len(parts) >= 3:
+                    row["platform"] = parts[2]
+            for attr in ("chat_id", "user_id"):
+                value = getattr(source, attr, None)
+                if value:
+                    row[attr] = value
+
+            if agent is not _AGENT_PENDING_SENTINEL:
+                session_id = getattr(agent, "session_id", "")
+                model = getattr(agent, "model", "")
+                if session_id:
+                    row["session_id"] = session_id
+                if model:
+                    row["model"] = model
+                if hasattr(agent, "get_activity_summary"):
+                    try:
+                        summary = agent.get_activity_summary() or {}
+                    except Exception:
+                        summary = {}
+                    for field in (
+                        "seconds_since_activity",
+                        "last_activity_desc",
+                        "current_tool",
+                        "api_call_count",
+                        "max_iterations",
+                    ):
+                        value = summary.get(field)
+                        if value not in (None, ""):
+                            row[field] = value
+            details.append(row)
+        return details
+
     # ── scale-to-zero idle detection / dormant-quiesce (Phase 0) ──────────────
     # The gateway-side BEHAVIOUR that consumes the relay scale-to-zero primitives
     # (gateway-gateway Phase 5). Pure logic lives in gateway/scale_to_zero.py; the
@@ -4339,6 +4412,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 exit_reason=exit_reason,
                 restart_requested=self._restart_requested,
                 active_agents=self._running_agent_count(),
+                active_agent_details=self._active_agent_details(),
             )
         except Exception:
             pass
@@ -4361,7 +4435,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         """
         try:
             from gateway.status import write_runtime_status
-            write_runtime_status(active_agents=self._running_agent_count())
+            write_runtime_status(
+                active_agents=self._running_agent_count(),
+                active_agent_details=self._active_agent_details(),
+            )
         except Exception:
             pass
 
@@ -18667,6 +18744,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     if done:
                         response = _executor_task.result()
                         break
+                    self._persist_active_agents()
                     # Backup interrupt check: if the monitor task died or
                     # missed the interrupt, catch it here.
                     if not _interrupt_detected.is_set() and session_key:
@@ -18697,6 +18775,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     if done:
                         response = _executor_task.result()
                         break
+                    self._persist_active_agents()
                     # Agent still running — check inactivity.
                     _agent_ref = agent_holder[0]
                     _idle_secs = 0.0

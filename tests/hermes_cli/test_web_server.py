@@ -4838,12 +4838,28 @@ class TestGatewayBusyReadout:
             "gateway_state": "running",
             "platforms": {},
             "active_agents": 2,
+            "active_agent_details": [
+                {
+                    "session_key": "agent:main:feishu:dm:c1:u1",
+                    "platform": "feishu",
+                    "seconds_since_activity": 367.5,
+                    "last_activity_desc": "api_call",
+                }
+            ],
             # A deliberately stale timestamp: busy must NOT depend on it.
             "updated_at": "2020-01-01T00:00:00+00:00",
         })
 
         data = self.client.get("/api/status").json()
         assert data["active_agents"] == 2
+        assert data["active_agent_details"] == [
+            {
+                "session_key": "agent:main:feishu:dm:c1:u1",
+                "platform": "feishu",
+                "seconds_since_activity": 367.5,
+                "last_activity_desc": "api_call",
+            }
+        ]
         assert data["gateway_busy"] is True
         assert data["gateway_drainable"] is True
 

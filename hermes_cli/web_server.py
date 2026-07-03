@@ -79,6 +79,7 @@ from gateway.status import (
     derive_gateway_drainable,
     get_running_pid,
     get_runtime_status_running_pid,
+    parse_active_agent_details,
     parse_active_agents,
     read_runtime_status,
 )
@@ -2263,6 +2264,9 @@ async def get_status(profile: Optional[str] = None):
         # keys off gateway_running (a live PID/health probe), NEVER
         # gateway_updated_at — a healthy idle gateway never advances that.
         active_agents = parse_active_agents((runtime or {}).get("active_agents", 0))
+        active_agent_details = parse_active_agent_details(
+            (runtime or {}).get("active_agent_details", [])
+        )
         gateway_busy = derive_gateway_busy(
             gateway_running=gateway_running,
             gateway_state=gateway_state,
@@ -2312,6 +2316,7 @@ async def get_status(profile: Optional[str] = None):
             "gateway_exit_reason": gateway_exit_reason,
             "gateway_updated_at": gateway_updated_at,
             "active_agents": active_agents,
+            "active_agent_details": active_agent_details,
             "gateway_busy": gateway_busy,
             "gateway_drainable": gateway_drainable,
             "restart_drain_timeout": restart_drain_timeout,
