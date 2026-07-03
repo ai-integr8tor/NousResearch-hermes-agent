@@ -1083,6 +1083,7 @@ export function DesktopController() {
             onConfigSaved={() => {
               void refreshHermesConfig()
               void refreshCurrentModel()
+              void window.hermesDesktop.refreshPowerSaveBlocker?.().catch(() => undefined)
               void queryClient.invalidateQueries({ queryKey: ['model-options'] })
             }}
             onMainModelChanged={(provider, model) => {
