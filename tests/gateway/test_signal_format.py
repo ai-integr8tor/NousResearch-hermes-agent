@@ -440,8 +440,9 @@ class TestMarkdownStripPatch:
 # ===========================================================================
 
 class TestSignalStreamingPatch:
-    """Tests for signal-streaming-patch: cursor suppression and edit support.
-    
+    """Tests for signal-streaming-patch: cursor suppression, edit support,
+    and long-message preservation.
+
     These verify the adapter-level properties that prevent the streaming
     cursor from leaking into Signal messages.
     """

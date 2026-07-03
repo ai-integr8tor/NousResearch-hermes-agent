@@ -1070,6 +1070,10 @@ class TestSignalStreamingCapabilities:
 class TestSignalSendReturnsMessageId:
     """Signal send() should not pretend sent messages are editable."""
 
+    def test_signal_declares_adapter_side_chunking(self, monkeypatch):
+        adapter = _make_signal_adapter(monkeypatch)
+        assert adapter.splits_long_messages is True
+
     @pytest.mark.asyncio
     async def test_send_returns_none_message_id_even_with_timestamp(self, monkeypatch):
         adapter = _make_signal_adapter(monkeypatch)
@@ -1105,6 +1109,21 @@ class TestSignalSendReturnsMessageId:
 
         assert result.success is True
         assert result.message_id is None
+
+    @pytest.mark.asyncio
+    async def test_send_chunks_long_messages_without_truncation_footer(self, monkeypatch):
+        adapter = _make_signal_adapter(monkeypatch)
+        mock_rpc, captured = _stub_rpc({"timestamp": 1712345678000})
+        adapter._rpc = mock_rpc
+        adapter._stop_typing_indicator = AsyncMock()
+
+        long_content = "x" * 9005
+        result = await adapter.send(chat_id="+155****4567", content=long_content)
+
+        assert result.success is True
+        assert len(captured) == 2
+        assert all("truncated, full output saved to" not in call["params"]["message"] for call in captured)
+        assert "".join(call["params"]["message"].replace(" (1/2)", "").replace(" (2/2)", "") for call in captured) == long_content
 
 
 class TestSignalSendResultValidation:
