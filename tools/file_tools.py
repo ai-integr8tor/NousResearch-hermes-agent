@@ -5,6 +5,7 @@ import errno
 import json
 import logging
 import os
+import re
 import threading
 from pathlib import Path
 
@@ -532,6 +533,42 @@ def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None
             f"Refusing to write to Hermes config file: {filepath}\n"
             "Agent cannot modify security-sensitive configuration. "
             "Edit ~/.hermes/config.yaml directly or use 'hermes config' instead."
+        )
+    return None
+
+
+# ---------------------------------------------------------------------------
+# .env redaction-corruption guard
+# ---------------------------------------------------------------------------
+# When the agent reads a .env file through Hermes tools, secrets are replaced
+# with *** by the redaction layer.  If the agent then writes that redacted
+# content back to the same .env file, credentials are permanently destroyed.
+# Detect this scenario and refuse the write.
+_REDACTED_ENV_RE = re.compile(
+    r"^[A-Z][A-Z0-9_]*=\*{3,}\s*$",
+    re.MULTILINE,
+)
+
+
+def _check_redacted_env_write(filepath: str, content: str) -> str | None:
+    """Return an error message if content looks like a redacted .env file."""
+    try:
+        resolved = str(Path(filepath).resolve())
+    except (OSError, ValueError):
+        resolved = filepath
+    name = os.path.basename(resolved)
+    if name not in (".env", ".env.local", ".env.production", ".env.development"):
+        return None
+    # If ANY line in the content is a redacted ENV assignment, the content
+    # was likely read through the redaction layer.
+    if _REDACTED_ENV_RE.search(content):
+        return (
+            f"Refusing to write to {name}: the content contains redacted "
+            "secret values (***). Hermes redacts secrets when reading .env "
+            "files to prevent credential exfiltration. Writing redacted "
+            "content back would permanently destroy your credentials.\n"
+            "To edit .env files, use the terminal tool (e.g. "
+            "`echo KEY=VALUE >> .env`) or edit the file directly."
         )
     return None
 
@@ -1493,6 +1530,9 @@ def write_file_tool(path: str, content: str, task_id: str = "default",
     sensitive_err = _check_sensitive_path(path, task_id)
     if sensitive_err:
         return tool_error(sensitive_err)
+    redacted_env_err = _check_redacted_env_write(path, content)
+    if redacted_env_err:
+        return tool_error(redacted_env_err)
     if not cross_profile:
         cross_warning = _check_cross_profile_path(path, task_id)
         if cross_warning:
