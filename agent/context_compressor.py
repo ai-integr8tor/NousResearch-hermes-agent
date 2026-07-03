@@ -2269,19 +2269,17 @@ This compaction should PRIORITISE preserving all information related to the focu
         there's no need to keep re-protecting them: decay to 0 (the system
         prompt is still always protected separately by _protect_head_size).
         After a restart, infer that decayed state from any persisted handoff
-        summary that would otherwise sit inside the protected head.
+        summary in the transcript; disk-persisted restarts rely on the content
+        prefix, while the metadata branch covers in-process handoff messages.
         """
         if self.compression_count >= 1 or self._previous_summary:
             return 0
         if messages and self.protect_first_n > 0:
             first_non_system = 1 if messages[0].get("role") == "system" else 0
-            protected = messages[
-                first_non_system:first_non_system + self.protect_first_n
-            ]
             if any(
                 self._has_compressed_summary_metadata(msg)
                 or self._is_context_summary_content(msg.get("content"))
-                for msg in protected
+                for msg in messages[first_non_system:]
             ):
                 return 0
         return self.protect_first_n
@@ -2925,7 +2923,7 @@ This compaction should PRIORITISE preserving all information related to the focu
         # Anthropic unconditionally rejects requests whose first message
         # is not role=user, so we must pin the summary to "user" and
         # prevent the flip logic below from reverting it (#52160).
-        _force_user_leading = last_head_role == "system"
+        _force_user_leading = compress_start == 0 or last_head_role == "system"
         # Pick a role that avoids consecutive same-role with both neighbors.
         # Priority: avoid colliding with head (already committed), then tail.
         if last_head_role in {"assistant", "tool"} or _force_user_leading:
