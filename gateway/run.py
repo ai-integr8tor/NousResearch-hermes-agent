@@ -15941,20 +15941,30 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         try:
             from aiohttp import ClientSession as _AioClientSession, ClientTimeout
         except ImportError:
+            error = "Proxy mode requires aiohttp. Install with: pip install aiohttp"
             return {
-                "final_response": "⚠️ Proxy mode requires aiohttp. Install with: pip install aiohttp",
+                "final_response": f"⚠️ {error}",
                 "messages": [],
                 "api_calls": 0,
                 "tools": [],
+                "failed": True,
+                "completed": False,
+                "error": error,
+                "agent_persisted": False,
             }
 
         proxy_url = self._get_proxy_url()
         if not proxy_url:
+            error = "Proxy URL not configured (GATEWAY_PROXY_URL or gateway.proxy_url)"
             return {
-                "final_response": "⚠️ Proxy URL not configured (GATEWAY_PROXY_URL or gateway.proxy_url)",
+                "final_response": f"⚠️ {error}",
                 "messages": [],
                 "api_calls": 0,
                 "tools": [],
+                "failed": True,
+                "completed": False,
+                "error": error,
+                "agent_persisted": False,
             }
 
         proxy_key = os.getenv("GATEWAY_PROXY_KEY", "").strip()
@@ -16097,15 +16107,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 ) as resp:
                     if resp.status != 200:
                         error_text = await resp.text()
+                        error = f"Proxy error ({resp.status}): {error_text[:300]}"
                         logger.warning(
                             "Proxy error (%d) from %s: %s",
                             resp.status, proxy_url, error_text[:500],
                         )
                         return {
-                            "final_response": f"⚠️ Proxy error ({resp.status}): {error_text[:300]}",
+                            "final_response": f"⚠️ {error}",
                             "messages": [],
                             "api_calls": 0,
                             "tools": [],
+                            "failed": True,
+                            "completed": False,
+                            "error": error,
+                            "agent_persisted": False,
                         }
 
                     # Parse SSE stream
@@ -16157,11 +16172,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         except Exception as e:
             logger.error("Proxy connection error to %s: %s", proxy_url, e)
             if not full_response:
+                error = f"Proxy connection error: {e}"
                 return {
-                    "final_response": f"⚠️ Proxy connection error: {e}",
+                    "final_response": f"⚠️ {error}",
                     "messages": [],
                     "api_calls": 0,
                     "tools": [],
+                    "failed": True,
+                    "completed": False,
+                    "error": error,
+                    "agent_persisted": False,
                 }
             # Partial response — return what we got
         finally:
@@ -17267,12 +17287,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     model, runtime_kwargs.get("provider"), session_key or "",
                 )
             except Exception as exc:
+                error = f"Provider authentication failed: {exc}"
                 return {
-                    "final_response": f"⚠️ Provider authentication failed: {exc}",
+                    "final_response": f"⚠️ {error}",
                     "messages": [],
                     "api_calls": 0,
                     "tools": [],
                     "failed": True,
+                    "completed": False,
+                    "error": error,
+                    "agent_persisted": False,
                 }
 
             pr = self._provider_routing
