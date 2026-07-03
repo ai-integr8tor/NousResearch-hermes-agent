@@ -281,3 +281,5 @@ def test_sanitize_reasoning_override():
         "enabled": True,
         "effort": "xhigh",
     }
+    assert sanitize_reasoning_override({"enabled": "false", "effort": "xhigh"}) is None
+    assert sanitize_reasoning_override({"enabled": True, "effort": "weird"}) is None

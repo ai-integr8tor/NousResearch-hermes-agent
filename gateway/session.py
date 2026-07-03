@@ -583,6 +583,7 @@ PERSISTABLE_MODEL_OVERRIDE_KEYS = ("model", "provider", "base_url")
 
 # Keys of a /reasoning session override that are safe to persist to disk.
 PERSISTABLE_REASONING_OVERRIDE_KEYS = ("enabled", "effort")
+_VALID_REASONING_OVERRIDE_EFFORTS = {"minimal", "low", "medium", "high", "xhigh"}
 
 
 def sanitize_reasoning_override(override: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -590,16 +591,22 @@ def sanitize_reasoning_override(override: Optional[Dict[str, Any]]) -> Optional[
 
     Reasoning overrides do not contain credentials, but still sanitize the shape
     so arbitrary JSON written to ``sessions.json`` cannot pollute runtime config.
+    Only accept the bool shape written by ``parse_reasoning_effort``; strings
+    like ``"false"`` are rejected instead of being coerced truthy.
     """
     if not isinstance(override, dict):
         return None
     cleaned: Dict[str, Any] = {}
-    if "enabled" in override:
-        cleaned["enabled"] = bool(override["enabled"])
-    effort = override.get("effort")
-    if effort not in (None, ""):
+    enabled = override.get("enabled")
+    if not isinstance(enabled, bool):
+        return None
+    cleaned["enabled"] = enabled
+    if enabled:
+        effort = override.get("effort")
+        if effort not in _VALID_REASONING_OVERRIDE_EFFORTS:
+            return None
         cleaned["effort"] = str(effort)
-    return cleaned or None
+    return {key: cleaned[key] for key in PERSISTABLE_REASONING_OVERRIDE_KEYS if key in cleaned}
 
 
 def sanitize_model_override(override: Optional[Dict[str, Any]]) -> Optional[Dict[str, str]]:
