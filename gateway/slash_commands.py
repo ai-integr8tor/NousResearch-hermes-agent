@@ -32,7 +32,7 @@ from typing import Any, Optional, Union
 from agent.account_usage import fetch_account_usage, render_account_usage_lines
 from agent.i18n import t
 from gateway.config import HomeChannel, Platform, PlatformConfig
-from gateway.platforms.base import EphemeralReply, MessageEvent, MessageType
+from gateway.platforms.base import EphemeralReply, MessageEvent, MessageType, PrivateReply
 from gateway.session import (
     SessionSource,
     build_session_key,
@@ -1202,8 +1202,8 @@ class GatewaySlashCommandsMixin:
         if self._restart_requested or self._draining:
             count = self._running_agent_count()
             if count:
-                return t("gateway.draining", count=count)
-            return EphemeralReply(t("gateway.restart.in_progress"))
+                return PrivateReply(t("gateway.draining", count=count), ttl_seconds=0)
+            return PrivateReply(t("gateway.restart.in_progress"), ttl_seconds=0)
 
         # Save the requester's routing info so the new gateway process can
         # notify them once it comes back online.
@@ -1213,6 +1213,10 @@ class GatewaySlashCommandsMixin:
                 "chat_id": event.source.chat_id,
                 "chat_type": event.source.chat_type,
             }
+            if event.source.user_id:
+                notify_data["user_id"] = event.source.user_id
+            if event.source.user_name:
+                notify_data["user_name"] = event.source.user_name
             if event.source.thread_id:
                 notify_data["thread_id"] = event.source.thread_id
             if event.message_id:
@@ -1277,8 +1281,8 @@ class GatewaySlashCommandsMixin:
         else:
             self.request_restart(detached=True, via_service=False)
         if active_agents:
-            return t("gateway.draining", count=active_agents)
-        return EphemeralReply(t("gateway.restart.restarting"))
+            return PrivateReply(t("gateway.draining", count=active_agents), ttl_seconds=0)
+        return PrivateReply(t("gateway.restart.restarting"), ttl_seconds=0)
 
     async def _handle_version_command(self, event: MessageEvent) -> str:
         """Handle /version — show the running Hermes Agent version."""
