@@ -562,6 +562,7 @@ export const en: Translations = {
     operations: "Operations",
     doctor: "Doctor",
     runDoctor: "Run doctor",
+    openConsole: "Open console",
     securityAudit: "Security audit",
     backup: "Backup",
     createBackup: "Create backup",

@@ -551,6 +551,7 @@ export const ar: Translations = {
     operations: "العمليات",
     doctor: "التشخيص",
     runDoctor: "تشغيل التشخيص",
+    openConsole: "فتح وحدة التحكّم",
     securityAudit: "التدقيق الأمني",
     backup: "النسخ الاحتياطي",
     createBackup: "إنشاء نسخة احتياطية",
