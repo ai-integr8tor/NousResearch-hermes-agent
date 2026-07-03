@@ -643,6 +643,30 @@ class TestRateLimitCooldown:
         result = agent._restore_primary_runtime()
         assert result is False
         assert agent._fallback_activated is True  # still on fallback
+        assert agent._fallback_index == 0  # #57582: fresh chain next failure
+
+    def test_exhausted_chain_resets_index_even_when_cooldown_blocks_restore(self):
+        """Prior-turn chain exhaustion must not strand _fallback_index (#57582)."""
+        agent = _make_agent(
+            fallback_model=[
+                {"provider": "openrouter", "model": "model-a"},
+                {"provider": "anthropic", "model": "model-b"},
+            ],
+        )
+        mock_client = _mock_resolve()
+        with patch("agent.auxiliary_client.resolve_provider_client", return_value=(mock_client, None)):
+            assert agent._try_activate_fallback() is True
+            assert agent._try_activate_fallback() is True
+            assert agent._try_activate_fallback() is False
+
+        assert agent._fallback_index == 2
+        assert agent._fallback_activated is True
+        agent._rate_limited_until = time.monotonic() + 60
+
+        assert agent._restore_primary_runtime() is False
+        assert agent._fallback_activated is True
+        assert agent._fallback_index == 0
+        assert agent._has_pending_fallback() is True
 
     def test_restore_allowed_after_cooldown_expires(self):
         """Once the cooldown window passes, restore proceeds normally."""

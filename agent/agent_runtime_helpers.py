@@ -1109,15 +1109,13 @@ def restore_primary_runtime(agent) -> bool:
     The gateway caches agents across messages (``_agent_cache`` in
     ``gateway/run.py``), so this restoration IS needed there too.
     """
+    # Each turn gets a fresh walk through the fallback chain (#57582).
+    # Prior-turn exhaustion must not strand index >= len(chain) across
+    # unrelated later failures — even when rate-limit cooldown blocks the
+    # actual primary swap below.
+    agent._fallback_index = 0
+
     if not agent._fallback_activated:
-        # Reset the chain index even when no fallback was activated this
-        # turn.  Without this, a turn where _try_activate_fallback() was
-        # called but returned False (chain exhausted or provider not
-        # configured) leaves _fallback_index >= len(_fallback_chain) while
-        # _fallback_activated stays False.  The next turn skips this block
-        # entirely, stranding the index and silently blocking all future
-        # fallback attempts for the session.  Fixes #20465.
-        agent._fallback_index = 0
         return False
 
     if getattr(agent, "_rate_limited_until", 0) > time.monotonic():
