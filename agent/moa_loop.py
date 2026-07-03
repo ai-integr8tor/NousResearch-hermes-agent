@@ -214,11 +214,20 @@ def _run_reference(
         # trimmed view (_reference_messages) already strips the agent's own
         # system prompt, so this is the only system message the reference sees.
         messages = [{"role": "system", "content": _REFERENCE_SYSTEM_PROMPT}, *ref_messages]
+        # Optional per-slot reasoning effort (preset key ``reasoning_effort``
+        # on a reference slot, preserved by moa_config._clean_slot). References
+        # are advisors, so presets commonly dial their thinking down ("low")
+        # without touching the acting aggregator's reasoning config. Passed via
+        # extra_body so backends that don't support it simply reject/ignore it
+        # per their normal handling — and a rejected reference degrades to a
+        # labelled note, never aborting the MoA turn.
+        effort = str(slot.get("reasoning_effort") or "").strip().lower()
         response = call_llm(
             task="moa_reference",
             messages=messages,
             temperature=temperature,
             max_tokens=max_tokens,
+            extra_body={"reasoning_effort": effort} if effort else None,
             **runtime,
         )
         usage = CanonicalUsage()
