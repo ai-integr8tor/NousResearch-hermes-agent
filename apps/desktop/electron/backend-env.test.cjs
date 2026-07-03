@@ -49,7 +49,7 @@ test('desktop backend PATH preserves first occurrence and avoids duplicates', ()
   )
 })
 
-test('buildDesktopBackendEnv extends PYTHONPATH and backend PATH together', () => {
+test('buildDesktopBackendEnv leaves PYTHONPATH unset and builds backend PATH', () => {
   const env = buildDesktopBackendEnv({
     hermesHome: '/Users/test/.hermes',
     pythonPathEntries: ['/repo/hermes-agent'],
@@ -62,7 +62,7 @@ test('buildDesktopBackendEnv extends PYTHONPATH and backend PATH together', () =
     pathModule: path.posix
   })
 
-  assert.equal(env.PYTHONPATH, '/repo/hermes-agent:/existing/pythonpath')
+  assert.equal(env.PYTHONPATH, undefined)
   assert.ok(env.PATH.startsWith('/Users/test/.hermes/node/bin:/Users/test/.hermes/hermes-agent/venv/bin:'))
   assert.ok(env.PATH.includes('/opt/homebrew/bin'))
 })
@@ -98,6 +98,7 @@ test('Windows PATH casing and delimiter are preserved without POSIX sane entries
   assert.ok(env.Path.includes('\\venv\\Scripts;'))
   assert.ok(env.Path.includes(';C:\\Windows\\System32;C:\\Windows'))
   assert.equal(env.Path.includes('/opt/homebrew/bin'), false)
+  assert.equal(env.PYTHONPATH, undefined)
 })
 
 test('appendUniquePathEntries drops empty entries and keeps first occurrence', () => {
