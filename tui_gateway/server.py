@@ -2750,7 +2750,6 @@ def _apply_model_switch(
                 f"Model switch to {result.new_model} failed ({exc}); "
                 f"staying on {getattr(agent, 'model', current_model)}."
             ) from exc
-        _restart_slash_worker(sid, session)
         _persist_live_session_runtime(session)
         _persist_live_session_system_prompt(session)
         _append_model_switch_marker(
@@ -2781,6 +2780,13 @@ def _apply_model_switch(
         }
     if persist_global:
         _persist_model_switch(result)
+    # Restart the slash worker (if any) so it picks up the new model/provider.
+    # When there's no in-process agent (slash_worker mode — agent is None), the
+    # actual agent lives in the worker subprocess and must be rebuilt via its
+    # session_key + updated model_override / config to reflect the switch.
+    # When agent is present, the in-place swap already updated it above; this
+    # call creates a fresh worker that will read the new model on next commands.
+    _restart_slash_worker(sid, session)
     return {
         "value": result.new_model,
         "warning": result.warning_message or "",
