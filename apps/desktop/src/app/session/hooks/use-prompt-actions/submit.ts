@@ -112,9 +112,13 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
         return false
       }
 
+      const targetStoredSessionId = options?.storedSessionId ?? selectedStoredSessionIdRef.current
+      const targetIsCurrentView = !targetStoredSessionId || targetStoredSessionId === selectedStoredSessionIdRef.current
+      let sessionId: null | string = options?.sessionId ?? activeSessionId
+
       // One submit in flight per session — drop any concurrent re-fire so a
       // stalled turn can't stack the same prompt into multiple real turns.
-      const submitLockKey = selectedStoredSessionIdRef.current || activeSessionId || '__pending_new__'
+      const submitLockKey = targetStoredSessionId || sessionId || '__pending_new__'
 
       if (_submitInFlight.has(submitLockKey)) {
         return false
@@ -141,9 +145,12 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
 
       const releaseBusy = () => {
         releaseSubmitLock()
-        setMutableRef(busyRef, false)
-        setBusy(false)
-        setAwaitingResponse(false)
+
+        if (targetIsCurrentView) {
+          setMutableRef(busyRef, false)
+          setBusy(false)
+          setAwaitingResponse(false)
+        }
       }
 
       // Idempotent optimistic insert — re-running with the resolved sessionId
@@ -165,7 +172,7 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
             // (what made drained-after-interrupt sends go silent).
             interrupted: false
           }),
-          selectedStoredSessionIdRef.current
+          targetStoredSessionId
         )
 
       // After sync rewrites refs, refresh the optimistic message in place so the
@@ -177,12 +184,14 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
             ...state,
             messages: state.messages.map(message => (message.id === optimisticId ? buildUserMessage() : message))
           }),
-          selectedStoredSessionIdRef.current
+          targetStoredSessionId
         )
 
       const dropOptimistic = (sid: null | string) => {
         if (!sid) {
-          setMessages(current => current.filter(m => m.id !== optimisticId))
+          if (targetIsCurrentView) {
+            setMessages(current => current.filter(m => m.id !== optimisticId))
+          }
 
           return
         }
@@ -196,30 +205,48 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
             awaitingResponse: false,
             pendingBranchGroup: null
           }),
-          selectedStoredSessionIdRef.current
+          targetStoredSessionId
         )
       }
 
-      setMutableRef(busyRef, true)
-      setBusy(true)
-      setAwaitingResponse(true)
-      clearNotifications()
+      if (targetIsCurrentView) {
+        setMutableRef(busyRef, true)
+        setBusy(true)
+        setAwaitingResponse(true)
+      }
 
-      let sessionId: null | string = activeSessionId
+      if (targetIsCurrentView) {
+        clearNotifications()
+      }
 
       if (sessionId) {
         seedOptimistic(sessionId)
-      } else {
+      } else if (!targetStoredSessionId) {
         setMessages(current => [...current, buildUserMessage()])
       }
 
       if (!sessionId) {
         try {
-          sessionId = await createBackendSessionForSend(visibleText)
+          if (targetStoredSessionId) {
+            const resumed = await requestGateway<{ session_id: string }>('session.resume', {
+              session_id: targetStoredSessionId
+            })
+
+            sessionId = resumed?.session_id ?? null
+
+            if (sessionId && targetIsCurrentView) {
+              activeSessionIdRef.current = sessionId
+            }
+          } else {
+            sessionId = await createBackendSessionForSend(visibleText)
+          }
         } catch (err) {
           dropOptimistic(null)
           releaseBusy()
-          notifyError(err, copy.sessionUnavailable)
+
+          if (targetIsCurrentView) {
+            notifyError(err, copy.sessionUnavailable)
+          }
 
           return false
         }
@@ -227,7 +254,10 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
         if (!sessionId) {
           dropOptimistic(null)
           releaseBusy()
-          notify({ kind: 'error', title: copy.sessionUnavailable, message: copy.createSessionFailed })
+
+          if (targetIsCurrentView) {
+            notify({ kind: 'error', title: copy.sessionUnavailable, message: copy.createSessionFailed })
+          }
 
           return false
         }
@@ -257,16 +287,21 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
             requestGateway('prompt.submit', { session_id: sessionId, text }, PROMPT_SUBMIT_REQUEST_TIMEOUT_MS)
           )
         } catch (firstErr) {
-          if (isSessionNotFoundError(firstErr) && selectedStoredSessionIdRef.current) {
+          const recoverStoredSessionId = targetStoredSessionId ?? selectedStoredSessionIdRef.current
+
+          if (isSessionNotFoundError(firstErr) && recoverStoredSessionId) {
             // Re-register the session in the gateway and get a fresh live ID.
             const resumed = await requestGateway<{ session_id: string }>('session.resume', {
-              session_id: selectedStoredSessionIdRef.current
+              session_id: recoverStoredSessionId
             })
 
             const recoveredId = resumed?.session_id
 
             if (recoveredId) {
-              activeSessionIdRef.current = recoveredId
+              if (targetIsCurrentView) {
+                activeSessionIdRef.current = recoveredId
+              }
+
               await withSessionBusyRetry(() =>
                 requestGateway('prompt.submit', { session_id: recoveredId, text }, PROMPT_SUBMIT_REQUEST_TIMEOUT_MS)
               )
@@ -303,31 +338,37 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
 
         const message = inlineErrorMessage(err, copy.promptFailed)
 
-        updateSessionState(sessionId, state => ({
-          ...state,
-          messages: [
-            ...state.messages,
-            {
-              id: `assistant-error-${Date.now()}`,
-              role: 'assistant',
-              parts: [],
-              error: message || copy.promptFailed,
-              branchGroupId: state.pendingBranchGroup ?? undefined
-            }
-          ],
-          busy: false,
-          awaitingResponse: false,
-          pendingBranchGroup: null,
-          sawAssistantPayload: true
-        }))
+        updateSessionState(
+          sessionId,
+          state => ({
+            ...state,
+            messages: [
+              ...state.messages,
+              {
+                id: `assistant-error-${Date.now()}`,
+                role: 'assistant',
+                parts: [],
+                error: message || copy.promptFailed,
+                branchGroupId: state.pendingBranchGroup ?? undefined
+              }
+            ],
+            busy: false,
+            awaitingResponse: false,
+            pendingBranchGroup: null,
+            sawAssistantPayload: true
+          }),
+          targetStoredSessionId
+        )
 
-        if (isProviderSetupError(err)) {
+        if (targetIsCurrentView && isProviderSetupError(err)) {
           requestDesktopOnboarding(copy.providerCredentialRequired)
 
           return false
         }
 
-        notifyError(err, copy.promptFailed)
+        if (targetIsCurrentView) {
+          notifyError(err, copy.promptFailed)
+        }
 
         return false
       }

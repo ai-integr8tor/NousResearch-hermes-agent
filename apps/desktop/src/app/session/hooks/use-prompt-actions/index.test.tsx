@@ -8,6 +8,8 @@ import { $composerAttachments, $composerDraft, type ComposerAttachment, setCompo
 import { $busy, $connection, $messages, $sessions, setSessions } from '@/store/session'
 import type { SessionInfo } from '@/types/hermes'
 
+import type { SubmitTextOptions } from './utils'
+
 import { uploadComposerAttachment, usePromptActions } from '.'
 
 vi.mock('@/hermes', () => ({
@@ -47,11 +49,12 @@ interface HarnessHandle {
   cancelRun: () => Promise<void>
   restoreToMessage: (messageId: string, target?: { text?: string; userOrdinal?: number | null }) => Promise<void>
   steerPrompt: (text: string) => Promise<boolean>
-  submitText: (text: string, options?: { attachments?: ComposerAttachment[]; fromQueue?: boolean }) => Promise<boolean>
+  submitText: (text: string, options?: SubmitTextOptions) => Promise<boolean>
 }
 
 function Harness({
   busyRef,
+  onUpdateState,
   onReady,
   onSeedState,
   openMemoryGraph,
@@ -62,6 +65,11 @@ function Harness({
   storedSessionId
 }: {
   busyRef?: MutableRefObject<boolean>
+  onUpdateState?: (
+    sessionId: string,
+    storedSessionId: null | string | undefined,
+    state: Record<string, unknown>
+  ) => void
   onReady: (handle: HarnessHandle) => void
   onSeedState?: (state: Record<string, unknown>) => void
   openMemoryGraph?: () => void
@@ -100,11 +108,12 @@ function Harness({
     selectedStoredSessionIdRef,
     startFreshSessionDraft: () => undefined,
     sttEnabled: false,
-    updateSessionState: (_sessionId, updater) => {
+    updateSessionState: (sessionId, updater, storedSessionId) => {
       // Seed with interrupted:true so we can prove a fresh submit clears it.
       const next = updater(stateRef.current) as unknown as Record<string, unknown>
       stateRef.current = next as never
       onSeedState?.(next)
+      onUpdateState?.(sessionId, storedSessionId, next)
 
       return next as never
     }
@@ -329,7 +338,9 @@ describe('usePromptActions slash.exec dispatch payloads', () => {
     const requestGateway = vi.fn(async () => ({}) as never)
 
     let handle: HarnessHandle | null = null
-    render(<Harness onReady={h => (handle = h)} refreshSessions={async () => undefined} requestGateway={requestGateway} />)
+    render(
+      <Harness onReady={h => (handle = h)} refreshSessions={async () => undefined} requestGateway={requestGateway} />
+    )
 
     // `/ text` parses to an empty command name on every surface (CLI parity).
     // The composer draft was already cleared on submit and slash input never
@@ -493,6 +504,47 @@ describe('usePromptActions submit / queue drain semantics', () => {
       },
       1_800_000
     )
+  })
+
+  it('a fromQueue drain sends to its queued session even after the active session changes', async () => {
+    $busy.set(false)
+
+    const updates: { sessionId: string; state: Record<string, unknown>; storedSessionId: null | string | undefined }[] =
+      []
+
+    const requestGateway = vi.fn(async () => ({}) as never)
+
+    let handle: HarnessHandle | null = null
+    render(
+      <Harness
+        onReady={h => (handle = h)}
+        onUpdateState={(sessionId, storedSessionId, state) => updates.push({ sessionId, state, storedSessionId })}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+      />
+    )
+
+    const accepted = await handle!.submitText('queued for background session', {
+      fromQueue: true,
+      sessionId: 'rt-session-a',
+      storedSessionId: 'stored-session-a'
+    })
+
+    expect(accepted).toBe(true)
+    expect(requestGateway).toHaveBeenCalledWith(
+      'prompt.submit',
+      {
+        session_id: 'rt-session-a',
+        text: 'queued for background session'
+      },
+      1_800_000
+    )
+    expect(requestGateway).not.toHaveBeenCalledWith('session.resume', expect.anything())
+    expect(
+      updates.some(update => update.sessionId === 'rt-session-a' && update.storedSessionId === 'stored-session-a')
+    ).toBe(true)
+    // Offscreen queue drains must not flip the foreground composer into Thinking.
+    expect($busy.get()).toBe(false)
   })
 
   it('a rejected fromQueue drain returns false (entry stays queued) and a later retry sends it', async () => {

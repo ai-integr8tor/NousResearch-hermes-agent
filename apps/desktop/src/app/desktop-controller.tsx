@@ -46,12 +46,7 @@ import {
   setPetOverlaySubmitHandler
 } from '../store/pet-overlay'
 import { $filePreviewTarget, $previewTarget, closeActiveRightRailTab } from '../store/preview'
-import {
-  $activeGatewayProfile,
-  $freshSessionRequest,
-  $profileScope,
-  refreshActiveProfile
-} from '../store/profile'
+import { $activeGatewayProfile, $freshSessionRequest, $profileScope, refreshActiveProfile } from '../store/profile'
 import { $startWorkSessionRequest, followActiveSessionCwd, resolveNewSessionCwd } from '../store/projects'
 import { $reviewOpen, REVIEW_PANE_ID } from '../store/review'
 import {
@@ -111,6 +106,7 @@ import { closeActiveTerminal } from './right-sidebar/terminal/terminals'
 import { CRON_ROUTE, NEW_CHAT_ROUTE, routeSessionId, sessionRoute, SETTINGS_ROUTE } from './routes'
 import { SessionPickerOverlay } from './session-picker-overlay'
 import { SessionSwitcher } from './session-switcher'
+import { useBackgroundQueueDrain } from './session/hooks/use-background-queue-drain'
 import { useContextSuggestions } from './session/hooks/use-context-suggestions'
 import { useCwdActions } from './session/hooks/use-cwd-actions'
 import { useHermesConfig } from './session/hooks/use-hermes-config'
@@ -176,7 +172,7 @@ function sessionMessagesSignature(messages: SessionMessage[]): string {
   for (const m of messages) {
     hash = hashString(hash, m.role)
     hash = hashString(hash, String(m.timestamp ?? ''))
-    hash = hashString(hash, typeof m.content === 'string' ? m.content : JSON.stringify(m.content) ?? '')
+    hash = hashString(hash, typeof m.content === 'string' ? m.content : (JSON.stringify(m.content) ?? ''))
   }
 
   return `${messages.length}:${hash}`
@@ -826,6 +822,13 @@ export function DesktopController() {
     startFreshSessionDraft,
     sttEnabled,
     updateSessionState
+  })
+
+  useBackgroundQueueDrain({
+    enabled: gatewayState === 'open',
+    runtimeIdByStoredSessionIdRef,
+    selectedStoredSessionId,
+    submitText
   })
 
   // The popped-out pet drives two actions back into the app: send a prompt, and
