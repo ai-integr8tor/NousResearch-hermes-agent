@@ -2969,4 +2969,4 @@ This compaction should PRIORITISE preserving all information related to the focu
             )
             logger.info("Compression #%d complete", self.compression_count)
 
-        return compressed
+        return self.post_compress(compressed)

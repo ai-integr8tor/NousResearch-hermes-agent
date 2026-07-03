@@ -124,6 +124,27 @@ class ContextEngine(ABC):
         """
         return False
 
+    # -- Optional: post-compression hook ------------------------------------
+
+    def post_compress(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Post-process compressed messages before they are returned.
+
+        Called at the end of compress() for engines that need to
+        transform or annotate messages after compaction — for example,
+        pruning stale tool results, reordering, or injecting metadata.
+
+        The default implementation is a no-op (returns messages unchanged).
+        Override in subclasses to add behavior.
+
+        Args:
+            messages: The compressed message list returned by compress().
+
+        Returns:
+            The (possibly modified) message list. Must preserve valid
+            OpenAI-format message alternation (assistant/tool/assistant).
+        """
+        return messages
+
     # -- Optional: manual /compress preflight ------------------------------
 
     def has_content_to_compress(self, messages: List[Dict[str, Any]]) -> bool:
