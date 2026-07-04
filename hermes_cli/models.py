@@ -8,6 +8,7 @@ Add, remove, or reorder entries here — both `hermes setup` and
 from __future__ import annotations
 
 import json
+import logging
 import os
 import urllib.parse
 import urllib.request
@@ -18,6 +19,8 @@ from pathlib import Path
 from typing import Any, NamedTuple, Optional
 
 from hermes_cli import __version__ as _HERMES_VERSION
+
+logger = logging.getLogger(__name__)
 
 # Identify ourselves so endpoints fronted by Cloudflare's Browser Integrity
 # Check (error 1010) don't reject the default ``Python-urllib/*`` signature.
@@ -87,6 +90,7 @@ OPENROUTER_MODELS: list[tuple[str, str]] = [
 ]
 
 _openrouter_catalog_cache: list[tuple[str, str]] | None = None
+_openrouter_removed_models: set[str] = set()  # models already reported as removed from live API
 
 
 
@@ -1328,6 +1332,72 @@ def _openrouter_model_is_free(pricing: Any) -> bool:
         return False
 
 
+def get_removed_openrouter_models() -> frozenset[str]:
+    """Return the set of curated OpenRouter model IDs that were detected as
+    removed from the live API during the current process lifetime.
+
+    These models were present in the curated catalog but absent from
+    OpenRouter's ``/v1/models`` response the last time a cold rebuild ran.
+    Each model is logged at ``WARNING`` level the first time it's detected.
+
+    Returns an immutable copy so callers (WebUI, status checks) can inspect
+    the set without mutating it.
+    """
+    return frozenset(_openrouter_removed_models)
+
+
+def find_free_openrouter_model(*, force_refresh: bool = True) -> str | None:
+    """Return the best free OpenRouter model ID from the live curated catalog.
+
+    Fetches the current OpenRouter model list (defaults to ``force_refresh``
+    so the caller gets a fresh view, not a stale cache).  Returns the first
+    curated model that:
+      - Has a ``:free`` suffix or is labelled free by OpenRouter's pricing
+      - Passes the tool-support filter (required by the agent loop)
+      - Exists in the live /v1/models response (no stale entries)
+    Returns ``None`` when no free model is available.
+
+    Designed for the self-heal path: when a paid/free-tier model fails with
+    a 404, the agent calls this to find a working free replacement.
+    """
+    try:
+        models = fetch_openrouter_models(force_refresh=force_refresh)
+    except Exception:
+        logger.debug("Failed to fetch OpenRouter models for free-model discovery")
+        return None
+    if not models:
+        return None
+    # Prefer :free-suffixed models; fall back to any model labelled free
+    free_suffixed = [mid for mid, desc in models if mid.endswith(":free")]
+    if free_suffixed:
+        return free_suffixed[0]
+    free_labelled = [mid for mid, desc in models if desc == "free"]
+    if free_labelled:
+        return free_labelled[0]
+    # Last resort: the default/recommended model (usually free)
+    first_id, first_desc = models[0]
+    return first_id
+
+
+def parse_openrouter_slug_suggestion(error_body: str) -> str | None:
+    """Extract a model-slug suggestion from OpenRouter's error message.
+
+    OpenRouter sometimes returns errors like::
+
+        404 - This model is unavailable for free. The paid version is
+        available now - use this slug instead: deepseek/deepseek-v4-flash
+
+    Returns the suggested slug, or ``None`` when no suggestion is present.
+    """
+    marker = "use this slug instead:"
+    idx = error_body.lower().find(marker)
+    if idx < 0:
+        return None
+    start = idx + len(marker)
+    slug = error_body[start:].strip().rstrip(".,!;")
+    return slug if slug else None
+
+
 def _openrouter_model_supports_tools(item: Any) -> bool:
     """Return True when the model's ``supported_parameters`` advertise tool calling.
 
@@ -1403,6 +1473,14 @@ def fetch_openrouter_models(
     for preferred_id in preferred_ids:
         live_item = live_by_id.get(preferred_id)
         if live_item is None:
+            # Curated model not found in live API — OpenRouter has removed it.
+            if preferred_id not in _openrouter_removed_models:
+                _openrouter_removed_models.add(preferred_id)
+                logger.warning(
+                    "Model %s was removed from OpenRouter's live catalog. "
+                    "It will no longer appear in the model picker.",
+                    preferred_id,
+                )
             continue
         # Hide models that don't advertise tool-calling support — hermes-agent
         # requires it and surfacing them leads to immediate runtime failures
