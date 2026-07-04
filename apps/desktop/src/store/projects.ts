@@ -47,6 +47,8 @@ function projectsStaleBackendError(): Error {
   return new Error(translateNow('sidebar.projects.staleBackend'))
 }
 
+type ProjectsGateway = NonNullable<ReturnType<typeof activeGateway>>
+
 // Client-side cache eviction (Apollo-style optimistic layer): ids the user just
 // deleted/archived. The backend tree is a snapshot that still lists them until
 // its next refresh, so the render-time overlay strips these so the tree matches
@@ -227,6 +229,28 @@ async function gatewayRequest<T>(method: string, params: Record<string, unknown>
   return gateway.request<T>(method, params)
 }
 
+async function activeProjectsGateway(): Promise<ProjectsGateway> {
+  let gateway = activeGateway()
+
+  if (!gateway || gateway.connectionState !== 'open') {
+    gateway = await ensureActiveGatewayOpen()
+  }
+
+  if (!gateway) {
+    throw new Error('Hermes gateway is not connected')
+  }
+
+  return gateway
+}
+
+async function gatewayRequestOn<T>(
+  gateway: ProjectsGateway,
+  method: string,
+  params: Record<string, unknown> = {}
+): Promise<T> {
+  return gateway.request<T>(method, params)
+}
+
 function applyPayload(payload: ProjectsPayload): void {
   $projects.set(payload.projects ?? [])
   $activeProjectId.set(payload.active_id ?? null)
@@ -318,10 +342,15 @@ export async function scanAndRecordRepos(force = false): Promise<void> {
   $reposScanning.set(true)
 
   try {
+    const gateway = await activeProjectsGateway()
     const repos = await scan([])
-    await gatewayRequest('projects.record_repos', { repos })
+
+    await gatewayRequestOn(gateway, 'projects.record_repos', { repos })
     // The disk scan may surface new zero-session repos; refold them into the tree.
-    await refreshProjectTree()
+
+    if (activeGateway() === gateway) {
+      await refreshProjectTree()
+    }
   } catch {
     didScanRepos = false // let a later open retry a failed scan
   } finally {
