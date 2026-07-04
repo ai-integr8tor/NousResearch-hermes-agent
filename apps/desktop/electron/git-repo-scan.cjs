@@ -25,6 +25,26 @@ const MAX_CONCURRENCY = 32
 // only needs the non-hidden heavyweights.
 const JUNK_DIRS = new Set(['Applications', 'Library', 'node_modules', 'site-packages', 'vendor', 'venv'])
 
+// macOS TCC-protected media folders: descending into ~/Pictures, ~/Music,
+// ~/Movies (or reading ~/Public) triggers per-service permission prompts
+// (Photos, Media Library, Files & Folders) attributed to the app. Skipped only
+// as DIRECT children of a search root — the protected instances live at the
+// home-dir top level, while a nested dir that merely shares the name
+// (~/dev/Music-app, ~/code/Movies) is ordinary and may hold real repos.
+// A root the user passes explicitly (e.g. roots: ['~/Music']) is still walked.
+const MEDIA_ROOT_DIRS = new Set(['Movies', 'Music', 'Pictures', 'Public'])
+
+// Apple media-library packages (Photos, Music, TV, Aperture) look like plain
+// directories to readdir but are TCC-protected and never contain user repos.
+// Skip them at ANY depth — Photos libraries in particular often live on
+// external volumes or non-default paths.
+const LIBRARY_PACKAGE_SUFFIXES = ['.photoslibrary', '.musiclibrary', '.tvlibrary', '.aplibrary']
+
+function isLibraryPackage(name) {
+  const lower = String(name).toLowerCase()
+  return LIBRARY_PACKAGE_SUFFIXES.some(suffix => lower.endsWith(suffix))
+}
+
 async function mapLimit(items, limit, fn) {
   let cursor = 0
 
@@ -77,6 +97,16 @@ async function scanGitRepos(roots, options = {}) {
       // Real directories only (skip symlinks to avoid loops), no hidden dirs, no
       // known heavy trees.
       if (!entry.isDirectory() || entry.name.startsWith('.') || JUNK_DIRS.has(entry.name)) {
+        continue
+      }
+
+      // depth 0 = entries directly under a search root (the home dir by
+      // default): don't descend into the TCC-protected media folders there.
+      if (depth === 0 && MEDIA_ROOT_DIRS.has(entry.name)) {
+        continue
+      }
+
+      if (isLibraryPackage(entry.name)) {
         continue
       }
 
