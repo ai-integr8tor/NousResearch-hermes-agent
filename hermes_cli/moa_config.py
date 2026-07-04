@@ -67,6 +67,12 @@ def _default_preset() -> dict[str, Any]:
         "aggregator_temperature": 0.4,
         "max_tokens": 4096,
         "enabled": True,
+        # Opt-in recency-weighted "brief" advisory view (default OFF preserves
+        # the full-transcript behaviour). See agent/moa_loop._brief_reference_messages.
+        "reference_brief": False,
+        "reference_recent_turns": 4,
+        "reference_context_budget": 24000,
+        "reference_constraints": "",
     }
 
 
@@ -94,6 +100,13 @@ def _normalize_preset(raw: Any) -> dict[str, Any]:
         "reference_temperature": _coerce_float(raw.get("reference_temperature"), 0.6),
         "aggregator_temperature": _coerce_float(raw.get("aggregator_temperature"), 0.4),
         "max_tokens": _coerce_int(raw.get("max_tokens"), 4096),
+        # Opt-in brief advisory view (default OFF). recent_turns / context_budget
+        # shape the recency window + total input clamp; constraints is an optional
+        # durable line pinned into the task frame.
+        "reference_brief": bool(raw.get("reference_brief", False)),
+        "reference_recent_turns": _coerce_int(raw.get("reference_recent_turns"), 4),
+        "reference_context_budget": _coerce_int(raw.get("reference_context_budget"), 24000),
+        "reference_constraints": str(raw.get("reference_constraints") or ""),
     }
 
 
