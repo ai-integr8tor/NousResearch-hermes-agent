@@ -1535,6 +1535,7 @@ DEFAULT_CONFIG = {
             "extra_body": {},
         },
         "title_generation": {
+            "enabled": True,    # set false to disable auto-title generation
             "provider": "auto",
             "model": "",
             "base_url": "",
