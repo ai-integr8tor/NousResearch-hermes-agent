@@ -928,10 +928,11 @@ def load_gateway_config() -> GatewayConfig:
             # gateway.multiplex_profiles form (from_dict resolves the nested
             # fallback, but surface the top-level key here for parity with the
             # other session-scope flags above).
+            gateway_section = yaml_cfg.get("gateway")
             if "multiplex_profiles" in yaml_cfg:
                 gw_data["multiplex_profiles"] = yaml_cfg["multiplex_profiles"]
-
-            gateway_section = yaml_cfg.get("gateway")
+            elif isinstance(gateway_section, dict) and "multiplex_profiles" in gateway_section:
+                gw_data["multiplex_profiles"] = gateway_section["multiplex_profiles"]
             if isinstance(gateway_section, dict) and "max_concurrent_sessions" in gateway_section:
                 gw_data["max_concurrent_sessions"] = gateway_section["max_concurrent_sessions"]
 
@@ -1232,7 +1233,30 @@ def load_gateway_config() -> GatewayConfig:
 
     # Override with environment variables
     _apply_env_overrides(config)
-    
+
+    # Force-disable port-binding platforms on secondary profiles under multiplex mode.
+    # Secondary profiles must never bind their own ports.
+    import hermes_constants as _hermes_constants_local
+    primary_home = _hermes_constants_local.get_default_hermes_root().resolve()
+    active_home = _hermes_constants_local.get_hermes_home().resolve()
+    is_secondary_override = active_home != primary_home
+    from agent.secret_scope import is_multiplex_active
+    if is_secondary_override and is_multiplex_active():
+        _PORT_BINDING_PLATFORMS = {
+            "webhook",
+            "api_server",
+            "msgraph_webhook",
+            "feishu",
+            "wecom_callback",
+            "bluebubbles",
+            "sms",
+            "whatsapp_cloud",
+            "line",
+        }
+        for plat_type in list(config.platforms.keys()):
+            if plat_type.value in _PORT_BINDING_PLATFORMS:
+                config.platforms[plat_type].enabled = False
+
     # --- Validate loaded values ---
     _validate_gateway_config(config)
 
@@ -1310,6 +1334,50 @@ def _validate_gateway_config(config: "GatewayConfig") -> None:
 
 def _apply_env_overrides(config: GatewayConfig) -> None:
     """Apply environment variable overrides to config."""
+    import hermes_constants as _hermes_constants_local
+    from agent.secret_scope import get_secret as _get_secret
+
+    _orig_getenv = os.getenv
+
+    def _getenv(name: str, default: Optional[str] = None) -> Optional[str]:
+        # Temporarily restore original getenv to prevent infinite recursion
+        os.getenv = _orig_getenv
+        try:
+            val = _get_secret(name)
+            if val is not None:
+                return val
+
+            active_home = _hermes_constants_local.get_hermes_home().resolve()
+            primary_home = _hermes_constants_local.get_default_hermes_root().resolve()
+            from agent.secret_scope import is_multiplex_active
+            is_secondary = (active_home != primary_home) and is_multiplex_active()
+
+            from agent.secret_scope import _is_global_env
+            if is_secondary and not _is_global_env(name):
+                return default
+
+            return _orig_getenv(name, default)
+        finally:
+            os.getenv = _getenv
+
+    os.getenv = _getenv
+    try:
+        _apply_env_overrides_impl(config)
+    finally:
+        os.getenv = _orig_getenv
+
+
+def _apply_env_overrides_impl(config: GatewayConfig) -> None:
+    """Apply environment variable overrides to config."""
+    import hermes_constants as _hermes_constants_local
+
+    # Determine default/primary home dynamically
+    primary_home = _hermes_constants_local.get_default_hermes_root().resolve()
+    active_home = _hermes_constants_local.get_hermes_home().resolve()
+
+    # A profile is secondary if its active home is different from the primary home
+    from agent.secret_scope import is_multiplex_active
+    is_secondary = (active_home != primary_home) and is_multiplex_active()
 
     def _enable_from_env(platform: Platform) -> PlatformConfig:
         if platform not in config.platforms:
@@ -1327,13 +1395,13 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
         if not platform_config.enabled and not enabled_was_explicit:
             platform_config.enabled = True
         return platform_config
-    
+
     # Telegram
     telegram_token = os.getenv("TELEGRAM_BOT_TOKEN")
     if telegram_token:
         telegram_config = _enable_from_env(Platform.TELEGRAM)
         telegram_config.token = telegram_token
-    
+
     # Reply threading mode for Telegram (off/first/all)
     telegram_reply_mode = os.getenv("TELEGRAM_REPLY_TO_MODE", "").lower()
     if telegram_reply_mode in {"off", "first", "all"}:
@@ -1619,7 +1687,7 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
     api_server_cors_origins = os.getenv("API_SERVER_CORS_ORIGINS", "")
     api_server_port = os.getenv("API_SERVER_PORT")
     api_server_host = os.getenv("API_SERVER_HOST")
-    if api_server_enabled or api_server_key:
+    if (api_server_enabled or api_server_key) and not is_secondary:
         if Platform.API_SERVER not in config.platforms:
             config.platforms[Platform.API_SERVER] = PlatformConfig()
         config.platforms[Platform.API_SERVER].enabled = True
@@ -1644,7 +1712,7 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
     webhook_enabled = env_var_enabled("WEBHOOK_ENABLED")
     webhook_port = os.getenv("WEBHOOK_PORT")
     webhook_secret = os.getenv("WEBHOOK_SECRET", "")
-    if webhook_enabled:
+    if webhook_enabled and not is_secondary:
         if Platform.WEBHOOK not in config.platforms:
             config.platforms[Platform.WEBHOOK] = PlatformConfig()
         config.platforms[Platform.WEBHOOK].enabled = True
