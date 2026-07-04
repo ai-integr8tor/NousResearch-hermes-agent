@@ -1221,6 +1221,8 @@ _PROVIDER_ALIASES = {
     "arceeai": "arcee",
     "gmi-cloud": "gmi",
     "gmicloud": "gmi",
+    "sakana-ai": "sakana",
+    "fugu": "sakana",
     "minimax-china": "minimax-cn",
     "minimax_cn": "minimax-cn",
     "minimax-portal": "minimax-oauth",
