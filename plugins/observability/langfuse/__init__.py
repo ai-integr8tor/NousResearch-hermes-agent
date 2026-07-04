@@ -87,6 +87,12 @@ _LANGFUSE_KEY_PREFIXES: Dict[str, str] = {
 _INVALID_SERVICE_NAMES = {"unknown_service"}
 
 
+class LangfuseServiceNameError(RuntimeError):
+    """Fatal Langfuse configuration error that must not be swallowed by hooks."""
+
+    hermes_fail_closed = True
+
+
 def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
 
@@ -188,6 +194,24 @@ def _configured_service_name() -> str:
     return str(observability.get("service_name") or "").strip()
 
 
+def _langfuse_credentials_configured() -> bool:
+    public_key = _env("HERMES_LANGFUSE_PUBLIC_KEY") or _env("LANGFUSE_PUBLIC_KEY")
+    secret_key = _env("HERMES_LANGFUSE_SECRET_KEY") or _env("LANGFUSE_SECRET_KEY")
+    return bool(public_key and secret_key)
+
+
+def _require_service_name() -> str:
+    service_name = _configured_service_name()
+    if not service_name or service_name in _INVALID_SERVICE_NAMES:
+        raise LangfuseServiceNameError(
+            "Langfuse plugin is enabled but observability.service_name is "
+            "missing, empty, or unknown_service in Hermes config; refusing to "
+            "initialize because OpenTelemetry would emit an unattributable "
+            "service.name"
+        )
+    return service_name
+
+
 def _ensure_otel_service_name(service_name: str) -> None:
     os.environ["OTEL_SERVICE_NAME"] = service_name
 
@@ -274,15 +298,7 @@ def _get_langfuse() -> Optional[Langfuse]:
         except ValueError:
             logger.warning("Invalid HERMES_LANGFUSE_SAMPLE_RATE=%r", sample_rate)
 
-    service_name = _configured_service_name()
-    if not service_name or service_name in _INVALID_SERVICE_NAMES:
-        raise RuntimeError(
-            "Langfuse plugin is enabled but observability.service_name is "
-            "missing, empty, or unknown_service in Hermes config; refusing to "
-            "initialize because OpenTelemetry would emit an unattributable "
-            "service.name"
-        )
-    _ensure_otel_service_name(service_name)
+    _ensure_otel_service_name(_require_service_name())
 
     try:
         _LANGFUSE_CLIENT = Langfuse(**kwargs)
@@ -1192,6 +1208,9 @@ def on_post_tool_call(*, tool_name: str = "", args: Any = None, result: Any = No
 
 
 def register(ctx) -> None:
+    if _langfuse_credentials_configured():
+        _ensure_otel_service_name(_require_service_name())
+
     # Register for both hook name variants so the plugin works across
     # Hermes versions.  pre_api_request / post_api_request fire per API
     # call (preferred); pre_llm_call / post_llm_call fire once per turn.

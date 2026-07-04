@@ -48,6 +48,11 @@ class TestManifest:
 # ---------------------------------------------------------------------------
 
 class TestDiscovery:
+    @staticmethod
+    def _write_config(home: Path, text: str) -> None:
+        home.mkdir()
+        (home / "config.yaml").write_text(text, encoding="utf-8")
+
     def test_plugin_is_discovered_as_standalone_opt_in(self, tmp_path, monkeypatch):
         """Scanner should find the plugin but NOT load it by default."""
         from hermes_cli import plugins as plugins_mod
@@ -67,6 +72,47 @@ class TestDiscovery:
         # … but is not loaded (opt-in default → no config.yaml means nothing enabled)
         assert loaded.enabled is False
         assert "not enabled" in (loaded.error or "").lower()
+
+    @pytest.mark.parametrize("service_name", ["", "unknown_service"])
+    def test_enabled_plugin_with_credentials_fails_closed_on_invalid_service_name(
+        self, tmp_path, monkeypatch, service_name
+    ):
+        from hermes_cli import plugins as plugins_mod
+
+        home = tmp_path / ".hermes"
+        rendered_service = (
+            "  service_name: unknown_service\n" if service_name else ""
+        )
+        self._write_config(
+            home,
+            "plugins:\n"
+            "  enabled:\n"
+            "    - observability/langfuse\n"
+            "observability:\n"
+            f"{rendered_service}",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        monkeypatch.setenv("HERMES_LANGFUSE_PUBLIC_KEY", "pk-lf-real-public-xyz")
+        monkeypatch.setenv("HERMES_LANGFUSE_SECRET_KEY", "sk-lf-real-secret-xyz")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        manager = plugins_mod.PluginManager()
+        with pytest.raises(RuntimeError, match="observability.service_name"):
+            manager.discover_and_load()
+
+    def test_fail_closed_hook_error_is_not_swallowed(self):
+        from hermes_cli import plugins as plugins_mod
+        from plugins.observability.langfuse import LangfuseServiceNameError
+
+        manager = plugins_mod.PluginManager()
+        manager._hooks["pre_api_request"] = [
+            lambda **_: (_ for _ in ()).throw(
+                LangfuseServiceNameError("unknown_service")
+            )
+        ]
+
+        with pytest.raises(LangfuseServiceNameError, match="unknown_service"):
+            manager.invoke_hook("pre_api_request")
 
 
 # ---------------------------------------------------------------------------
