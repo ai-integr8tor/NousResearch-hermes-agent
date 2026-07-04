@@ -29,9 +29,15 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
+
+try:
+    import yaml
+except Exception:  # pragma: no cover - PyYAML is a core dependency
+    yaml = None
 
 try:
     from langfuse import Langfuse, propagate_attributes
@@ -146,6 +152,49 @@ def _validate_langfuse_key(env_name: str, value: str) -> Optional[str]:
     )
 
 
+def _hermes_config_path() -> Path:
+    hermes_home = _env("HERMES_HOME")
+    if hermes_home:
+        return Path(hermes_home) / "config.yaml"
+    return Path.home() / ".hermes" / "config.yaml"
+
+
+def _configured_service_name() -> str:
+    config_path = _hermes_config_path()
+    if yaml is None:
+        raise RuntimeError(
+            "Langfuse plugin requires observability.service_name in Hermes "
+            "config, but PyYAML is unavailable so config.yaml cannot be read"
+        )
+    if not config_path.is_file():
+        raise RuntimeError(
+            "Langfuse plugin requires observability.service_name in Hermes "
+            f"config, but {config_path} does not exist"
+        )
+    try:
+        with config_path.open("r", encoding="utf-8") as handle:
+            config = yaml.safe_load(handle) or {}
+    except Exception as exc:
+        raise RuntimeError(
+            "Langfuse plugin requires observability.service_name in Hermes "
+            f"config, but {config_path} could not be read: {exc}"
+        ) from exc
+    observability = config.get("observability")
+    if not isinstance(observability, dict):
+        return ""
+    return str(observability.get("service_name") or "").strip()
+
+
+def _ensure_otel_service_name(service_name: str) -> None:
+    os.environ.setdefault("OTEL_SERVICE_NAME", service_name)
+
+    resource_attributes = _env("OTEL_RESOURCE_ATTRIBUTES")
+    parts = [part.strip() for part in resource_attributes.split(",") if part.strip()]
+    if not any(part.split("=", 1)[0].strip() == "service.name" for part in parts):
+        parts.insert(0, f"service.name={service_name}")
+        os.environ["OTEL_RESOURCE_ATTRIBUTES"] = ",".join(parts)
+
+
 def _get_langfuse() -> Optional[Langfuse]:
     """Return a cached Langfuse client, or ``None`` if unavailable.
 
@@ -217,6 +266,15 @@ def _get_langfuse() -> Optional[Langfuse]:
             kwargs["sample_rate"] = float(sample_rate)
         except ValueError:
             logger.warning("Invalid HERMES_LANGFUSE_SAMPLE_RATE=%r", sample_rate)
+
+    service_name = _configured_service_name()
+    if not service_name:
+        raise RuntimeError(
+            "Langfuse plugin is enabled but observability.service_name is "
+            "missing or empty in Hermes config; refusing to initialize because "
+            "OpenTelemetry would emit service.name=unknown_service"
+        )
+    _ensure_otel_service_name(service_name)
 
     try:
         _LANGFUSE_CLIENT = Langfuse(**kwargs)

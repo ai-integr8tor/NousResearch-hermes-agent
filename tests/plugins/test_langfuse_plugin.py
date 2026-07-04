@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -467,8 +468,17 @@ class TestPlaceholderKeyDetection:
         for k in (
             "HERMES_LANGFUSE_PUBLIC_KEY", "HERMES_LANGFUSE_SECRET_KEY",
             "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY",
+            "HERMES_HOME",
+            "OTEL_SERVICE_NAME",
+            "OTEL_RESOURCE_ATTRIBUTES",
         ):
             monkeypatch.delenv(k, raising=False)
+
+    @staticmethod
+    def _write_config(tmp_path, text: str) -> None:
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        (hermes_home / "config.yaml").write_text(text, encoding="utf-8")
 
     # -- helper unit tests (no SDK stub needed: these don't go through
     #    _get_langfuse, they exercise the pure-Python helpers directly) ------
@@ -668,7 +678,7 @@ class TestPlaceholderKeyDetection:
                     and r.name == self.LOGGER_NAME]
         assert warnings == []
 
-    def test_valid_prefixes_do_not_trigger_placeholder_warning(self, monkeypatch, caplog):
+    def test_valid_prefixes_do_not_trigger_placeholder_warning(self, monkeypatch, caplog, tmp_path):
         """Real Langfuse keys (``pk-lf-…`` / ``sk-lf-…``) must pass the
         guard and proceed to SDK init.  We stub the SDK constructor with
         a recording fake so the assertion can confirm BOTH that the
@@ -676,6 +686,8 @@ class TestPlaceholderKeyDetection:
         constructed — the latter is the success signal the bug report
         wanted."""
         self._clear_env(monkeypatch)
+        self._write_config(tmp_path, "observability:\n  service_name: riemann\n")
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
         monkeypatch.setenv("HERMES_LANGFUSE_PUBLIC_KEY", "pk-lf-real-public-xyz")
         monkeypatch.setenv("HERMES_LANGFUSE_SECRET_KEY", "sk-lf-real-secret-xyz")
         plugin = self._fresh_plugin(monkeypatch)
@@ -687,6 +699,40 @@ class TestPlaceholderKeyDetection:
         assert "placeholders" not in caplog.text.lower(), (
             f"Valid Langfuse keys tripped the placeholder guard: {caplog.text!r}"
         )
+
+    def test_missing_service_name_fails_closed(self, monkeypatch, tmp_path):
+        self._clear_env(monkeypatch)
+        self._write_config(tmp_path, "observability: {}\n")
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+        monkeypatch.setenv("HERMES_LANGFUSE_PUBLIC_KEY", "pk-lf-real-public-xyz")
+        monkeypatch.setenv("HERMES_LANGFUSE_SECRET_KEY", "sk-lf-real-secret-xyz")
+        plugin = self._fresh_plugin(monkeypatch)
+
+        with pytest.raises(RuntimeError, match="observability.service_name"):
+            plugin._get_langfuse()
+
+        assert _FakeLangfuse.instances == []
+
+    def test_service_name_sets_otel_resource_before_client_init(self, monkeypatch, tmp_path):
+        self._clear_env(monkeypatch)
+        self._write_config(
+            tmp_path,
+            "observability:\n  service_name: riemann\n",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+        monkeypatch.setenv("HERMES_LANGFUSE_PUBLIC_KEY", "pk-lf-real-public-xyz")
+        monkeypatch.setenv("HERMES_LANGFUSE_SECRET_KEY", "sk-lf-real-secret-xyz")
+        monkeypatch.setenv("OTEL_RESOURCE_ATTRIBUTES", "deployment.environment=fleet-2-staging")
+        plugin = self._fresh_plugin(monkeypatch)
+
+        client = plugin._get_langfuse()
+
+        assert isinstance(client, _FakeLangfuse)
+        assert os.environ["OTEL_SERVICE_NAME"] == "riemann"
+        assert os.environ["OTEL_RESOURCE_ATTRIBUTES"].split(",") == [
+            "service.name=riemann",
+            "deployment.environment=fleet-2-staging",
+        ]
 
 
 class TestRequestMessageCoercion:
