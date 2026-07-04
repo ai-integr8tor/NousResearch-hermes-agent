@@ -66,6 +66,8 @@ def _related(fm: dict[str, Any]) -> list[str]:
 
 
 def _category(fm: dict[str, Any], skill_md: Path) -> str:
+    if not isinstance(fm, dict):
+        fm = {}
     cat = fm.get("category") or _hermes_meta(fm).get("category")
     if cat:
         return str(cat)
