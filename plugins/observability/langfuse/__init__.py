@@ -179,6 +179,8 @@ def _configured_service_name() -> str:
             "Langfuse plugin requires observability.service_name in Hermes "
             f"config, but {config_path} could not be read: {exc}"
         ) from exc
+    if not isinstance(config, dict):
+        return ""
     observability = config.get("observability")
     if not isinstance(observability, dict):
         return ""
