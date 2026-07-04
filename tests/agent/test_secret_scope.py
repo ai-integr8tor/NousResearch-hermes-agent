@@ -128,3 +128,43 @@ class TestEnvFileParsing:
         assert ss.build_profile_secret_scope(tmp_path) == {
             "ANTHROPIC_API_KEY": "sk-profile"
         }
+
+    def test_build_profile_secret_scope_includes_home_external_secrets(
+        self, tmp_path, monkeypatch
+    ):
+        (tmp_path / ".env").write_text("XIAOMI_API_KEY=placeholder\n")
+        monkeypatch.setenv("XIAOMI_API_KEY", "sk-from-bitwarden")
+
+        from hermes_cli import env_loader
+
+        home_key = str(tmp_path.resolve())
+        monkeypatch.setitem(env_loader._SECRET_SOURCES, "XIAOMI_API_KEY", "bitwarden")
+        monkeypatch.setitem(
+            env_loader._SECRET_SOURCE_HOMES,
+            home_key,
+            {"XIAOMI_API_KEY"},
+        )
+
+        assert ss.build_profile_secret_scope(tmp_path) == {
+            "XIAOMI_API_KEY": "sk-from-bitwarden"
+        }
+
+    def test_build_profile_secret_scope_ignores_other_home_external_secrets(
+        self, tmp_path, monkeypatch
+    ):
+        profile = tmp_path / "profile"
+        other = tmp_path / "other"
+        profile.mkdir()
+        other.mkdir()
+        monkeypatch.setenv("XIAOMI_API_KEY", "sk-other-profile")
+
+        from hermes_cli import env_loader
+
+        monkeypatch.setitem(env_loader._SECRET_SOURCES, "XIAOMI_API_KEY", "bitwarden")
+        monkeypatch.setitem(
+            env_loader._SECRET_SOURCE_HOMES,
+            str(other.resolve()),
+            {"XIAOMI_API_KEY"},
+        )
+
+        assert ss.build_profile_secret_scope(profile) == {}

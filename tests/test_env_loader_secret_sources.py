@@ -24,9 +24,11 @@ from hermes_cli import env_loader  # noqa: E402
 def _reset_sources():
     """Each test starts with a clean source map and applied-home guard."""
     env_loader._SECRET_SOURCES.clear()
+    env_loader._SECRET_SOURCE_HOMES.clear()
     env_loader.reset_secret_source_cache()
     yield
     env_loader._SECRET_SOURCES.clear()
+    env_loader._SECRET_SOURCE_HOMES.clear()
     env_loader.reset_secret_source_cache()
 
 
@@ -37,6 +39,22 @@ def test_get_secret_source_returns_none_for_untracked_var():
 def test_get_secret_source_returns_label_for_tracked_var():
     env_loader._SECRET_SOURCES["ANTHROPIC_API_KEY"] = "bitwarden"
     assert env_loader.get_secret_source("ANTHROPIC_API_KEY") == "bitwarden"
+
+
+def test_get_secret_source_values_filters_by_home(tmp_path, monkeypatch):
+    home_a = tmp_path / "profile-a"
+    home_b = tmp_path / "profile-b"
+    home_a.mkdir()
+    home_b.mkdir()
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-profile-a")
+
+    env_loader._SECRET_SOURCES["ANTHROPIC_API_KEY"] = "bitwarden"
+    env_loader._SECRET_SOURCE_HOMES[str(home_a.resolve())] = {"ANTHROPIC_API_KEY"}
+
+    assert env_loader.get_secret_source_values(home_a) == {
+        "ANTHROPIC_API_KEY": "sk-profile-a"
+    }
+    assert env_loader.get_secret_source_values(home_b) == {}
 
 
 def test_format_secret_source_suffix_empty_for_untracked():
@@ -144,6 +162,7 @@ def test_apply_external_secret_sources_dedupes_within_process(tmp_path, monkeypa
     from agent.secret_sources.bitwarden import FetchResult
 
     call_count = {"n": 0}
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
 
     def _fake_apply(**_kwargs):
         call_count["n"] += 1
@@ -168,6 +187,9 @@ def test_apply_external_secret_sources_dedupes_within_process(tmp_path, monkeypa
 
     # Source tracking still works after dedup.
     assert env_loader.get_secret_source("ANTHROPIC_API_KEY") == "bitwarden"
+    assert env_loader.get_secret_source_values(tmp_path) == {
+        "ANTHROPIC_API_KEY": "sk-ant-test"
+    }
 
     # reset_secret_source_cache() forces a fresh pull on the next call.
     env_loader.reset_secret_source_cache()
