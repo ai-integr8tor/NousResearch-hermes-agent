@@ -3822,6 +3822,9 @@ class APIServerAdapter(BasePlatformAdapter):
         agent_messages = result.get("messages") if isinstance(result, dict) else None
 
         if isinstance(agent_messages, list) and agent_messages:
+            if APIServerAdapter._response_messages_have_compressed_summary(agent_messages):
+                return list(agent_messages)
+
             turn_start = APIServerAdapter._response_messages_turn_start_index(
                 conversation_history,
                 user_message,
@@ -3841,6 +3844,19 @@ class APIServerAdapter(BasePlatformAdapter):
         return full_history
 
     @staticmethod
+    def _response_messages_have_compressed_summary(messages: List[Dict[str, Any]]) -> bool:
+        """Return True when result["messages"] is an authoritative compacted transcript."""
+        try:
+            from agent.context_compressor import COMPRESSED_SUMMARY_METADATA_KEY
+        except Exception:
+            COMPRESSED_SUMMARY_METADATA_KEY = "_compressed_summary"
+
+        for msg in messages:
+            if isinstance(msg, dict) and bool(msg.get(COMPRESSED_SUMMARY_METADATA_KEY)):
+                return True
+        return False
+
+    @staticmethod
     def _response_messages_turn_start_index(
         conversation_history: List[Dict[str, Any]],
         user_message: Any,
@@ -3858,6 +3874,10 @@ class APIServerAdapter(BasePlatformAdapter):
             return len(expected_prefix)
         if prior and agent_messages[:len(prior)] == prior:
             return len(prior)
+        if APIServerAdapter._response_messages_have_compressed_summary(agent_messages):
+            for idx in range(len(agent_messages) - 1, -1, -1):
+                if agent_messages[idx] == current_user:
+                    return idx + 1
         return 0
 
     @classmethod
