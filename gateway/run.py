@@ -2968,6 +2968,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         vacuum=bool(_sess_cfg.get("vacuum_after_prune", True)),
                         sessions_dir=self.config.sessions_dir,
                     )
+                else:
+                    self._session_db._db.maybe_warn_auto_prune_disabled()
             except Exception as exc:
                 logger.debug("state.db auto-maintenance skipped: %s", exc)
 
