@@ -2280,7 +2280,7 @@ async function applyUpdates(opts = {}) {
 
     // Detached so the updater outlives this process — it needs us GONE before
     // `hermes update` will run (the venv shim is locked while we live).
-    const child = spawn(updater, updaterArgs, {
+    const child = spawn(updater, updaterArgs, hiddenWindowsChildOptions({
       cwd: HERMES_HOME,
       env: {
         ...process.env,
@@ -2288,9 +2288,8 @@ async function applyUpdates(opts = {}) {
         PATH: pathWithHermesManagedNode(venvBin)
       },
       detached: true,
-      stdio: 'ignore',
-      windowsHide: false
-    })
+      stdio: 'ignore'
+    }))
     child.unref()
 
     rememberLog(`[updates] launched updater: ${updater} ${updaterArgs.join(' ')}; exiting desktop to release venv shim`)
@@ -2337,7 +2336,7 @@ async function handOffWindowsBootstrapRecovery(reason) {
 
   await releaseBackendLockForUpdate(updateRoot)
 
-  const child = spawn(updater, updaterArgs, {
+  const child = spawn(updater, updaterArgs, hiddenWindowsChildOptions({
     cwd: HERMES_HOME,
     env: {
       ...process.env,
@@ -2345,9 +2344,8 @@ async function handOffWindowsBootstrapRecovery(reason) {
       PATH: pathWithHermesManagedNode(venvBin)
     },
     detached: true,
-    stdio: 'ignore',
-    windowsHide: false
-  })
+    stdio: 'ignore'
+  }))
   child.unref()
 
   rememberLog(
