@@ -110,6 +110,7 @@ const {
   connectionScopeKey,
   cookiesHaveSession,
   cookiesHaveLiveSession,
+  isRemoteBackendConnection,
   normAuthMode,
   normalizeRemoteBaseUrl,
   pathWithGlobalRemoteProfile,
@@ -1881,6 +1882,16 @@ async function resolveHealedBranch(updateRoot, branch) {
 }
 
 async function checkUpdates() {
+  if (isRemoteBackendConnection(readDesktopConnectionConfig(), primaryProfileKey())) {
+    return {
+      supported: false,
+      reason: 'remote-backend',
+      message: 'Desktop self-update is skipped while connected to a remote Hermes backend.',
+      branch: readDesktopUpdateConfig().branch,
+      fetchedAt: Date.now()
+    }
+  }
+
   const updateRoot = resolveUpdateRoot()
   let { branch } = readDesktopUpdateConfig()
   const gitDir = path.join(updateRoot, '.git')
@@ -2198,6 +2209,15 @@ async function releaseBackendLock(updateRoot, tag) {
 // Detection (checkUpdates / commit changelog / "N behind") stays in the UI;
 // only this apply action changed.
 async function applyUpdates(opts = {}) {
+  if (isRemoteBackendConnection(readDesktopConnectionConfig(), primaryProfileKey())) {
+    return {
+      ok: false,
+      skipped: true,
+      error: 'remote-backend',
+      message: 'Desktop self-update is skipped while connected to a remote Hermes backend.'
+    }
+  }
+
   if (updateInFlight) {
     throw new Error('An update is already in progress.')
   }
