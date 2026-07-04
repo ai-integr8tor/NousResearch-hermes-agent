@@ -493,6 +493,16 @@ def test_fanout_default_batch_size_is_five():
     assert len(g["batches"]) == 3  # 5 + 5 + 2
 
 
+def test_fanout_brief_requires_ledger_readback_after_record():
+    with temp_env():
+        sid = _run(["intake", "--full-name", "Jane Q. Public",
+                    "--email", "jane@example.com", "--consent"])["subject_id"]
+        out = _run(["fanout", sid, "--priority", "crucial", "--size", "2"])
+        brief = out["batches"][0]["brief"]
+        assert f"pdd.py show {sid} <broker>" in brief
+        assert "confirm the ledger state/evidence matches" in brief
+
+
 # --- cdp (operator browser over the DevTools protocol) --------------------------------------
 
 def test_cdp_launch_command_has_debug_flags():
