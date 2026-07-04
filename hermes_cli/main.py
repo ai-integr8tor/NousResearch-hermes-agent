@@ -7554,7 +7554,12 @@ def _cleanup_quarantined_exes(scripts_dir: Path | None = None) -> None:
         pass
 
 
-def _refresh_active_lazy_features() -> None:
+def _refresh_active_lazy_features(
+    *,
+    install_cmd_prefix: list[str] | None = None,
+    env: dict[str, str] | None = None,
+    group: str = "all",
+) -> None:
     """Refresh lazy-installed backends after a code update.
 
     When pyproject.toml's ``[all]`` extra was slimmed down (May 2026), most
@@ -7569,6 +7574,9 @@ def _refresh_active_lazy_features() -> None:
     user never enabled stay quiet — no churn for cold backends.
 
     Never raises. A failure here must not block the rest of the update.
+    When a lazy refresh fails after touching the venv, re-run the core
+    dependency verifier against the same install target so a partially failed
+    optional backend install cannot leave base packages corrupted.
     """
     try:
         from tools import lazy_deps
@@ -7594,6 +7602,13 @@ def _refresh_active_lazy_features() -> None:
         # refresh_active_features is documented as never-raise, but defend
         # the update flow against future regressions.
         print(f"  ⚠ Lazy refresh failed unexpectedly: {exc}")
+        if install_cmd_prefix is not None:
+            print("  → Verifying core dependencies after lazy refresh failure...")
+            _verify_core_dependencies_installed(
+                install_cmd_prefix,
+                env=env,
+                group=group,
+            )
         return
 
     refreshed = [f for f, s in results.items() if s == "refreshed"]
@@ -7618,6 +7633,13 @@ def _refresh_active_lazy_features() -> None:
             if len(reason) > 200:
                 reason = reason[:200] + "..."
             print(f"  ⚠ {feature} failed to refresh: {reason}")
+        if install_cmd_prefix is not None:
+            print("  → Verifying core dependencies after lazy refresh failure...")
+            _verify_core_dependencies_installed(
+                install_cmd_prefix,
+                env=env,
+                group=group,
+            )
         print("  Backends keep their previously-installed version; rerun")
         print("  `hermes update` once the upstream issue is resolved.")
 
@@ -9857,9 +9879,13 @@ def _cmd_update_impl(args, gateway_mode: bool):
         if not uv_bin:
             uv_bin = _ensure_uv_for_termux(pip_cmd)
         install_group = "all"
+        core_install_cmd_prefix = pip_cmd
+        core_install_env = None
 
         if uv_bin:
             uv_env = {**os.environ, "VIRTUAL_ENV": str(PROJECT_ROOT / "venv")}
+            core_install_cmd_prefix = [uv_bin, "pip"]
+            core_install_env = uv_env
             if _is_termux_env(uv_env):
                 uv_env.pop("PYTHONPATH", None)
                 uv_env.pop("PYTHONHOME", None)
@@ -9904,7 +9930,11 @@ def _cmd_update_impl(args, gateway_mode: bool):
         # UI, desktop rebuild) are non-core and can't brick the venv.
         _clear_update_incomplete_marker()
 
-        _refresh_active_lazy_features()
+        _refresh_active_lazy_features(
+            install_cmd_prefix=core_install_cmd_prefix,
+            env=core_install_env,
+            group=install_group,
+        )
 
         _update_node_dependencies()
         _build_web_ui(PROJECT_ROOT / "web")
