@@ -5,9 +5,10 @@ to prevent spinner/status bar overlap (#2718).
 """
 
 from unittest.mock import MagicMock, patch
+from queue import Queue
 
 
-from cli import HermesCLI
+from cli import HermesCLI, _queue_or_display_async_notification
 
 
 def _make_cli():
@@ -100,3 +101,36 @@ class TestBackgroundCommandTuiRefresh:
         # Clean up
         cli_obj._background_tasks.pop(task_id, None)
         assert task_id not in cli_obj._background_tasks
+
+
+def test_process_notification_displayed_not_queued(monkeypatch):
+    q = Queue()
+    printed = []
+    monkeypatch.setattr("cli._cprint", printed.append)
+
+    _queue_or_display_async_notification(
+        q,
+        {"type": "completion", "session_id": "proc_1"},
+        "[IMPORTANT: Background process proc_1 completed]",
+    )
+
+    assert q.empty()
+    assert len(printed) == 1
+    assert "⚙️" in printed[0]
+    assert "Background process proc_1" in printed[0]
+
+
+def test_async_delegation_notification_still_queued(monkeypatch):
+    q = Queue()
+    monkeypatch.setattr(
+        "cli._cprint",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should not print")),
+    )
+
+    _queue_or_display_async_notification(
+        q,
+        {"type": "async_delegation", "delegation_id": "deleg_1"},
+        "[ASYNC DELEGATION COMPLETE — deleg_1]",
+    )
+
+    assert q.get_nowait() == "[ASYNC DELEGATION COMPLETE — deleg_1]"

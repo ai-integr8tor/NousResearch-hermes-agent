@@ -1834,7 +1834,11 @@ def _cwd_for_session_key(session_key: str) -> str:
     return ""
 
 
-def _set_session_context(session_key: str, cwd: str | None = None) -> list:
+def _set_session_context(
+    session_key: str,
+    cwd: str | None = None,
+    turn_seq: str | int | None = None,
+) -> list:
     try:
         from gateway.session_context import set_session_vars
 
@@ -1849,7 +1853,12 @@ def _set_session_context(session_key: str, cwd: str | None = None) -> list:
                 if sess.get("session_key") == session_key:
                     source = _session_source(sess)
                     break
-        return set_session_vars(session_key=session_key, source=source, cwd=resolved)
+        return set_session_vars(
+            session_key=session_key,
+            source=source,
+            cwd=resolved,
+            turn_seq="" if turn_seq is None else str(turn_seq),
+        )
     except Exception:
         return []
 
@@ -8296,14 +8305,58 @@ def _notification_event_dedup_key(evt: dict) -> tuple:
     return (evt_sid, evt_type)
 
 
+def _notification_event_should_chain_agent(evt: dict, session: dict | None = None) -> bool:
+    """Whether an async notification should re-enter the transcript as a turn.
+
+    Background process completion/watch notifications are observability events,
+    not user prompts. Desktop already has a status channel for them; running a
+    new agent turn from their ``[IMPORTANT: ...]`` text makes the model treat a
+    stale process result as the next user request, which is the source of common
+    cross-task/session-bleed reports. Keep those notifications visible via
+    ``status.update`` only.
+
+    Async delegation results are allowed to chain only while they still belong
+    to the dispatching parent turn. If the user has submitted another turn since
+    dispatch, the result is stale relative to the active topic: show it as
+    status, but do not forge a synthetic user message and let it hijack the
+    conversation.
+    """
+    if evt.get("type") != "async_delegation":
+        return False
+    if session is None:
+        return True
+
+    raw_dispatch_seq = evt.get("dispatch_turn_seq")
+    if raw_dispatch_seq is None or raw_dispatch_seq == "":
+        # Old/incomplete async events cannot prove they still belong to the
+        # current topic. Prefer status-only over another context-bleed turn.
+        return False
+    try:
+        dispatch_seq = int(str(raw_dispatch_seq))
+    except (TypeError, ValueError):
+        # Malformed async events are treated like old/incomplete ones.
+        return False
+    try:
+        current_seq = int(session.get("history_version", 0))
+    except (TypeError, ValueError):
+        current_seq = 0
+
+    # During the parent turn current_seq == dispatch_seq. Immediately after the
+    # parent response is saved current_seq == dispatch_seq + 1. Anything later
+    # means the user (or another auto turn) has advanced the conversation.
+    return current_seq <= dispatch_seq + 1
+
+
 def _notification_poller_loop(
     stop_event: threading.Event, sid: str, session: dict
 ) -> None:
     """Poll completion_queue and dispatch notifications autonomously.
 
     Runs in a daemon thread started by _init_session(). Emits a
-    status.update (kind=process) for user visibility, then chains an
-    agent turn via _run_prompt_submit if the session is idle.
+    status.update (kind=process) for user-visible process/delegation status.
+    Only async delegation completions chain an agent turn; process completion
+    and watch notifications stay UI-only so they cannot hijack the active
+    conversation topic.
 
     NOTE: The completion_queue is global (one per process). If multiple
     TUI sessions coexist, whichever poller wakes first grabs the event,
@@ -8345,6 +8398,9 @@ def _notification_poller_loop(
         if _dedup_key not in _emitted:
             _emit("status.update", sid, {"kind": "process", "text": text})
             _emitted.add(_dedup_key)
+
+        if not _notification_event_should_chain_agent(evt, session):
+            continue
 
         with session["history_lock"]:
             if session.get("running"):
@@ -8388,6 +8444,9 @@ def _notification_poller_loop(
         if _dedup_key not in _emitted:
             _emit("status.update", sid, {"kind": "process", "text": text})
             _emitted.add(_dedup_key)
+
+        if not _notification_event_should_chain_agent(evt, session):
+            continue
 
         with session["history_lock"]:
             if session.get("running"):
@@ -8499,7 +8558,10 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
             )
 
             approval_token = set_current_session_key(session["session_key"])
-            session_tokens = _set_session_context(session["session_key"])
+            session_tokens = _set_session_context(
+                session["session_key"],
+                turn_seq=history_version,
+            )
             _profile_home_str = session.get("profile_home")
             if _profile_home_str:
                 home_token = set_hermes_home_override(_profile_home_str)
@@ -8930,6 +8992,9 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
             from tools.process_registry import process_registry
 
             for _evt, synth in process_registry.drain_notifications():
+                _emit("status.update", sid, {"kind": "process", "text": synth})
+                if not _notification_event_should_chain_agent(_evt, session):
+                    continue
                 with session["history_lock"]:
                     if session.get("running"):
                         process_registry.completion_queue.put(_evt)

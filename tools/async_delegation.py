@@ -103,6 +103,22 @@ def _new_delegation_id() -> str:
     return f"deleg_{uuid.uuid4().hex[:8]}"
 
 
+def _current_dispatch_turn_seq() -> str:
+    """Conversation turn sequence captured from the parent agent turn.
+
+    TUI/Desktop binds this context var at the start of a turn. The completion
+    watcher compares it with the session's current ``history_version`` so a
+    child result that finishes after the user has moved on is surfaced as a
+    status notification instead of hijacking the new topic.
+    """
+    try:
+        from gateway.session_context import get_session_env
+
+        return get_session_env("HERMES_SESSION_TURN_SEQ", "") or ""
+    except Exception:
+        return ""
+
+
 def _prune_completed_locked() -> None:
     """Drop the oldest completed records beyond the retention cap.
 
@@ -174,6 +190,7 @@ def dispatch_async_delegation(
         "session_key": session_key,
         "status": "running",
         "dispatched_at": dispatched_at,
+        "dispatch_turn_seq": _current_dispatch_turn_seq(),
         "completed_at": None,
         "interrupt_fn": interrupt_fn,
     }
@@ -295,6 +312,7 @@ def _push_completion_event(
             "duration_seconds", round(completed_at - dispatched_at, 2)
         ),
         "dispatched_at": dispatched_at,
+        "dispatch_turn_seq": record.get("dispatch_turn_seq"),
         "completed_at": completed_at,
         "exit_reason": result.get("exit_reason"),
     }
@@ -358,6 +376,7 @@ def dispatch_async_delegation_batch(
         "session_key": session_key,
         "status": "running",
         "dispatched_at": dispatched_at,
+        "dispatch_turn_seq": _current_dispatch_turn_seq(),
         "completed_at": None,
         "interrupt_fn": interrupt_fn,
         "is_batch": True,
@@ -467,6 +486,7 @@ def _finalize_batch(
         "error": combined.get("error"),
         "total_duration_seconds": combined.get("total_duration_seconds"),
         "dispatched_at": dispatched_at,
+        "dispatch_turn_seq": event_record.get("dispatch_turn_seq"),
         "completed_at": completed_at,
     }
     try:
