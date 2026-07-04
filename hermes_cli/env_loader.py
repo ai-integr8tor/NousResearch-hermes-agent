@@ -28,6 +28,7 @@ _WARNED_KEYS: set[str] = set()
 # directly (otherwise the "credentials detected ✓" line looks identical to
 # the .env case and they don't know Bitwarden is wired up).
 _SECRET_SOURCES: dict[str, str] = {}
+_SECRET_SOURCE_HOMES: dict[str, set[str]] = {}
 
 # HERMES_HOME paths we've already pulled external secrets for during this
 # process.  ``load_hermes_dotenv()`` is called at module-import time from
@@ -52,6 +53,27 @@ def get_secret_source(env_var: str) -> str | None:
     return _SECRET_SOURCES.get(env_var)
 
 
+def get_secret_source_values(
+    hermes_home: str | os.PathLike | None = None,
+) -> dict[str, str]:
+    """Return externally-sourced secret values currently present in env.
+
+    When ``hermes_home`` is provided, only values pulled while loading that
+    profile home are returned. That keeps profile scopes from inheriting
+    Bitwarden values loaded for a different profile in the same process.
+    """
+    if hermes_home is None:
+        names = set(_SECRET_SOURCES)
+    else:
+        home_key = str(Path(hermes_home).resolve())
+        names = set(_SECRET_SOURCE_HOMES.get(home_key, set()))
+    return {
+        name: os.environ[name]
+        for name in names
+        if name in os.environ and _SECRET_SOURCES.get(name)
+    }
+
+
 def reset_secret_source_cache() -> None:
     """Forget which HERMES_HOME paths have already had external secrets applied.
 
@@ -63,6 +85,8 @@ def reset_secret_source_cache() -> None:
     that want to refresh after a config change.
     """
     _APPLIED_HOMES.clear()
+    _SECRET_SOURCES.clear()
+    _SECRET_SOURCE_HOMES.clear()
 
 
 def format_secret_source_suffix(env_var: str) -> str:
@@ -338,6 +362,7 @@ def _apply_external_secret_sources(home_path: Path) -> None:
         # came from BSM rather than .env.
         for name in result.applied:
             _SECRET_SOURCES[name] = "bitwarden"
+            _SECRET_SOURCE_HOMES.setdefault(home_key, set()).add(name)
         print(
             f"  Bitwarden Secrets Manager: applied {len(result.applied)} "
             f"secret{'s' if len(result.applied) != 1 else ''} "
