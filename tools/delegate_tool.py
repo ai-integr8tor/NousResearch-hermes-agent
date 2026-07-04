@@ -3379,7 +3379,7 @@ DELEGATE_TASK_SCHEMA = {
                 ),
             },
         },
-        "required": [],
+        "required": ["goal"],
     },
 }
 
