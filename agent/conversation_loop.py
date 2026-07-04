@@ -2897,7 +2897,24 @@ def run_conversation(
                     and not isinstance(
                         api_error, (UnicodeEncodeError, json.JSONDecodeError)
                     )
+                    # ssl.SSLError (and its subclass SSLCertVerificationError)
+                    # inherits from OSError *and* ValueError via Python MRO,
+                    # so the isinstance(ValueError) check above would
+                    # misclassify a TLS transport failure as a local
+                    # programming bug and abort without retrying.  Exclude
+                    # ssl.SSLError explicitly so the error classifier's
+                    # retryable=True mapping takes effect instead.
                     and not isinstance(api_error, ssl.SSLError)
+                    # Provider/SDK "NoneType is not iterable" failures are
+                    # shape mismatches from upstream (e.g. chatgpt.com Codex
+                    # backend response.completed.output=null) — not local
+                    # programming bugs.  Even after #33042 made our own
+                    # consumer immune, third-party shims and mocked clients
+                    # can still surface this shape via TypeError.  Treat
+                    # them as retryable so the error classifier's normal
+                    # retry/fallback path runs instead of killing the turn
+                    # as non-retryable (which left Telegram users staring
+                    # at a bare "Non-retryable error" with no recovery).
                     and not (
                         isinstance(api_error, TypeError)
                         and "nonetype" in str(api_error).lower()
