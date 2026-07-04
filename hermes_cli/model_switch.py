@@ -1481,6 +1481,12 @@ def list_authenticated_providers(
     results: List[dict] = []
     seen_slugs: set = set()  # lowercase-normalized to catch case variants (#9545)
     seen_mdev_ids: set = set()  # prevent duplicate entries for aliases (e.g. kimi-coding + kimi-coding-cn)
+    # Normalised current provider for case-insensitive is_current matching.
+    # custom_provider_slug() lowercases the name, but model.provider in
+    # config.yaml may use mixed case (e.g. "custom:My-Provider"). Without
+    # this, the custom provider row's is_current check fails and the picker
+    # cannot reliably show or select the configured provider. (#58393)
+    _current_provider_lower = str(current_provider or "").strip().lower()
     # Effective base URLs of every built-in row we emit (normalized lower+rstrip).
     # Section 4 uses this to hide ``custom_providers`` entries that point at the
     # same endpoint as a built-in (e.g. a user-defined "my-dashscope" on
@@ -1674,7 +1680,7 @@ def list_authenticated_providers(
         results.append({
             "slug": slug,
             "name": display_name,
-            "is_current": slug == current_provider or mdev_id == current_provider,
+            "is_current": slug.lower() == _current_provider_lower or mdev_id == current_provider,
             "is_user_defined": False,
             "models": top,
             "total_models": total,
@@ -1836,7 +1842,7 @@ def list_authenticated_providers(
         results.append({
             "slug": hermes_slug,
             "name": get_label(hermes_slug),
-            "is_current": hermes_slug == current_provider or pid == current_provider,
+            "is_current": hermes_slug.lower() == _current_provider_lower or pid == current_provider,
             "is_user_defined": False,
             "models": top,
             "total_models": total,
@@ -1911,7 +1917,7 @@ def list_authenticated_providers(
         results.append({
             "slug": _cp.slug,
             "name": _cp.label,
-            "is_current": _cp.slug == current_provider,
+            "is_current": _cp.slug.lower() == _current_provider_lower,
             "is_user_defined": False,
             "models": _cp_top,
             "total_models": _cp_total,
@@ -2013,7 +2019,7 @@ def list_authenticated_providers(
             results.append({
                 "slug": ep_name,
                 "name": display_name,
-                "is_current": ep_name == current_provider,
+                "is_current": ep_name.lower() == _current_provider_lower,
                 "is_user_defined": True,
                 "models": models_list,
                 "total_models": len(models_list) if models_list else 0,
@@ -2276,8 +2282,8 @@ def list_authenticated_providers(
             results.append({
                 "slug": slug,
                 "name": grp["name"],
-                "is_current": slug == current_provider or (
-                    current_provider == "custom"
+                "is_current": slug.lower() == _current_provider_lower or (
+                    _current_provider_lower == "custom"
                     and bool(_current_base_url_norm)
                     and _grp_url_norm == _current_base_url_norm
                     and _current_base_url_group_count == 1
