@@ -43,6 +43,15 @@ def test_latest_message_wins_on_conflict():
     assert "wins" in lower or "supersede" in lower or "discard" in lower or "priority" in lower
 
 
+def test_latest_live_message_controls_reply_language():
+    """The handoff must explicitly prevent the summary's language from steering the reply."""
+    lower = SUMMARY_PREFIX.lower()
+    assert "language" in lower
+    assert "latest live user message" in lower
+    assert "summary's language" in lower
+    assert "override" in lower
+
+
 def test_handoff_sections_are_framed_as_historical():
     """The summary headings referenced in the prefix must sound historical,
     not like live instructions for the current turn."""
