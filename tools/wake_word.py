@@ -73,6 +73,11 @@ def _get(cfg: Dict[str, Any], key: str) -> Any:
     return _DEFAULTS.get(key) if val is None else val
 
 
+def _dict_section(cfg: Dict[str, Any], key: str) -> Dict[str, Any]:
+    val = cfg.get(key)
+    return val if isinstance(val, dict) else {}
+
+
 def _provider(cfg: Dict[str, Any]) -> str:
     return str(_get(cfg, "provider")).strip().lower() or "openwakeword"
 
@@ -111,8 +116,8 @@ def wake_surface_enabled(surface: str, cfg: Optional[Dict[str, Any]] = None) -> 
 # ---------------------------------------------------------------------------
 
 def _import_audio():
-    import numpy as np
-    import sounddevice as sd
+    import numpy as np  # type: ignore[unresolved-import]
+    import sounddevice as sd  # type: ignore[unresolved-import]
 
     return sd, np
 
@@ -164,10 +169,10 @@ class _OpenWakeWordEngine(_Engine):
 
         lazy_deps.ensure("wake.openwakeword", prompt=False)
 
-        import openwakeword
-        from openwakeword.model import Model
+        import openwakeword  # type: ignore[unresolved-import]
+        from openwakeword.model import Model  # type: ignore[unresolved-import]
 
-        sub = cfg.get("openwakeword") if isinstance(cfg.get("openwakeword"), dict) else {}
+        sub = _dict_section(cfg, "openwakeword")
         model_ref = str(sub.get("model") or "hey_jarvis").strip()
         framework = str(sub.get("inference_framework") or "onnx").strip().lower()
         self._threshold = _sensitivity(cfg)
@@ -210,7 +215,7 @@ class _PorcupineEngine(_Engine):
 
         lazy_deps.ensure("wake.porcupine", prompt=False)
 
-        import pvporcupine
+        import pvporcupine  # type: ignore[unresolved-import]
 
         access_key = (os.getenv("PORCUPINE_ACCESS_KEY") or "").strip()
         if not access_key:
@@ -219,7 +224,7 @@ class _PorcupineEngine(_Engine):
                 "(get a free key at https://console.picovoice.ai)."
             )
 
-        sub = cfg.get("porcupine") if isinstance(cfg.get("porcupine"), dict) else {}
+        sub = _dict_section(cfg, "porcupine")
         keyword = str(sub.get("keyword") or "jarvis").strip()
         sensitivity = _sensitivity(cfg)
 

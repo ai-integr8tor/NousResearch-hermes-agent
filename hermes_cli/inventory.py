@@ -118,6 +118,7 @@ def build_models_payload(
     capabilities: bool = False,
     force_fresh_nous_tier: bool = False,
     refresh: bool = False,
+    probe_custom_providers: bool = True,
     max_models: int | None = None,
 ) -> dict:
     """Build the ``{providers, model, provider}`` shape every consumer
@@ -149,6 +150,11 @@ def build_models_payload(
       re-fetches its live catalog. Set only for an explicit user-triggered
       "refresh models" action; normal picker opens leave it false to stay
       snappy on the 1h cache.
+    - ``probe_custom_providers``: allow saved custom/provider endpoints to
+      run live ``/models`` discovery while building the payload. GUI picker
+      opens should leave this false unless the user explicitly refreshes; the
+      row can still render its configured model immediately, and slow/offline
+      local endpoints no longer block the dialog.
     """
     from hermes_cli.model_switch import list_authenticated_providers
 
@@ -161,9 +167,10 @@ def build_models_payload(
         force_fresh_nous_tier=force_fresh_nous_tier,
         max_models=max_models,
         refresh=refresh,
+        probe_custom_providers=probe_custom_providers,
     )
 
-    moa_row = _moa_provider_row(ctx)
+    moa_row = _moa_provider_row(ctx.current_provider)
     if moa_row is not None:
         rows = [moa_row] + [r for r in rows if str(r.get("slug", "")).lower() != "moa"]
 
@@ -442,7 +449,13 @@ def _apply_pricing(
                 row["unavailable_models"] = []
 
 
-def _moa_provider_row(ctx: ConfigContext) -> dict | None:
+def _moa_provider_row(current_provider: str = "") -> dict | None:
+    """Build the virtual ``moa`` provider row for model pickers.
+
+    Shared by the CLI inventory (:func:`build_models_payload`) and the gateway
+    picker path (:func:`hermes_cli.model_switch.list_picker_providers`) so the
+    row shape stays in one place. Returns ``None`` when no MoA presets exist.
+    """
     try:
         from hermes_cli.config import load_config
         from hermes_cli.moa_config import normalize_moa_config
@@ -454,7 +467,7 @@ def _moa_provider_row(ctx: ConfigContext) -> dict | None:
         return {
             "slug": "moa",
             "name": "Mixture of Agents",
-            "is_current": (ctx.current_provider or "").lower() == "moa",
+            "is_current": (current_provider or "").lower() == "moa",
             "is_user_defined": False,
             "models": models,
             "total_models": len(models),
