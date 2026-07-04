@@ -73,6 +73,45 @@ def test_rg_count_timeout_returns_partial_counts(ops, monkeypatch):
     assert result.counts == {"src/a.py": 3, "src/b.py": 5}
 
 
+@pytest.mark.parametrize("command", ["rg", "grep"])
+def test_content_search_marks_exact_fetch_limit_as_truncated(ops, monkeypatch, command):
+    lines = [f"src/file_{i}.py:10:foo" for i in range(50)]
+    ops.env.execute.side_effect = path_exists_or("\n".join(lines), returncode=0)
+    monkeypatch.setattr(ops, "_has_command", lambda cmd: cmd == command)
+
+    result = ops.search("foo", path="/big", target="content", limit=50, offset=0)
+
+    assert result.error is None
+    assert len(result.matches) == 50
+    assert result.truncated is True
+
+
+@pytest.mark.parametrize("command", ["rg", "grep"])
+def test_files_only_search_marks_exact_fetch_limit_as_truncated(ops, monkeypatch, command):
+    lines = [f"src/file_{i}.py" for i in range(50)]
+    ops.env.execute.side_effect = path_exists_or("\n".join(lines), returncode=0)
+    monkeypatch.setattr(ops, "_has_command", lambda cmd: cmd == command)
+
+    result = ops.search("foo", path="/big", target="content", output_mode="files_only", limit=50, offset=0)
+
+    assert result.error is None
+    assert result.files == lines
+    assert result.truncated is True
+
+
+@pytest.mark.parametrize("command", ["rg", "grep"])
+def test_count_search_marks_exact_fetch_limit_as_truncated(ops, monkeypatch, command):
+    lines = [f"src/file_{i}.py:1" for i in range(50)]
+    ops.env.execute.side_effect = path_exists_or("\n".join(lines), returncode=0)
+    monkeypatch.setattr(ops, "_has_command", lambda cmd: cmd == command)
+
+    result = ops.search("foo", path="/big", target="content", output_mode="count", limit=50, offset=0)
+
+    assert result.error is None
+    assert len(result.counts) == 50
+    assert result.truncated is True
+
+
 def test_rg_file_timeout_does_not_retry_unsorted(ops, monkeypatch):
     calls = 0
 

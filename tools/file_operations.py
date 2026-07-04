@@ -2235,7 +2235,7 @@ class ShellFileOperations(FileOperations):
             return SearchResult(
                 files=page,
                 total_count=total,
-                truncated=bool(limit_reason),
+                truncated=total >= fetch_limit or bool(limit_reason),
                 limit_reason=limit_reason,
             )
         
@@ -2252,7 +2252,7 @@ class ShellFileOperations(FileOperations):
             return SearchResult(
                 counts=counts,
                 total_count=sum(counts.values()),
-                truncated=bool(limit_reason),
+                truncated=len(counts) >= fetch_limit or bool(limit_reason),
                 limit_reason=limit_reason,
             )
         
@@ -2295,7 +2295,7 @@ class ShellFileOperations(FileOperations):
             return SearchResult(
                 matches=page,
                 total_count=total,
-                truncated=total > offset + limit or bool(limit_reason),
+                truncated=total >= fetch_limit or bool(limit_reason),
                 limit_reason=limit_reason,
             )
     
@@ -2361,7 +2361,7 @@ class ShellFileOperations(FileOperations):
             return SearchResult(
                 files=page,
                 total_count=total,
-                truncated=bool(limit_reason),
+                truncated=total >= fetch_limit or bool(limit_reason),
                 limit_reason=limit_reason,
             )
         
@@ -2378,7 +2378,7 @@ class ShellFileOperations(FileOperations):
             return SearchResult(
                 counts=counts,
                 total_count=sum(counts.values()),
-                truncated=bool(limit_reason),
+                truncated=len(counts) >= fetch_limit or bool(limit_reason),
                 limit_reason=limit_reason,
             )
         
@@ -2418,6 +2418,6 @@ class ShellFileOperations(FileOperations):
             return SearchResult(
                 matches=page,
                 total_count=total,
-                truncated=total > offset + limit or bool(limit_reason),
+                truncated=total >= fetch_limit or bool(limit_reason),
                 limit_reason=limit_reason,
             )
