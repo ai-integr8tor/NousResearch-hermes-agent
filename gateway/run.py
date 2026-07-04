@@ -9431,6 +9431,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if canonical == "stop":
             return await self._handle_stop_command(event)
         
+        if canonical == "exit-restricted":
+            return await self._handle_exit_restricted_command(event)
+        
         if canonical == "reasoning":
             return await self._handle_reasoning_command(event)
 
