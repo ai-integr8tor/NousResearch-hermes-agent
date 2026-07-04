@@ -100,6 +100,19 @@ _DESKTOP_WINDOW_NAMES = (
     "finder", "desktop", "dock",              # macOS desktop / shell
 )
 
+# Linux/X11: cua-driver currently reports z_index=0 for every window and can
+# surface GNOME desktop/shell helpers (ding "Desktop Icons", @!x,y;BDHF) ahead
+# of real app windows. Default capture must skip those and, when z-order is
+# uninformative, prefer the X11 active window (#58026).
+_LINUX_SHELL_WINDOW_TITLE_PREFIXES = (
+    "@!",              # GNOME Shell background/monitor helper windows
+    "Desktop Icons",   # gnome-shell-extension-ding
+    "Desktop",
+    "gnome-shell",
+    "GNOME Shell",
+)
+_LINUX_SHELL_APP_NAMES = frozenset({"ding", "gnome-shell", "gnome shell"})
+
 
 # Env var cua-driver reads to gate its anonymous usage telemetry (PostHog).
 # Setting it to "0" disables telemetry; absence => the binary's own default
@@ -139,6 +152,101 @@ def cua_driver_child_env(base_env: Optional[Dict[str, str]] = None) -> Dict[str,
     if _cua_telemetry_disabled():
         env[_CUA_TELEMETRY_ENV_VAR] = "0"
     return env
+
+
+def _window_from_list_windows_entry(w: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize one cua-driver ``list_windows`` entry for capture routing."""
+    return {
+        "app_name": w.get("app_name", ""),
+        "pid": int(w["pid"]),
+        "window_id": int(w["window_id"]),
+        # cua-driver on Linux may return JSON null for is_on_screen.
+        # Treat only explicit False as off-screen; null means "unknown".
+        "off_screen": w.get("is_on_screen") is False,
+        "title": w.get("title", ""),
+        "z_index": w.get("z_index", 0),
+    }
+
+
+def _window_matches_app_filter(w: Dict[str, Any], app_lower: str) -> bool:
+    """Return True when a normalized window matches a capture(app=...) filter."""
+    app_name = w.get("app_name", "")
+    title = w.get("title", "")
+    return app_lower in app_name.lower() or (
+        not app_name.strip() and app_lower in title.lower()
+    )
+
+
+def _is_linux_shell_helper_window(w: Dict[str, Any]) -> bool:
+    """Return True for GNOME desktop/shell windows that capture as empty."""
+    if sys.platform != "linux":
+        return False
+    app_name = (w.get("app_name") or "").strip().lower()
+    if app_name in _LINUX_SHELL_APP_NAMES:
+        return True
+    title = (w.get("title") or "").strip()
+    title_lower = title.lower()
+    return any(
+        title.startswith(prefix) or title_lower.startswith(prefix.lower())
+        for prefix in _LINUX_SHELL_WINDOW_TITLE_PREFIXES
+    )
+
+
+def _z_index_uninformative(windows: List[Dict[str, Any]]) -> bool:
+    """True when every window shares the same z_index (common on Linux/X11)."""
+    if not windows:
+        return True
+    return len({w.get("z_index", 0) for w in windows}) <= 1
+
+
+def _linux_x11_active_window_id() -> Optional[int]:
+    """Best-effort read of ``_NET_ACTIVE_WINDOW`` via xprop. Never raises."""
+    if sys.platform != "linux" or not os.environ.get("DISPLAY"):
+        return None
+    try:
+        proc = subprocess.run(
+            ["xprop", "-root", "_NET_ACTIVE_WINDOW"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except Exception:
+        return None
+    if proc.returncode != 0:
+        return None
+    match = re.search(r"window id # (0x[0-9a-fA-F]+)", proc.stdout or "")
+    if not match:
+        match = re.search(r"(0x[0-9a-fA-F]+)", proc.stdout or "")
+    if not match:
+        return None
+    try:
+        return int(match.group(1), 16)
+    except ValueError:
+        return None
+
+
+def _select_capture_target(
+    windows: List[Dict[str, Any]], *, app_requested: bool
+) -> Dict[str, Any]:
+    """Select the best window for capture from normalized list_windows output."""
+    on_screen = [w for w in windows if not w.get("off_screen")]
+    pool = on_screen or list(windows)
+
+    if not app_requested and sys.platform == "linux":
+        app_windows = [w for w in pool if not _is_linux_shell_helper_window(w)]
+        if app_windows:
+            pool = app_windows
+        if _z_index_uninformative(pool):
+            active_id = _linux_x11_active_window_id()
+            if active_id is not None:
+                for w in pool:
+                    if w.get("window_id") == active_id:
+                        return w
+
+    if pool:
+        return pool[0]
+    return windows[0]
 
 
 def _resolve_mcp_invocation(
@@ -933,14 +1041,11 @@ def _ingest_windows(raw_windows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             pid_int, window_id_int = int(pid), int(window_id)
         except (TypeError, ValueError):
             continue
-        windows.append({
-            "app_name": w.get("app_name", ""),
-            "pid": pid_int,
-            "window_id": window_id_int,
-            "off_screen": not w.get("is_on_screen", True),
-            "title": w.get("title", ""),
-            "z_index": w.get("z_index", 0),
-        })
+        windows.append(
+            _window_from_list_windows_entry(
+                {**w, "pid": pid_int, "window_id": window_id_int}
+            )
+        )
     return windows
 
 
@@ -1064,7 +1169,7 @@ class CuaDriverBackend(ComputerUseBackend):
         )
         raw_windows = (lw_out.get("structuredContent") or {}).get("windows") or []
         windows = _ingest_windows(raw_windows)
-        # Sort by z_index descending (lowest z_index = frontmost on macOS).
+        # Sort by z_index ascending (lowest z_index = frontmost on macOS).
         windows.sort(key=lambda w: w["z_index"])
 
         if not windows:
@@ -1115,7 +1220,10 @@ class CuaDriverBackend(ComputerUseBackend):
             )
         elif app:
             app_lower = app.lower()
-            filtered = [w for w in windows if app_lower in w["app_name"].lower()]
+            filtered = [
+                w for w in windows
+                if _window_matches_app_filter(w, app_lower)
+            ]
             if not filtered:
                 return CaptureResult(
                     mode=mode, width=0, height=0, png_b64=None,
@@ -1131,7 +1239,7 @@ class CuaDriverBackend(ComputerUseBackend):
             windows = filtered
 
         # Pick first on-screen window (sorted by z_index / z-order above).
-        target = next((w for w in windows if not w["off_screen"]), windows[0])
+        target = _select_capture_target(windows, app_requested=bool(app))
         self._active_pid = target["pid"]
         self._active_window_id = target["window_id"]
         app_name = target["app_name"]
@@ -1462,7 +1570,10 @@ class CuaDriverBackend(ComputerUseBackend):
         windows.sort(key=lambda w: w["z_index"])
 
         app_lower = app.lower()
-        matched = [w for w in windows if app_lower in w["app_name"].lower()]
+        matched = [
+            w for w in windows
+            if not w["off_screen"] and _window_matches_app_filter(w, app_lower)
+        ]
         # Don't silently fall back to the frontmost window when the filter
         # matches nothing — that hides the real failure (often a localized
         # macOS app name mismatch, e.g. caller passed "Calculator" but
