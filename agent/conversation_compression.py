@@ -658,6 +658,27 @@ def compress_context(
         finally:
             _release_lock()
 
+    if (
+        getattr(
+            agent.context_compressor,
+            "last_compression_status",
+            getattr(agent.context_compressor, "_last_compression_status", ""),
+        )
+        == "noop"
+    ):
+        try:
+            logger.info(
+                "context compression no-op: session=%s messages=%d unchanged; skipping session boundary",
+                agent.session_id or "none",
+                _pre_msg_count,
+            )
+            _existing_sp = getattr(agent, "_cached_system_prompt", None)
+            if not _existing_sp:
+                _existing_sp = agent._build_system_prompt(system_message)
+            return compressed, _existing_sp
+        finally:
+            _release_lock()
+
     try:
         summary_error = getattr(agent.context_compressor, "_last_summary_error", None)
         if summary_error:
