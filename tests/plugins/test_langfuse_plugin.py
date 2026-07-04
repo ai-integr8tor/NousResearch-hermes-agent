@@ -713,6 +713,22 @@ class TestPlaceholderKeyDetection:
 
         assert _FakeLangfuse.instances == []
 
+    def test_unknown_service_name_fails_closed(self, monkeypatch, tmp_path):
+        self._clear_env(monkeypatch)
+        self._write_config(
+            tmp_path,
+            "observability:\n  service_name: unknown_service\n",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+        monkeypatch.setenv("HERMES_LANGFUSE_PUBLIC_KEY", "pk-lf-real-public-xyz")
+        monkeypatch.setenv("HERMES_LANGFUSE_SECRET_KEY", "sk-lf-real-secret-xyz")
+        plugin = self._fresh_plugin(monkeypatch)
+
+        with pytest.raises(RuntimeError, match="unknown_service"):
+            plugin._get_langfuse()
+
+        assert _FakeLangfuse.instances == []
+
     def test_service_name_sets_otel_resource_before_client_init(self, monkeypatch, tmp_path):
         self._clear_env(monkeypatch)
         self._write_config(
@@ -723,6 +739,31 @@ class TestPlaceholderKeyDetection:
         monkeypatch.setenv("HERMES_LANGFUSE_PUBLIC_KEY", "pk-lf-real-public-xyz")
         monkeypatch.setenv("HERMES_LANGFUSE_SECRET_KEY", "sk-lf-real-secret-xyz")
         monkeypatch.setenv("OTEL_RESOURCE_ATTRIBUTES", "deployment.environment=fleet-2-staging")
+        plugin = self._fresh_plugin(monkeypatch)
+
+        client = plugin._get_langfuse()
+
+        assert isinstance(client, _FakeLangfuse)
+        assert os.environ["OTEL_SERVICE_NAME"] == "riemann"
+        assert os.environ["OTEL_RESOURCE_ATTRIBUTES"].split(",") == [
+            "service.name=riemann",
+            "deployment.environment=fleet-2-staging",
+        ]
+
+    def test_service_name_overwrites_stale_otel_identity(self, monkeypatch, tmp_path):
+        self._clear_env(monkeypatch)
+        self._write_config(
+            tmp_path,
+            "observability:\n  service_name: riemann\n",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+        monkeypatch.setenv("HERMES_LANGFUSE_PUBLIC_KEY", "pk-lf-real-public-xyz")
+        monkeypatch.setenv("HERMES_LANGFUSE_SECRET_KEY", "sk-lf-real-secret-xyz")
+        monkeypatch.setenv("OTEL_SERVICE_NAME", "unknown_service")
+        monkeypatch.setenv(
+            "OTEL_RESOURCE_ATTRIBUTES",
+            "deployment.environment=fleet-2-staging,service.name=unknown_service",
+        )
         plugin = self._fresh_plugin(monkeypatch)
 
         client = plugin._get_langfuse()

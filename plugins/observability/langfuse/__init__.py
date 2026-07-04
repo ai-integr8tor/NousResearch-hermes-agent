@@ -84,6 +84,7 @@ _LANGFUSE_KEY_PREFIXES: Dict[str, str] = {
     "HERMES_LANGFUSE_PUBLIC_KEY": "pk-lf-",
     "HERMES_LANGFUSE_SECRET_KEY": "sk-lf-",
 }
+_INVALID_SERVICE_NAMES = {"unknown_service"}
 
 
 def _env(name: str, default: str = "") -> str:
@@ -188,13 +189,17 @@ def _configured_service_name() -> str:
 
 
 def _ensure_otel_service_name(service_name: str) -> None:
-    os.environ.setdefault("OTEL_SERVICE_NAME", service_name)
+    os.environ["OTEL_SERVICE_NAME"] = service_name
 
     resource_attributes = _env("OTEL_RESOURCE_ATTRIBUTES")
     parts = [part.strip() for part in resource_attributes.split(",") if part.strip()]
-    if not any(part.split("=", 1)[0].strip() == "service.name" for part in parts):
-        parts.insert(0, f"service.name={service_name}")
-        os.environ["OTEL_RESOURCE_ATTRIBUTES"] = ",".join(parts)
+    parts = [
+        part
+        for part in parts
+        if part.split("=", 1)[0].strip() != "service.name"
+    ]
+    parts.insert(0, f"service.name={service_name}")
+    os.environ["OTEL_RESOURCE_ATTRIBUTES"] = ",".join(parts)
 
 
 def _get_langfuse() -> Optional[Langfuse]:
@@ -270,11 +275,12 @@ def _get_langfuse() -> Optional[Langfuse]:
             logger.warning("Invalid HERMES_LANGFUSE_SAMPLE_RATE=%r", sample_rate)
 
     service_name = _configured_service_name()
-    if not service_name:
+    if not service_name or service_name in _INVALID_SERVICE_NAMES:
         raise RuntimeError(
             "Langfuse plugin is enabled but observability.service_name is "
-            "missing or empty in Hermes config; refusing to initialize because "
-            "OpenTelemetry would emit service.name=unknown_service"
+            "missing, empty, or unknown_service in Hermes config; refusing to "
+            "initialize because OpenTelemetry would emit an unattributable "
+            "service.name"
         )
     _ensure_otel_service_name(service_name)
 
