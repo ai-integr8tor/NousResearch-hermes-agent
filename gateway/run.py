@@ -9143,6 +9143,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     return await self._handle_update_command(event)
                 if _cmd_def_inner.name == "version":
                     return await self._handle_version_command(event)
+                if _cmd_def_inner.name == "context-audit":
+                    return await self._handle_context_audit_command(event)
 
             # Catch-all: any other recognized slash command reached the
             # running-agent guard. Reject gracefully rather than falling
@@ -9406,6 +9408,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         if canonical == "status":
             return await self._handle_status_command(event)
+
+        if canonical == "context-audit":
+            return await self._handle_context_audit_command(event)
 
         if canonical == "agents":
             return await self._handle_agents_command(event)
