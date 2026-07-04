@@ -169,12 +169,12 @@ def _hermes_config_path() -> Path:
 def _configured_service_name() -> str:
     config_path = _hermes_config_path()
     if yaml is None:
-        raise RuntimeError(
+        raise LangfuseServiceNameError(
             "Langfuse plugin requires observability.service_name in Hermes "
             "config, but PyYAML is unavailable so config.yaml cannot be read"
         )
     if not config_path.is_file():
-        raise RuntimeError(
+        raise LangfuseServiceNameError(
             "Langfuse plugin requires observability.service_name in Hermes "
             f"config, but {config_path} does not exist"
         )
@@ -182,7 +182,7 @@ def _configured_service_name() -> str:
         with config_path.open("r", encoding="utf-8") as handle:
             config = yaml.safe_load(handle) or {}
     except Exception as exc:
-        raise RuntimeError(
+        raise LangfuseServiceNameError(
             "Langfuse plugin requires observability.service_name in Hermes "
             f"config, but {config_path} could not be read: {exc}"
         ) from exc

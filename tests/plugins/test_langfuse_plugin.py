@@ -100,6 +100,23 @@ class TestDiscovery:
         with pytest.raises(RuntimeError, match="observability.service_name"):
             manager.discover_and_load()
 
+    def test_service_name_config_read_failures_are_fail_closed(self, tmp_path, monkeypatch):
+        langfuse_plugin = importlib.import_module("plugins.observability.langfuse")
+
+        home = tmp_path / ".hermes"
+        home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        monkeypatch.setenv("HERMES_LANGFUSE_PUBLIC_KEY", "pk-lf-real-public-xyz")
+        monkeypatch.setenv("HERMES_LANGFUSE_SECRET_KEY", "sk-lf-real-secret-xyz")
+
+        with pytest.raises(langfuse_plugin.LangfuseServiceNameError, match="does not exist"):
+            langfuse_plugin._require_service_name()
+
+        (home / "config.yaml").write_text("observability: [", encoding="utf-8")
+
+        with pytest.raises(langfuse_plugin.LangfuseServiceNameError, match="could not be read"):
+            langfuse_plugin._require_service_name()
+
     def test_fail_closed_hook_error_is_not_swallowed(self):
         from hermes_cli import plugins as plugins_mod
         from plugins.observability.langfuse import LangfuseServiceNameError
