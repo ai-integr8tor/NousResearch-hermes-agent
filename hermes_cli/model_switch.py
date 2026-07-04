@@ -671,6 +671,29 @@ def resolve_display_context_length(
 # Configured-provider detection for typed model names
 # ---------------------------------------------------------------------------
 
+_DECLARED_MODEL_KEYS = ("models", "available_models", "model", "default_model")
+
+
+def _match_declared_model(value, target: str) -> Optional[str]:
+    """Return the configured model id matching ``target``, if any."""
+    if isinstance(value, str):
+        return value if value.strip().lower() == target else None
+    if isinstance(value, dict):
+        for mid in value:
+            if isinstance(mid, str) and mid.strip().lower() == target:
+                return mid
+        return None
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            if isinstance(item, str) and item.strip().lower() == target:
+                return item
+            if isinstance(item, dict):
+                name = item.get("name")
+                if isinstance(name, str) and name.strip().lower() == target:
+                    return name
+        return None
+    return None
+
 
 def _configured_provider_matches(
     model_name: str,
@@ -697,35 +720,14 @@ def _configured_provider_matches(
         return {}
     target = model_name.strip().lower()
 
-    def _match(value) -> Optional[str]:
-        """Canonical id if ``value`` (a model collection or scalar) declares
-        ``target``, else None."""
-        if isinstance(value, str):
-            return value if value.strip().lower() == target else None
-        if isinstance(value, dict):
-            for mid in value:
-                if isinstance(mid, str) and mid.strip().lower() == target:
-                    return mid
-            return None
-        if isinstance(value, (list, tuple)):
-            for item in value:
-                if isinstance(item, str) and item.strip().lower() == target:
-                    return item
-                if isinstance(item, dict):
-                    name = item.get("name")
-                    if isinstance(name, str) and name.strip().lower() == target:
-                        return name
-            return None
-        return None
-
     matches: dict[str, str] = {}
 
     if isinstance(user_providers, dict):
         for slug, cfg in user_providers.items():
             if not isinstance(slug, str) or not isinstance(cfg, dict):
                 continue
-            for key in ("models", "model", "default_model"):
-                hit = _match(cfg.get(key))
+            for key in _DECLARED_MODEL_KEYS:
+                hit = _match_declared_model(cfg.get(key), target)
                 if hit:
                     matches[slug] = hit
                     break
@@ -740,13 +742,48 @@ def _configured_provider_matches(
             slug = f"custom:{name}"
             if slug in matches:
                 continue
-            for key in ("models", "model", "default_model"):
-                hit = _match(entry.get(key))
+            for key in _DECLARED_MODEL_KEYS:
+                hit = _match_declared_model(entry.get(key), target)
                 if hit:
                     matches[slug] = hit
                     break
 
     return matches
+
+
+def _parse_configured_provider_model_input(
+    raw_input: str,
+    user_providers: Optional[dict],
+    custom_providers: Optional[list],
+) -> Optional[tuple[str, str]]:
+    """Parse ``provider:model`` only for configured providers.
+
+    Generic colon syntax is intentionally not part of the public ``/model``
+    contract because many provider model ids use colon suffixes.  A left-hand
+    side that resolves to a user-configured provider is unambiguous, though, so
+    accept that form for hand-configured gateway providers.
+    """
+    stripped = str(raw_input or "").strip()
+    if ":" not in stripped:
+        return None
+
+    candidates: list[tuple[str, str]] = []
+    if stripped.lower().startswith("custom:"):
+        first, second, rest = stripped.partition(":")
+        custom_name, sep, model = rest.partition(":")
+        if sep and custom_name.strip() and model.strip():
+            candidates.append((f"{first}:{custom_name.strip()}", model.strip()))
+
+    provider, sep, model = stripped.partition(":")
+    if sep and provider.strip() and model.strip():
+        candidates.append((provider.strip(), model.strip()))
+
+    for provider_name, model_name in candidates:
+        pdef = resolve_provider_full(provider_name, user_providers, custom_providers)
+        if pdef is not None and pdef.source == "user-config":
+            return (pdef.id, model_name)
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -813,6 +850,15 @@ def switch_model(
     new_model = raw_input.strip()
     target_provider = current_provider
     resolved_moa_preset = False
+
+    if not explicit_provider:
+        configured_pair = _parse_configured_provider_model_input(
+            new_model,
+            user_providers,
+            custom_providers,
+        )
+        if configured_pair:
+            explicit_provider, new_model = configured_pair
 
     # =================================================================
     # PATH A: Explicit --provider given
@@ -1241,18 +1287,15 @@ def switch_model(
         override = False
         if user_providers:
             # user_providers is a dict: {provider_slug: config_dict}
+            _new_model_lower = new_model.strip().lower()
             for slug, cfg in user_providers.items():
                 if slug == target_provider:
-                    cfg_models = cfg.get("models", {})
-                    # Direct membership works for dict (keys) and list (strings)
-                    if new_model in cfg_models:
-                        override = True
-                        break
-                    # Also accept if models is a list of dicts with 'name' field
-                    if isinstance(cfg_models, list):
-                        if any(m.get("name") == new_model for m in cfg_models if isinstance(m, dict)):
+                    for key in _DECLARED_MODEL_KEYS:
+                        if _match_declared_model(cfg.get(key), _new_model_lower):
                             override = True
                             break
+                    if override:
+                        break
         # Also check custom_providers list — models declared there should be accepted
         # even if the remote /v1/models endpoint doesn't list them.
         if not override and custom_providers and isinstance(custom_providers, list):
@@ -1264,14 +1307,12 @@ def switch_model(
                 entry_slug = f"custom:{entry_name}" if entry_name else ""
                 entry_url = entry.get("base_url", "")
                 if entry_slug == target_provider or entry_url == base_url:
-                    # Check if the requested model matches the entry's model
-                    entry_model = entry.get("model", "")
-                    entry_models = entry.get("models", {})
-                    if new_model == entry_model:
-                        override = True
-                        break
-                    if isinstance(entry_models, dict) and new_model in entry_models:
-                        override = True
+                    # Check if the requested model matches a declared model.
+                    for key in _DECLARED_MODEL_KEYS:
+                        if _match_declared_model(entry.get(key), new_model.strip().lower()):
+                            override = True
+                            break
+                    if override:
                         break
         if override:
             validation = {"accepted": True, "persist": True, "recognized": False, "message": validation.get("message", "")}
@@ -1967,6 +2008,15 @@ def list_authenticated_providers(
                 for m in cfg_models:
                     if m and m not in models_list:
                         models_list.append(m)
+            available_models = ep_cfg.get("available_models", [])
+            if isinstance(available_models, dict):
+                for m in available_models:
+                    if m and m not in models_list:
+                        models_list.append(m)
+            elif isinstance(available_models, list):
+                for m in available_models:
+                    if m and m not in models_list:
+                        models_list.append(m)
 
             # Official OpenAI API rows in providers: often have base_url but no
             # explicit models: dict — avoid a misleading zero count in /model.
@@ -2178,6 +2228,15 @@ def list_authenticated_providers(
                         groups[group_key]["models"].append(m)
             elif isinstance(cfg_models, list):
                 for m in cfg_models:
+                    if m and m not in groups[group_key]["models"]:
+                        groups[group_key]["models"].append(m)
+            available_models = entry.get("available_models", [])
+            if isinstance(available_models, dict):
+                for m in available_models:
+                    if m and m not in groups[group_key]["models"]:
+                        groups[group_key]["models"].append(m)
+            elif isinstance(available_models, list):
+                for m in available_models:
                     if m and m not in groups[group_key]["models"]:
                         groups[group_key]["models"].append(m)
 
