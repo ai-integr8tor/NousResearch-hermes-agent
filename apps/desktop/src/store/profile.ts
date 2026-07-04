@@ -116,6 +116,14 @@ export async function refreshActiveProfile(): Promise<void> {
     })
 
     setActiveProfile(res.current || 'default')
+
+    // Sync the gateway profile so the session sidebar immediately reflects the
+    // correct profile scope on reconnect/restart, instead of defaulting to
+    // 'default' until the user manually taps a profile pill.
+    const current = normalizeProfileKey(res.current)
+    if (current !== normalizeProfileKey($activeGatewayProfile.get())) {
+      $activeGatewayProfile.set(current)
+    }
   } catch {
     // Backend may not be ready; keep the last known value.
   }
