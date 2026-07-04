@@ -281,11 +281,6 @@ def _build_responses_payload(
             "background": "opaque",
             "partial_images": 1,
         }],
-        "tool_choice": {
-            "type": "allowed_tools",
-            "mode": "required",
-            "tools": [{"type": "image_generation"}],
-        },
         "stream": True,
     }
 
