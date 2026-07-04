@@ -123,6 +123,13 @@ class TestHelperFunctions(unittest.TestCase):
             "john@example.com"
         )
 
+    def test_recipient_email_address_extracts_from_session_key(self):
+        from plugins.platforms.email.adapter import _recipient_email_address
+        self.assertEqual(
+            _recipient_email_address("agent:main:email:dm:John@Example.COM"),
+            "john@example.com",
+        )
+
     def test_strip_html_basic(self):
         from plugins.platforms.email.adapter import _strip_html
         html = "<p>Hello <b>world</b></p>"
@@ -890,6 +897,28 @@ class TestSendMethods(unittest.TestCase):
             mock_server.login.assert_called_once_with("hermes@test.com", "secret")
             mock_server.send_message.assert_called_once()
             mock_server.quit.assert_called_once()
+
+    def test_send_extracts_recipient_from_compound_session_key(self):
+        """Compound gateway session keys should not become SMTP To: addresses."""
+        import asyncio
+        adapter = self._make_adapter()
+        adapter._thread_context["user@test.com"] = {
+            "subject": "Cron result",
+            "message_id": "<original@test.com>",
+        }
+
+        with patch("smtplib.SMTP") as mock_smtp:
+            mock_server = MagicMock()
+            mock_smtp.return_value = mock_server
+
+            result = asyncio.run(
+                adapter.send("agent:main:email:dm:user@test.com", "Hello from Hermes!")
+            )
+
+            self.assertTrue(result.success)
+            sent_msg = mock_server.send_message.call_args[0][0]
+            self.assertEqual(sent_msg["To"], "user@test.com")
+            self.assertEqual(sent_msg["Subject"], "Re: Cron result")
 
     def test_send_failure_returns_error(self):
         """SMTP failure should return SendResult with error."""
