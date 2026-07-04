@@ -1639,7 +1639,7 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
             val = os.getenv(name, "")
         return val or ""
 
-    api_server_enabled = _scoped_env("API_SERVER_ENABLED").lower() in {"true", "1", "yes"}
+    api_server_enabled = is_truthy_value(_scoped_env("API_SERVER_ENABLED"))
     api_server_key = _scoped_env("API_SERVER_KEY")
     api_server_cors_origins = os.getenv("API_SERVER_CORS_ORIGINS", "")
     api_server_port = os.getenv("API_SERVER_PORT")
