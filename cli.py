@@ -5004,6 +5004,12 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         """
         return getattr(self, "_voice_record_key_display_cache", None) or "Ctrl+B"
 
+    def _busy_input_placeholder(self) -> str:
+        """Return the inline busy-input hint shown above the composer."""
+        return (
+            f"msg={self.busy_input_mode} · /queue · /bg · /steer · Ctrl+C cancel"
+        )
+
     def set_voice_record_key_cache(self, raw_key: object) -> None:
         """Populate the voice label cache from a raw ``voice.record_key``.
 
@@ -14207,7 +14213,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                 status = cli_ref._command_status or "Processing command..."
                 return f"{frame} {status}"
             if cli_ref._agent_running:
-                return "msg=interrupt · /queue · /bg · /steer · Ctrl+C cancel"
+                return cli_ref._busy_input_placeholder()
             if cli_ref._voice_mode:
                 _label = cli_ref._voice_record_key_label()
                 return f"type or {_label} to record"
