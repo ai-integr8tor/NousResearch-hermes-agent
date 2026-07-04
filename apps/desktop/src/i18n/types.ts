@@ -1550,6 +1550,8 @@ export interface Translations {
     recommended: string
     connected: string
     featuredPitch: string
+    apiKeyProviderTitle: string
+    apiKeyProviderPitch: string
     openRouterPitch: string
     apiKeyOptions: Record<string, { short: string; description: string }>
     backToSignIn: string
