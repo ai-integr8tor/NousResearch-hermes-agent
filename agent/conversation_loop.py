@@ -3120,11 +3120,15 @@ def run_conversation(
                     # is exhausted or didn't help.
 
                 # Eager fallback for rate-limit errors (429 or quota exhaustion)
-                # and transport errors (connection failure / timeout / provider
-                # overloaded).  Rate limits and billing: switch immediately —
-                # the primary provider won't recover within the retry window.
-                # Transport errors: allow 1 retry first (transient hiccups
-                # recover), then fall back if the provider is truly unreachable.
+                # and transport/server errors (connection failure / timeout /
+                # provider overloaded / 500-502 internal server error).
+                # Rate limits and billing: switch immediately — the primary
+                # provider won't recover within the retry window.
+                # Transport/server errors: allow 1 retry first (transient
+                # hiccups recover), then fall back if the provider keeps
+                # failing. Includes server_error (500/502) so a primary that's
+                # erroring out doesn't retry to exhaustion with a configured
+                # fallback chain sitting unused.
                 is_rate_limited = classified.reason in {
                     FailoverReason.rate_limit,
                     FailoverReason.billing,
@@ -3133,6 +3137,7 @@ def run_conversation(
                 _is_transport_failure = classified.reason in {
                     FailoverReason.timeout,
                     FailoverReason.overloaded,
+                    FailoverReason.server_error,
                 }
                 _should_fallback = (
                     is_rate_limited
@@ -3169,6 +3174,10 @@ def run_conversation(
                         elif classified.reason == FailoverReason.billing:
                             agent._buffer_status(
                                 "⚠️ Billing or credits exhausted — switching to fallback provider..."
+                            )
+                        elif classified.reason == FailoverReason.server_error:
+                            agent._buffer_status(
+                                "⚠️ Provider server error — switching to fallback provider..."
                             )
                         elif _is_transport_failure:
                             agent._buffer_status(
