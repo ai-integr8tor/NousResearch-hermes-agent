@@ -20,7 +20,7 @@ def _clear_auth_env(monkeypatch) -> None:
 
 
 def _make_multiplex_runner(monkeypatch):
-    """Runner with default allowlist WeCom and secondary open-policy WeCom."""
+    """Runner where default profile trusts intake and secondary profile denies."""
     from gateway.run import GatewayRunner
 
     _clear_auth_env(monkeypatch)
@@ -50,8 +50,8 @@ def _make_multiplex_runner(monkeypatch):
     return runner, default_adapter, secondary_adapter
 
 
-def test_secondary_open_policy_not_authorized_by_default_allowlist(monkeypatch):
-    """Secondary-profile open intake must not inherit default allowlist trust."""
+def test_secondary_profile_denial_not_overridden_by_default_allowlist(monkeypatch):
+    """Secondary-profile denial must not inherit default allowlist trust."""
     runner, _default_adapter, _secondary_adapter = _make_multiplex_runner(monkeypatch)
 
     source = SessionSource(
@@ -66,6 +66,17 @@ def test_secondary_open_policy_not_authorized_by_default_allowlist(monkeypatch):
     assert runner._adapter_dm_policy(Platform.WECOM, profile="coder") == "open"
     assert runner._adapter_dm_policy(Platform.WECOM) == "allowlist"
     assert runner._is_user_authorized(source) is False
+
+
+def test_adapter_auth_callback_uses_profile_scoped_authorization(monkeypatch):
+    """Secondary adapter callback must evaluate the routed profile's policy."""
+    runner, _default_adapter, _secondary_adapter = _make_multiplex_runner(monkeypatch)
+
+    default_callback = runner._make_adapter_auth_check(Platform.WECOM)
+    secondary_callback = runner._make_adapter_auth_check(Platform.WECOM, profile="coder")
+
+    assert default_callback("same-user", "dm", "same-chat") is True
+    assert secondary_callback("same-user", "dm", "same-chat") is False
 
 
 def test_default_profile_still_trusts_own_allowlist(monkeypatch):
@@ -115,6 +126,32 @@ def test_adapter_for_source_resolves_secondary_profile_adapter(monkeypatch):
     )
 
     assert runner._adapter_for_source(source) is secondary_adapter
+    assert runner._adapter_for_source(
+        SessionSource(
+            platform=Platform.WECOM,
+            user_id="allowed-user",
+            chat_id="dm-chat",
+            user_name="allowed-user",
+            chat_type="dm",
+            profile=None,
+        )
+    ) is default_adapter
+
+
+def test_unknown_stamped_profile_does_not_fallback_to_default_adapter(monkeypatch):
+    """Unknown non-default source.profile must fail closed for source-bound sends."""
+    runner, default_adapter, _secondary_adapter = _make_multiplex_runner(monkeypatch)
+
+    source = SessionSource(
+        platform=Platform.WECOM,
+        user_id="attacker",
+        chat_id="dm-chat",
+        user_name="attacker",
+        chat_type="dm",
+        profile="missing-profile",
+    )
+
+    assert runner._adapter_for_source(source) is None
     assert runner._adapter_for_source(
         SessionSource(
             platform=Platform.WECOM,
