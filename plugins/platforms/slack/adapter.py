@@ -62,6 +62,8 @@ except ImportError:  # pragma: no cover - plugin loaded outside package context
 
 logger = logging.getLogger(__name__)
 
+_SOCKET_MODE_CLOSE_TIMEOUT = 15.0
+
 # ContextVar carrying the user_id of the slash-command invoker.
 # Set in _handle_slash_command, read in send() to match the correct
 # stashed response_url when multiple users issue commands on the same
@@ -510,7 +512,13 @@ class SlackAdapter(BasePlatformAdapter):
 
         if handler is not None:
             try:
-                await handler.close_async()
+                await asyncio.wait_for(
+                    handler.close_async(), timeout=_SOCKET_MODE_CLOSE_TIMEOUT
+                )
+            except TimeoutError:
+                logger.warning(
+                    "[Slack] Timed out closing Socket Mode handler; continuing"
+                )
             except Exception as e:  # pragma: no cover - defensive logging
                 logger.warning(
                     "[Slack] Error while closing Socket Mode handler: %s",
