@@ -14,7 +14,7 @@ INSTALLABLE_MEMORY_PROVIDERS = [
         "label": "openbrain",
         "setup_hint": "install standalone plugin",
         "identifier": "longman391/hermes-openbrain-memory-provider",
-        "description": "Open Brain / OB1 over MCP Streamable HTTP",
+        "description": "OpenBrain (OB1) over MCP Streamable HTTP",
         "project_url": "https://github.com/NateBJones-Projects/OB1",
         "plugin_url": "https://github.com/longman391/hermes-openbrain-memory-provider",
     },

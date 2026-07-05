@@ -593,13 +593,13 @@ Standalone providers live outside the Hermes core repository but can still be di
 
 ### OpenBrain
 
-Standalone Open Brain / OB1 memory provider over MCP Streamable HTTP, with explicit capture tools, recall prefetch, and additive mirroring of Hermes memory writes.
+Standalone OpenBrain (OB1) memory provider over MCP Streamable HTTP, with explicit capture tools, recall prefetch, and additive mirroring of Hermes memory writes.
 
 | | |
 |---|---|
-| **Best for** | Sharing an Open Brain memory backend across Hermes and other MCP-capable agents |
+| **Best for** | Sharing an OpenBrain memory backend across Hermes and other MCP-capable agents |
 | **Requires** | `hermes memory setup` can install the standalone plugin, then prompts for an OpenBrain MCP URL or API key |
-| **Data storage** | Open Brain / OB1 deployment |
+| **Data storage** | OpenBrain (OB1) deployment |
 | **Cost** | Depends on your OpenBrain deployment |
 
 **Tools (4):** `openbrain_search` (search thoughts), `openbrain_list` (list recent thoughts), `openbrain_capture` (capture compact facts or decisions), `openbrain_stats` (thought statistics)
@@ -616,7 +616,7 @@ hermes config set memory.provider openbrain
 hermes memory setup
 ```
 
-**Source:** [OpenBrain Hermes provider](https://github.com/longman391/hermes-openbrain-memory-provider) · [Open Brain / OB1](https://github.com/NateBJones-Projects/OB1)
+**Source:** [OpenBrain Hermes provider](https://github.com/longman391/hermes-openbrain-memory-provider) · [OpenBrain (OB1)](https://github.com/NateBJones-Projects/OB1)
 
 ---
 
@@ -633,7 +633,7 @@ hermes memory setup
 | **ByteRover** | Local/Cloud | Free/Paid | 3 | `brv` CLI | Pre-compression extraction |
 | **Supermemory** | Cloud | Paid | 4 | `supermemory` | Context fencing + session graph ingest + multi-container |
 | **Memori** | Cloud | Free/Paid | 5 | `hermes-memori` | Tool-aware memory + structured recall |
-| **OpenBrain** | OpenBrain deployment | Varies | 4 | Standalone plugin | MCP-backed Open Brain recall + capture |
+| **OpenBrain** | OpenBrain deployment | Varies | 4 | Standalone plugin | MCP-backed OpenBrain recall + capture |
 
 ## Profile Isolation
 
