@@ -113,3 +113,54 @@ class TestQuietModeCacheIsolation:
         explains why the bug only hit Gateway."""
         model_tools.get_tool_definitions(quiet_mode=False)
         assert len(model_tools._tool_defs_cache) == 0
+
+    def test_check_fn_invalidation_epoch_refreshes_filtered_schema_cache(self, monkeypatch):
+        """An explicit availability invalidation must refresh the outer cache.
+
+        The registry has its own availability cache. The quiet-mode cache
+        stores already-filtered schemas, so its key must move with the same
+        explicit invalidation epoch instead of reusing a list that omitted a
+        tool.
+        """
+        from tools.registry import invalidate_check_fn_cache, registry
+
+        tool_name = "_test_epoch_cache_probe"
+        toolset = "_test_epoch_cache_probe_toolset"
+        state = {"available": False}
+        epoch = {"value": 1}
+
+        def check():
+            return state["available"]
+
+        registry.register(
+            name=tool_name,
+            toolset=toolset,
+            schema={"description": "probe", "parameters": {"type": "object"}},
+            handler=lambda _args: "{}",
+            check_fn=check,
+        )
+        monkeypatch.setattr(
+            model_tools,
+            "check_fn_cache_epoch",
+            lambda: epoch["value"],
+            raising=False,
+        )
+        try:
+            invalidate_check_fn_cache()
+            missing = model_tools.get_tool_definitions(
+                enabled_toolsets=[toolset],
+                quiet_mode=True,
+            )
+            assert tool_name not in {tool["function"]["name"] for tool in missing}
+
+            state["available"] = True
+            epoch["value"] += 1
+            invalidate_check_fn_cache()
+            refreshed = model_tools.get_tool_definitions(
+                enabled_toolsets=[toolset],
+                quiet_mode=True,
+            )
+            assert tool_name in {tool["function"]["name"] for tool in refreshed}
+        finally:
+            registry.deregister(tool_name)
+            invalidate_check_fn_cache()

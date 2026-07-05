@@ -29,7 +29,7 @@ import threading
 import time
 from typing import Dict, Any, List, Optional, Tuple
 
-from tools.registry import discover_builtin_tools, registry
+from tools.registry import check_fn_cache_epoch, discover_builtin_tools, registry
 from toolsets import resolve_toolset, validate_toolset
 
 logger = logging.getLogger(__name__)
@@ -248,7 +248,8 @@ _LEGACY_TOOLSET_MAP = {
 # =============================================================================
 
 # Module-level memoization for get_tool_definitions(). Keyed on
-# (frozenset(enabled_toolsets), frozenset(disabled_toolsets), registry._generation).
+# (frozenset(enabled_toolsets), frozenset(disabled_toolsets), registry._generation,
+# check_fn_cache_epoch()).
 # Hot callers (gateway runner, AIAgent.__init__) invoke this on every turn
 # with quiet_mode=True; caching avoids ~7 ms of registry walking + schema
 # filtering + check_fn probing per call. Only active when quiet_mode=True
@@ -256,8 +257,8 @@ _LEGACY_TOOLSET_MAP = {
 #
 # Invalidation happens transparently via the registry's _generation counter,
 # which bumps on register() / deregister() / register_toolset_alias(). The
-# inner check_fn TTL cache in registry.py handles environment drift (Docker
-# daemon start/stop, env var changes, etc.) on a 30 s horizon.
+# check_fn epoch captures explicit availability invalidation plus gateway/session
+# context values because this cache stores already-filtered schema lists.
 _tool_defs_cache: Dict[tuple, List[Dict[str, Any]]] = {}
 
 # Hard cap on memoized get_tool_definitions() results. A long-lived Gateway
@@ -304,10 +305,11 @@ def get_tool_definitions(
     # The cache key captures every argument-level input; the registry
     # generation captures registry mutations (MCP refresh, plugin load).
     # check_fn results are TTL-cached one level down, inside
-    # registry.get_definitions. The config-mtime fingerprint below captures
-    # user-visible config edits that affect dynamic schemas (execute_code
-    # mode, discord action allowlist, etc.) without needing an explicit
-    # invalidate hook on every config-writer.
+    # registry.get_definitions. The check_fn epoch below separates gateway/
+    # session contexts that affect availability, while the config-mtime
+    # fingerprint captures user-visible config edits that affect dynamic schemas
+    # (execute_code mode, discord action allowlist, etc.) without needing an
+    # explicit invalidate hook on every config-writer.
     if quiet_mode:
         try:
             from hermes_cli.config import get_config_path
@@ -320,6 +322,7 @@ def get_tool_definitions(
             frozenset(enabled_toolsets) if enabled_toolsets is not None else None,
             frozenset(disabled_toolsets) if disabled_toolsets else None,
             registry._generation,
+            check_fn_cache_epoch(),
             cfg_fp,
             bool(os.environ.get("HERMES_KANBAN_TASK")),
             bool(skip_tool_search_assembly),
