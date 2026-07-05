@@ -64,6 +64,7 @@ async def test_capabilities_advertises_session_control_surface(adapter):
     assert features["session_chat"] is True
     assert features["session_chat_streaming"] is True
     assert features["session_fork"] is True
+    assert features["run_steer"] is True
     assert features["admin_config_rw"] is False
     assert features["memory_write_api"] is False
     assert features["skills_api"] is True
@@ -72,6 +73,10 @@ async def test_capabilities_advertises_session_control_surface(adapter):
     assert data["endpoints"]["session_chat_stream"] == {
         "method": "POST",
         "path": "/api/sessions/{session_id}/chat/stream",
+    }
+    assert data["endpoints"]["run_steer"] == {
+        "method": "POST",
+        "path": "/v1/runs/{run_id}/steer",
     }
 
 
@@ -121,6 +126,45 @@ async def test_run_agent_binds_api_session_context_for_tool_env(adapter, monkeyp
         "context_session_key": "request-key",
         "child_session_id": "request-session",
     }
+
+
+@pytest.mark.asyncio
+async def test_run_agent_registers_active_run_id_for_steering(adapter, monkeypatch):
+    observed = {}
+
+    class FakeAgent:
+        session_prompt_tokens = 0
+        session_completion_tokens = 0
+        session_total_tokens = 0
+
+        def __init__(self, session_id: str):
+            self.session_id = session_id
+
+        def steer(self, text: str) -> bool:
+            observed["steer_text"] = text
+            return True
+
+        def run_conversation(self, user_message, conversation_history, task_id):
+            observed["registered"] = adapter._active_run_agents.get("run_steer_test") is self
+            observed["task_id"] = task_id
+            return {"final_response": "ok"}
+
+    def fake_create_agent(**kwargs):
+        return FakeAgent(kwargs["session_id"])
+
+    monkeypatch.setattr(adapter, "_create_agent", fake_create_agent)
+
+    result, usage = await adapter._run_agent(
+        user_message="hello",
+        conversation_history=[],
+        session_id="request-session",
+        active_run_id="run_steer_test",
+    )
+
+    assert result["session_id"] == "request-session"
+    assert usage == {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    assert observed == {"registered": True, "task_id": "request-session"}
+    assert "run_steer_test" not in adapter._active_run_agents
 
 
 @pytest.mark.asyncio
@@ -315,8 +359,10 @@ async def test_session_chat_stream_accepts_multimodal_message(adapter, session_d
 async def test_session_chat_stream_emits_lifecycle_events_and_keepalive_safe_shape(adapter, session_db):
     session_id = session_db.create_session("stream-session", "api_server")
     session_db.set_session_title(session_id, "Stream")
+    captured_kwargs = {}
 
     async def fake_run(**kwargs):
+        captured_kwargs.update(kwargs)
         kwargs["stream_delta_callback"]("Hello")
         kwargs["stream_delta_callback"](" world")
         kwargs["tool_progress_callback"]("reasoning.available", tool_name="_thinking", preview="thinking")
@@ -338,6 +384,8 @@ async def test_session_chat_stream_emits_lifecycle_events_and_keepalive_safe_sha
     assert "event: assistant.completed" in body
     assert "event: run.completed" in body
     assert "event: done" in body
+    assert captured_kwargs["active_run_id"].startswith("run_")
+    assert captured_kwargs["session_id"] == session_id
 
 
 @pytest.mark.asyncio
