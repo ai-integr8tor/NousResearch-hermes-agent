@@ -397,6 +397,15 @@ def _load_busy_input_mode() -> str:
     return raw if raw in {"queue", "steer", "interrupt"} else "interrupt"
 
 
+def _busy_interrupt_error(action: str) -> str:
+    """Busy-guard message for commands that can't run mid-turn.
+
+    Points users at the real interrupt gesture (Ctrl+C) rather than a
+    non-existent ``/interrupt`` slash command (issue #42093).
+    """
+    return f"session busy — press Ctrl+C to interrupt the current turn before {action}"
+
+
 def _notify_session_boundary(event_type: str, session_id: str | None) -> None:
     """Fire session lifecycle hooks with CLI parity."""
     try:
@@ -7579,10 +7588,10 @@ def _(rid, params: dict) -> dict:
     # the agent thread is running, prompt.submit's post-run history
     # write would either clobber the undo (version matches) or
     # silently drop the agent's output (version mismatch, see below).
-    # Neither is what the user wants — make them /interrupt first.
+    # Neither is what the user wants — make them interrupt (Ctrl+C) first.
     if session.get("running"):
         return _err(
-            rid, 4009, "session busy — /interrupt the current turn before /undo"
+            rid, 4009, _busy_interrupt_error("/undo")
         )
     removed = 0
     with session["history_lock"]:
@@ -7605,7 +7614,7 @@ def _(rid, params: dict) -> dict:
         return err
     if session.get("running"):
         return _err(
-            rid, 4009, "session busy — /interrupt the current turn before /compress"
+            rid, 4009, _busy_interrupt_error("/compress")
         )
     sid = params.get("session_id", "")
     focus_topic = str(params.get("focus_topic", "") or "").strip()
@@ -9814,7 +9823,7 @@ def _(rid, params: dict) -> dict:
                     return _err(
                         rid,
                         4009,
-                        "session busy — /interrupt the current turn before switching models",
+                        _busy_interrupt_error("switching models"),
                     )
                 from hermes_cli.model_switch import parse_model_flags
 
@@ -11541,7 +11550,7 @@ def _(rid, params: dict) -> dict:
             return _err(rid, 4001, "no active session to retry")
         if session.get("running"):
             return _err(
-                rid, 4009, "session busy — /interrupt the current turn before /retry"
+                rid, 4009, _busy_interrupt_error("/retry")
             )
         history = session.get("history", [])
         if not history:
@@ -11671,7 +11680,7 @@ def _(rid, params: dict) -> dict:
             return _err(rid, 4001, "no active session to undo")
         if session.get("running"):
             return _err(
-                rid, 4009, "session busy — /interrupt the current turn before /undo"
+                rid, 4009, _busy_interrupt_error("/undo")
             )
         db = _get_db()
         if db is None:
@@ -12481,7 +12490,7 @@ def _mirror_slash_side_effects(sid: str, session: dict, command: str) -> str:
     # runner's running-agent /model guard.
     _MUTATES_WHILE_RUNNING = {"model", "personality", "prompt", "compress"}
     if name in _MUTATES_WHILE_RUNNING and session.get("running"):
-        return f"session busy — /interrupt the current turn before running /{name}"
+        return _busy_interrupt_error(f"running /{name}")
 
     try:
         if name == "model" and arg and agent:
@@ -12985,7 +12994,7 @@ def _(rid, params: dict) -> dict:
         return _err(
             rid,
             4009,
-            "session busy — /interrupt the current turn before full rollback.restore",
+            _busy_interrupt_error("full rollback.restore"),
         )
     try:
 
