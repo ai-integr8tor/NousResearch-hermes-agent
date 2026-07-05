@@ -268,14 +268,17 @@ class TestGoogleFetch:
             resp2 = MagicMock()
             resp2.raise_for_status = MagicMock()
             resp2.json.return_value = {
-                "models": [
+                "buckets": [
                     {
-                        "name": "gemini-2.0-flash",
-                        "quota": {
-                            "usedPercent": 42.5,
-                            "remaining": 575,
-                            "limit": 1000,
-                        },
+                        "modelId": "gemini-2.0-flash",
+                        "tokenType": "request",
+                        "remainingFraction": 0.575,
+                        "resetTime": "2026-07-06T00:00:00Z",
+                    },
+                    {
+                        "modelId": "internal-infra-bucket",
+                        "tokenType": "tokens",
+                        "remainingFraction": 0.9,
                     },
                 ],
             }
@@ -288,8 +291,10 @@ class TestGoogleFetch:
         assert snap is not None
         assert snap.provider == "google"
         assert snap.source == "cloud_code_assist"
+        # Only user-facing models (gemini-, claude-, gpt-) are included
         assert len(snap.windows) == 1
         assert "gemini-2.0-flash" in snap.windows[0].label
+        # remainingFraction=0.575 -> used=42.5%
         assert snap.windows[0].used_percent == 42.5
         assert any("STANDARD" in d for d in snap.details)
 

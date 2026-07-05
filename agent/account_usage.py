@@ -869,10 +869,10 @@ def _fetch_google_account_usage(api_key: Optional[str]) -> Optional[AccountUsage
                     unavailable_reason="No Cloud Code Assist project found",
                 )
 
-            # Step 2: fetchAvailableModels with project ID
+            # Step 2: retrieveUserQuota — returns per-model quota buckets
             resp2 = client.post(
-                f"{base_url}/v1internal:fetchAvailableModels",
-                json={"project": project_id},
+                f"{base_url}/v1internal:retrieveUserQuota",
+                json={"project": project_id} if project_id else {},
                 headers=headers,
             )
             resp2.raise_for_status()
@@ -880,32 +880,45 @@ def _fetch_google_account_usage(api_key: Optional[str]) -> Optional[AccountUsage
     except Exception:
         return None
 
-    models = data2.get("models") or []
+    # retrieveUserQuota returns { buckets: [ {modelId, tokenType, remainingFraction, resetTime} ] }
+    raw_buckets = data2.get("buckets") or []
     windows: list[AccountUsageWindow] = []
     details: list[str] = []
 
-    for model_info in models:
-        name = model_info.get("name") or model_info.get("id") or "?"
-        quota_info = model_info.get("quota") or {}
-        pct = quota_info.get("usedPercent")
-        remaining = quota_info.get("remaining")
-        limit = quota_info.get("limit")
-
-        if pct is not None:
-            windows.append(
-                AccountUsageWindow(
-                    label=f"{name} quota",
-                    used_percent=float(pct),
-                    detail=(
-                        f"{remaining}/{limit} remaining"
-                        if remaining is not None and limit is not None
-                        else None
-                    ),
-                )
-            )
-
     if current_tier:
         details.append(f"Tier: {current_tier}")
+
+    _USER_FACING_PREFIXES = ("gemini-", "claude-", "gpt-")
+    for b in raw_buckets:
+        if not isinstance(b, dict):
+            continue
+        model_id = str(b.get("modelId") or "")
+        # Filter out internal infrastructure buckets
+        if model_id and not model_id.startswith(_USER_FACING_PREFIXES):
+            continue
+        remaining_frac = float(b.get("remainingFraction") or 0.0)
+        used_pct = round((1.0 - remaining_frac) * 100.0, 1)
+        token_type = str(b.get("tokenType") or "")
+        reset_time = str(b.get("resetTime") or "")
+
+        label = model_id or "quota"
+        if token_type:
+            label += f" [{token_type}]"
+
+        detail_parts = []
+        if remaining_frac > 0:
+            detail_parts.append(f"{remaining_frac*100:.0f}% remaining")
+        if reset_time:
+            detail_parts.append(f"resets {reset_time}")
+        detail = " | ".join(detail_parts) if detail_parts else None
+
+        windows.append(
+            AccountUsageWindow(
+                label=label,
+                used_percent=used_pct,
+                detail=detail,
+            )
+        )
 
     if not windows:
         return AccountUsageSnapshot(
