@@ -18,6 +18,7 @@ import ast
 import importlib
 import json
 import logging
+import os
 import sys
 import threading
 import time
@@ -136,10 +137,45 @@ _CHECK_FN_TTL_SECONDS = 30.0
 # as a flake (last-good True is served) rather than a real outage. Kept short
 # so a genuinely-down backend is reflected within a couple of turns.
 _CHECK_FN_FAILURE_GRACE_SECONDS = 60.0
-_check_fn_cache: Dict[Callable, tuple[float, bool]] = {}
-# Monotonic timestamp of the most recent True result per check_fn.
-_check_fn_last_good: Dict[Callable, float] = {}
+_CheckFnCacheKey = tuple[Callable, tuple[str, ...]]
+_check_fn_cache: Dict[_CheckFnCacheKey, tuple[float, bool]] = {}
+# Monotonic timestamp of the most recent True result per check_fn/context.
+_check_fn_last_good: Dict[_CheckFnCacheKey, float] = {}
+_check_fn_cache_generation = 0
 _check_fn_cache_lock = threading.Lock()
+
+
+def check_fn_cache_context_fingerprint() -> tuple[str, ...]:
+    """Return context values that can affect tool availability checks."""
+    session_platform = ""
+    try:
+        from gateway.session_context import get_session_env
+
+        session_platform = get_session_env("HERMES_SESSION_PLATFORM", "")
+    except Exception:
+        session_platform = ""
+
+    return (
+        os.environ.get("HERMES_INTERACTIVE", ""),
+        os.environ.get("HERMES_GATEWAY_SESSION", ""),
+        os.environ.get("HERMES_EXEC_ASK", ""),
+        os.environ.get("HERMES_CRON_SESSION", ""),
+        os.environ.get("HERMES_KANBAN_TASK", ""),
+        session_platform,
+    )
+
+
+def check_fn_cache_epoch() -> tuple[int, tuple[str, ...]]:
+    """Return the current availability-cache epoch.
+
+    Higher-level caches that store already-filtered tool schemas must include
+    this value in their keys. Otherwise a False ``check_fn`` result from one
+    gateway/session context can remain pinned after the context changes.
+    """
+    context_fp = check_fn_cache_context_fingerprint()
+    with _check_fn_cache_lock:
+        generation = _check_fn_cache_generation
+    return (generation, context_fp)
 
 
 def _check_fn_cached(fn: Callable) -> bool:
@@ -152,8 +188,9 @@ def _check_fn_cached(fn: Callable) -> bool:
     contention, probe timeout) from silently stripping tools mid-session.
     """
     now = time.monotonic()
+    cache_key = (fn, check_fn_cache_context_fingerprint())
     with _check_fn_cache_lock:
-        cached = _check_fn_cache.get(fn)
+        cached = _check_fn_cache.get(cache_key)
         if cached is not None:
             ts, value = cached
             if now - ts < _CHECK_FN_TTL_SECONDS:
@@ -168,11 +205,11 @@ def _check_fn_cached(fn: Callable) -> bool:
 
     with _check_fn_cache_lock:
         if value:
-            _check_fn_last_good[fn] = now
-            _check_fn_cache[fn] = (now, True)
+            _check_fn_last_good[cache_key] = now
+            _check_fn_cache[cache_key] = (now, True)
             return True
 
-        last_good = _check_fn_last_good.get(fn)
+        last_good = _check_fn_last_good.get(cache_key)
         if last_good is not None and now - last_good < _CHECK_FN_FAILURE_GRACE_SECONDS:
             # Recent success → treat this failure as a flake. Serve last-good
             # True and do NOT cache the failure, so the next call re-probes
@@ -193,16 +230,18 @@ def _check_fn_cached(fn: Callable) -> bool:
             getattr(fn, "__qualname__", fn),
             "raised" if raised else "returned False",
         )
-        _check_fn_cache[fn] = (now, False)
+        _check_fn_cache[cache_key] = (now, False)
         return False
 
 
 def invalidate_check_fn_cache() -> None:
     """Drop all cached ``check_fn`` results. Call after config changes that
     affect tool availability (e.g. ``hermes tools enable``)."""
+    global _check_fn_cache_generation
     with _check_fn_cache_lock:
         _check_fn_cache.clear()
         _check_fn_last_good.clear()
+        _check_fn_cache_generation += 1
 
 
 class ToolRegistry:
