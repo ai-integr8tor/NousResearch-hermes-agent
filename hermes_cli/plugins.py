@@ -1723,6 +1723,30 @@ class PluginManager:
 
             loaded.module = module
 
+            # Warn early when declared required env vars are absent, so the
+            # user gets a clear message instead of a silent no-op from the
+            # plugin's own register() (issue #2765). ``requires_env`` entries
+            # may be bare strings or dicts with a ``name`` key.
+            _missing_env: list[str] = []
+            for _entry in manifest.requires_env or []:
+                if isinstance(_entry, str):
+                    _var = _entry
+                elif isinstance(_entry, dict):
+                    _var = _entry.get("name") or ""
+                else:
+                    _var = ""
+                if _var and not os.environ.get(_var):
+                    _missing_env.append(_var)
+            if _missing_env:
+                logger.warning(
+                    "Plugin '%s' is missing required environment variable(s): %s. "
+                    "Tools may not be registered. If running as a "
+                    "gateway/systemd-managed service, set these in the service "
+                    "environment (~/.hermes/.env is not loaded by systemd).",
+                    manifest.name,
+                    ", ".join(_missing_env),
+                )
+
             # Call register()
             register_fn = getattr(module, "register", None)
             if register_fn is None:
@@ -1764,6 +1788,26 @@ class PluginManager:
                     if self._plugin_commands[c].get("plugin") == manifest.name
                 ]
                 loaded.enabled = True
+
+                # Warn when register() completed but added nothing at all —
+                # the silent-skip pattern reported in #2765 (e.g. a plugin
+                # returns early when a required env var is absent, emitting no
+                # log of its own). Deferred platform loaders legitimately
+                # register nothing here, so exempt them.
+                if (
+                    not loaded.deferred
+                    and not loaded.tools_registered
+                    and not loaded.hooks_registered
+                    and not loaded.middleware_registered
+                    and not loaded.commands_registered
+                ):
+                    logger.warning(
+                        "Plugin '%s' registered zero tools, hooks, middleware, "
+                        "and commands. If it requires environment variables, "
+                        "ensure they are set in the process that loads it "
+                        "(~/.hermes/.env is not loaded by systemd-managed services).",
+                        manifest.name,
+                    )
                 logger.debug(
                     "  registered: %d tool(s), %d hook(s), %d middleware, %d slash command(s), %d CLI command(s)",
                     len(loaded.tools_registered),

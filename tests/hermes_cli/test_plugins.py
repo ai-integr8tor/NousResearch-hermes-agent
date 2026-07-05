@@ -86,6 +86,110 @@ def _make_plugin_dir(base: Path, name: str, *, register_body: str = "pass",
     return plugin_dir
 
 
+# ── TestPluginMissingEnvWarnings ───────────────────────────────────────────
+
+
+class TestPluginMissingEnvWarnings:
+    """Warnings when required env vars are absent or nothing is registered (#2765)."""
+
+    def test_missing_requires_env_logs_warning(self, tmp_path, monkeypatch, caplog):
+        """A warning names the absent required env var declared in plugin.yaml."""
+        plugins_dir = tmp_path / "hermes_test" / "plugins"
+        _make_plugin_dir(
+            plugins_dir,
+            "needs_env_plugin",
+            manifest_extra={"requires_env": ["MY_PLUGIN_API_URL"]},
+        )
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes_test"))
+        monkeypatch.delenv("MY_PLUGIN_API_URL", raising=False)
+
+        mgr = PluginManager()
+        with caplog.at_level(logging.WARNING):
+            mgr.discover_and_load()
+
+        assert any(
+            "needs_env_plugin" in r.getMessage()
+            and "MY_PLUGIN_API_URL" in r.getMessage()
+            for r in caplog.records
+        ), caplog.text
+
+    def test_requires_env_dict_form_logs_warning(self, tmp_path, monkeypatch, caplog):
+        """``requires_env`` dict entries (name/description) are handled too."""
+        plugins_dir = tmp_path / "hermes_test" / "plugins"
+        _make_plugin_dir(
+            plugins_dir,
+            "dict_env_plugin",
+            manifest_extra={"requires_env": [{"name": "HINDSIGHT_API_URL",
+                                              "description": "Hindsight endpoint"}]},
+        )
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes_test"))
+        monkeypatch.delenv("HINDSIGHT_API_URL", raising=False)
+
+        mgr = PluginManager()
+        with caplog.at_level(logging.WARNING):
+            mgr.discover_and_load()
+
+        assert any(
+            "HINDSIGHT_API_URL" in r.getMessage() for r in caplog.records
+        ), caplog.text
+
+    def test_present_requires_env_no_warning(self, tmp_path, monkeypatch, caplog):
+        """No missing-env warning when the required var is set."""
+        plugins_dir = tmp_path / "hermes_test" / "plugins"
+        _make_plugin_dir(
+            plugins_dir,
+            "has_env_plugin",
+            register_body="ctx.register_tool('has_env_tool', lambda **kw: 'ok')",
+            manifest_extra={"requires_env": ["PRESENT_VAR"]},
+        )
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes_test"))
+        monkeypatch.setenv("PRESENT_VAR", "1")
+
+        mgr = PluginManager()
+        with caplog.at_level(logging.WARNING):
+            mgr.discover_and_load()
+
+        assert not any(
+            "missing required environment" in r.getMessage()
+            and "has_env_plugin" in r.getMessage()
+            for r in caplog.records
+        ), caplog.text
+
+    def test_zero_registration_logs_warning(self, tmp_path, monkeypatch, caplog):
+        """A plugin whose register() adds nothing triggers a zero-registration warning."""
+        plugins_dir = tmp_path / "hermes_test" / "plugins"
+        _make_plugin_dir(plugins_dir, "empty_plugin", register_body="pass")
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes_test"))
+
+        mgr = PluginManager()
+        with caplog.at_level(logging.WARNING):
+            mgr.discover_and_load()
+
+        assert any(
+            "empty_plugin" in r.getMessage() and "zero tools" in r.getMessage()
+            for r in caplog.records
+        ), caplog.text
+
+    def test_registering_plugin_no_zero_warning(self, tmp_path, monkeypatch, caplog):
+        """A plugin that registers a tool does not get the zero-registration warning."""
+        plugins_dir = tmp_path / "hermes_test" / "plugins"
+        _make_plugin_dir(
+            plugins_dir,
+            "busy_plugin",
+            register_body="ctx.register_tool('busy_tool', lambda **kw: 'ok')",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes_test"))
+
+        mgr = PluginManager()
+        with caplog.at_level(logging.WARNING):
+            mgr.discover_and_load()
+
+        assert not any(
+            "busy_plugin" in r.getMessage() and "zero tools" in r.getMessage()
+            for r in caplog.records
+        ), caplog.text
+
+
 # ── TestPluginDiscovery ────────────────────────────────────────────────────
 
 
