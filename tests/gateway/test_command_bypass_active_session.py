@@ -493,3 +493,61 @@ class TestBypassWithBotnameSuffix:
 
         assert sk not in adapter._pending_messages
         assert any("handled:new" in r for r in adapter.sent_responses)
+
+
+# ---------------------------------------------------------------------------
+# Tests: plugin and skill commands also bypass the Level 1 guard
+# ---------------------------------------------------------------------------
+
+
+class TestDynamicCommandBypass:
+    """Commands outside the static registry must also bypass when resolvable."""
+
+    def test_should_bypass_returns_true_for_skill_command(self):
+        """A registered skill command bypasses the active-session guard."""
+        from unittest.mock import patch as _patch
+
+        from hermes_cli.commands import should_bypass_active_session
+
+        with _patch(
+            "agent.skill_commands.get_skill_commands",
+            return_value={"/arxiv": {"description": "search arXiv papers"}},
+        ):
+            assert should_bypass_active_session("arxiv") is True
+
+    def test_should_bypass_normalizes_underscored_skill_command(self):
+        """Telegram-style underscored skill commands resolve to hyphenated keys."""
+        from unittest.mock import patch as _patch
+
+        from hermes_cli.commands import should_bypass_active_session
+
+        with _patch(
+            "agent.skill_commands.get_skill_commands",
+            return_value={"/claude-code": {"description": "load Claude Code notes"}},
+        ):
+            assert should_bypass_active_session("claude_code") is True
+
+    def test_should_bypass_returns_true_for_plugin_command(self, monkeypatch):
+        """Plugin commands are gateway-known commands and must bypass too."""
+        from hermes_cli import commands
+
+        monkeypatch.setattr(
+            commands,
+            "_iter_plugin_command_entries",
+            lambda: [("plugin-command", "demo plugin command", "")],
+        )
+
+        assert commands.should_bypass_active_session("plugin-command") is True
+        assert commands.should_bypass_active_session("plugin_command") is True
+
+    def test_should_bypass_returns_false_for_unregistered_skill(self):
+        """An unknown name that is neither built-in, plugin, nor skill does not bypass."""
+        from unittest.mock import patch as _patch
+
+        from hermes_cli.commands import should_bypass_active_session
+
+        with _patch(
+            "agent.skill_commands.get_skill_commands",
+            return_value={"/arxiv": {"description": "search arXiv papers"}},
+        ):
+            assert should_bypass_active_session("not-a-skill") is False

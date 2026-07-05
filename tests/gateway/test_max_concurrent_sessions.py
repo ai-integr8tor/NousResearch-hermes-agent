@@ -31,6 +31,23 @@ class _FakeAdapter:
             event.set()
 
 
+class _FakeRunningAgent:
+    def __init__(self):
+        self.interrupt_args: list[str] = []
+        self._active_children = {}
+
+    def interrupt(self, text: str):
+        self.interrupt_args.append(text)
+
+    def get_activity_summary(self):
+        return {
+            "seconds_since_activity": 0,
+            "last_activity_desc": "test",
+            "api_call_count": 1,
+            "max_iterations": 10,
+        }
+
+
 def _make_source(chat_id: str = "chat-1") -> SessionSource:
     return SessionSource(
         platform=Platform.TELEGRAM,
@@ -206,3 +223,77 @@ def test_skill_command_that_would_start_agent_is_blocked_at_limit(monkeypatch):
         "Hermes is at the active session limit (1/1). "
         "Try again when another session finishes."
     )
+
+
+def test_skill_command_in_active_session_returns_busy_without_queue_or_interrupt(monkeypatch):
+    _silence_global_gateway_hooks(monkeypatch)
+    runner = _make_runner()
+    event = _make_event("/arxiv mushroom taxonomy")
+    session_key = build_session_key(event.source)
+    running_agent = _FakeRunningAgent()
+    runner._running_agents[session_key] = running_agent
+    runner._running_agents_ts[session_key] = time.time()
+
+    monkeypatch.setattr(
+        "agent.skill_commands.get_skill_commands",
+        lambda: {"/arxiv": {"name": "arxiv"}},
+    )
+
+    async def fail_if_agent_runs(self_inner, ev, src, qk, generation):
+        raise AssertionError("_handle_message_with_agent should not run while busy")
+
+    with patch.object(GatewayRunner, "_handle_message_with_agent", fail_if_agent_runs):
+        result = asyncio.run(runner._handle_message(event))
+
+    assert "Agent is running" in result
+    assert "`/arxiv`" in result
+    assert session_key not in runner.adapters[Platform.TELEGRAM]._pending_messages
+    assert running_agent.interrupt_args == []
+
+
+def test_underscored_skill_command_in_active_session_is_recognized(monkeypatch):
+    _silence_global_gateway_hooks(monkeypatch)
+    runner = _make_runner()
+    event = _make_event("/claude_code inspect this")
+    session_key = build_session_key(event.source)
+    running_agent = _FakeRunningAgent()
+    runner._running_agents[session_key] = running_agent
+    runner._running_agents_ts[session_key] = time.time()
+
+    monkeypatch.setattr(
+        "agent.skill_commands.get_skill_commands",
+        lambda: {"/claude-code": {"name": "claude-code"}},
+    )
+
+    result = asyncio.run(runner._handle_message(event))
+
+    assert "Agent is running" in result
+    assert "`/claude-code`" in result
+    assert session_key not in runner.adapters[Platform.TELEGRAM]._pending_messages
+    assert running_agent.interrupt_args == []
+
+
+def test_plugin_command_in_active_session_uses_slash_access_gate(monkeypatch):
+    _silence_global_gateway_hooks(monkeypatch)
+    runner = _make_runner()
+    event = _make_event("/plugin_command run")
+    session_key = build_session_key(event.source)
+    running_agent = _FakeRunningAgent()
+    runner._running_agents[session_key] = running_agent
+    runner._running_agents_ts[session_key] = time.time()
+    runner._check_slash_access = MagicMock(return_value="denied")
+
+    from hermes_cli import commands
+
+    monkeypatch.setattr(
+        commands,
+        "_iter_plugin_command_entries",
+        lambda: [("plugin-command", "demo plugin command", "")],
+    )
+
+    result = asyncio.run(runner._handle_message(event))
+
+    assert result == "denied"
+    runner._check_slash_access.assert_called_once_with(event.source, "plugin-command")
+    assert session_key not in runner.adapters[Platform.TELEGRAM]._pending_messages
+    assert running_agent.interrupt_args == []

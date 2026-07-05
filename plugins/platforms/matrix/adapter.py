@@ -2773,7 +2773,28 @@ class MatrixAdapter(BasePlatformAdapter):
             reply_to_message_id=reply_to,
         )
 
-        if msg_type == MessageType.TEXT and self._text_batch_delay_seconds > 0:
+        should_batch = msg_type == MessageType.TEXT
+        if msg_type == MessageType.COMMAND and self._text_batch_delay_seconds > 0:
+            batch_key = self._text_batch_key(msg_event)
+            pending = self._pending_text_batches.get(batch_key)
+            if len(body or "") >= self._SPLIT_THRESHOLD:
+                if pending and pending.message_type != MessageType.COMMAND:
+                    prior_task = self._pending_text_batch_tasks.pop(batch_key, None)
+                    if prior_task and not prior_task.done():
+                        prior_task.cancel()
+                    pending_event = self._pending_text_batches.pop(batch_key, None)
+                    if pending_event:
+                        await self.handle_message(pending_event)
+                should_batch = True
+            else:
+                if (
+                    pending
+                    and pending.message_type == MessageType.COMMAND
+                    and getattr(pending, "_last_chunk_len", 0) >= self._SPLIT_THRESHOLD
+                ):
+                    should_batch = True
+
+        if should_batch and self._text_batch_delay_seconds > 0:
             self._enqueue_text_event(msg_event)
         else:
             await self.handle_message(msg_event)
