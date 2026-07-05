@@ -5497,6 +5497,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         logged and swallowed so they never block the shutdown sequence.
         """
         active = self._snapshot_running_agents()
+        if not getattr(self.config, "restart_alerts_enabled", True):
+            logger.info(
+                "Shutdown/restart notifications suppressed: gateway.restart_alerts_enabled=false"
+            )
+            return
+
         restart_source = self._restart_command_source if self._restart_requested else None
 
         action = "restarting" if self._restart_requested else "shutting down"
@@ -14226,6 +14232,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             thread_id = data.get("thread_id")
             message_id = data.get("message_id")
 
+            if not getattr(self.config, "restart_alerts_enabled", True):
+                logger.info(
+                    "Restart notification suppressed: gateway.restart_alerts_enabled=false"
+                )
+                return None
+
             if not platform_str or not chat_id:
                 return None
 
@@ -14296,6 +14308,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         when a more specific restart notification is queued for the same chat.
         """
         delivered: set[tuple[str, str, Optional[str]]] = set()
+        if not getattr(self.config, "restart_alerts_enabled", True):
+            logger.info(
+                "Home-channel startup notifications suppressed: gateway.restart_alerts_enabled=false"
+            )
+            return delivered
+
         skipped = skip_targets or set()
         message = "♻️ Gateway online — Hermes is back and ready."
 
