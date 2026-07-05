@@ -32,6 +32,8 @@ from utils import base_url_host_matches, normalize_proxy_env_vars
 # paths. Access via the `_get_anthropic_sdk()` accessor below, which caches
 # the module after the first call and returns None on ImportError.
 _anthropic_sdk: Any = ...  # sentinel — None means "tried and missing"
+_HERMES_DOCS_URL = "https://hermes-agent.nousresearch.com/docs"
+_HERMES_DOCS_PLACEHOLDER = "__HERMES_DOCS_URL__"
 
 
 def _get_anthropic_sdk():
@@ -206,6 +208,16 @@ def _resolve_positive_anthropic_max_tokens(value) -> Optional[int]:
         return None
     floored = int(value)  # truncates toward zero for floats
     return floored if floored > 0 else None
+
+
+def _sanitize_oauth_system_prompt_text(text: str) -> str:
+    """Apply Claude Code OAuth identity substitutions without breaking docs URLs."""
+    text = text.replace(_HERMES_DOCS_URL, _HERMES_DOCS_PLACEHOLDER)
+    text = text.replace("Hermes Agent", "Claude Code")
+    text = text.replace("Hermes agent", "Claude Code")
+    text = text.replace("hermes-agent", "claude-code")
+    text = text.replace("Nous Research", "Anthropic")
+    return text.replace(_HERMES_DOCS_PLACEHOLDER, _HERMES_DOCS_URL)
 
 
 def _resolve_anthropic_messages_max_tokens(
@@ -2540,11 +2552,7 @@ def build_anthropic_kwargs(
         for block in system:
             if isinstance(block, dict) and block.get("type") == "text":
                 text = block.get("text", "")
-                text = text.replace("Hermes Agent", "Claude Code")
-                text = text.replace("Hermes agent", "Claude Code")
-                text = text.replace("hermes-agent", "claude-code")
-                text = text.replace("Nous Research", "Anthropic")
-                block["text"] = text
+                block["text"] = _sanitize_oauth_system_prompt_text(text)
 
         # 3. Normalize tool names so NOTHING goes on the OAuth wire with a
         #    single-underscore ``mcp_`` prefix.  Anthropic's subscription/OAuth
