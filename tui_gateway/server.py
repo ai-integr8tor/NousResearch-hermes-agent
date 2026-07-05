@@ -1224,7 +1224,7 @@ def _start_agent_build(sid: str, session: dict) -> None:
                 # Lazy-resumed (watch) sessions carry the stored conversation
                 # id — pass it through so the upgrade continues that session
                 # instead of starting a fresh one under the same key.
-                kw = {"session_db": session_db}
+                kw: dict[str, Any] = {"session_db": session_db}
                 if resume_sid := current.get("resume_session_id"):
                     kw["session_id"] = resume_sid
                 resume_overrides = current.get("resume_runtime_overrides")
@@ -1241,7 +1241,9 @@ def _start_agent_build(sid: str, session: dict) -> None:
                     # them directly (no global config, no build-then-switch).
                     if override := current.get("model_override"):
                         kw["model_override"] = override
-                    if (reasoning := current.get("create_reasoning_override")) is not None:
+                    if current.get("reasoning_config_override") is not None:
+                        kw["reasoning_config_override"] = current.get("reasoning_config_override")
+                    elif (reasoning := current.get("create_reasoning_override")) is not None:
                         kw["reasoning_config_override"] = reasoning
                     if (tier := current.get("create_service_tier_override")) is not None:
                         kw["service_tier_override"] = tier
@@ -4423,6 +4425,9 @@ def _init_session(
             # Honored on rebuild (/new, resume) so a switch in THIS session
             # never leaks into siblings via process-global env vars.
             "model_override": None,
+            # Per-session reasoning override set by `/reasoning <level>`.
+            # Only `/reasoning <level> --global` updates config.yaml.
+            "reasoning_config_override": None,
             # Pin async event emissions to whichever transport created the
             # session (stdio for Ink, JSON-RPC WS for the dashboard sidebar).
             "transport": current_transport() or _stdio_transport,
@@ -10035,7 +10040,11 @@ def _(rid, params: dict) -> dict:
         try:
             from hermes_constants import parse_reasoning_effort
 
-            arg = str(value or "").strip().lower()
+            raw_arg = str(value or "").strip().lower()
+            tokens = raw_arg.split()
+            persist_global = any(t in {"--global", "--save"} for t in tokens)
+            tokens = [t for t in tokens if t not in {"--global", "--save"}]
+            arg = " ".join(tokens).strip()
             if arg in {"show", "on"}:
                 cfg = _load_cfg()
                 display = (
@@ -10115,13 +10124,33 @@ def _(rid, params: dict) -> dict:
             parsed = parse_reasoning_effort(arg)
             if parsed is None:
                 return _err(rid, 4002, f"unknown reasoning value: {value}")
-            if session is not None:
+            if session is not None and not persist_global and session.get("running"):
+                return _err(
+                    rid,
+                    4009,
+                    "session busy — /interrupt the current turn before changing reasoning",
+                )
+            if persist_global:
+                _write_config_key("agent.reasoning_effort", arg)
+                if session is not None:
+                    session["create_reasoning_override"] = None
+                    session["reasoning_config_override"] = None
+                    if session.get("agent") is not None:
+                        session["agent"].reasoning_config = parsed
+                        _persist_live_session_runtime(session)
+                        _emit(
+                            "session.info",
+                            params.get("session_id", ""),
+                            _session_info(session["agent"], session),
+                        )
+            elif session is not None:
                 # Session-scoped, like the messaging gateway's `/reasoning
                 # <level>` (global persistence is `--global` / Settings →
                 # Model territory). Writing config.yaml here let every
                 # desktop model-menu selection rewrite the user's global
                 # agent.reasoning_effort to the preset default.
                 session["create_reasoning_override"] = parsed
+                session["reasoning_config_override"] = parsed
                 if session.get("agent") is not None:
                     session["agent"].reasoning_config = parsed
                     _persist_live_session_runtime(session)
@@ -10132,7 +10161,14 @@ def _(rid, params: dict) -> dict:
                     )
             else:
                 _write_config_key("agent.reasoning_effort", arg)
-            return _ok(rid, {"key": key, "value": arg})
+            return _ok(
+                rid,
+                {
+                    "key": key,
+                    "value": arg,
+                    "scope": "global" if persist_global or session is None else "session",
+                },
+            )
         except Exception as e:
             return _err(rid, 5001, str(e))
 
@@ -10813,6 +10849,8 @@ def _(rid, params: dict) -> dict:
         live = getattr((session or {}).get("agent"), "reasoning_config", None)
         if live is None and session is not None:
             live = session.get("create_reasoning_override")
+        if live is None and session is not None:
+            live = session.get("reasoning_config_override")
         if isinstance(live, dict):
             if live.get("enabled") is False:
                 effort = "none"

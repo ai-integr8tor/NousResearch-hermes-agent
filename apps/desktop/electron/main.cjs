@@ -774,6 +774,7 @@ function registerMediaProtocol() {
 let mainWindow = null
 let hermesProcess = null
 let connectionPromise = null
+let primaryBackendTeardownPromise = Promise.resolve()
 // Additional per-profile backends, keyed by profile name. The PRIMARY backend
 // (the desktop's launch profile) stays managed by hermesProcess +
 // connectionPromise + startHermes(); this pool only holds EXTRA profile
@@ -5164,7 +5165,15 @@ function resetHermesConnection() {
   connectionPromise = null
   backendStartFailure = null
 
-  stopBackendChild(hermesProcess)
+  const dying = hermesProcess && !hermesProcess.killed ? hermesProcess : null
+  if (dying) {
+    stopBackendChild(dying)
+    primaryBackendTeardownPromise = waitForBackendExit(dying).catch(error => {
+      rememberLog(`Primary Hermes backend teardown wait failed: ${error.message}`)
+    })
+  } else {
+    primaryBackendTeardownPromise = Promise.resolve()
+  }
 
   hermesProcess = null
   resetBootProgressForReconnect()
@@ -5175,11 +5184,8 @@ function resetHermesConnection() {
 // startHermes() spawns fresh instead of racing the dying one. Shared by the
 // connection-config and profile switch flows.
 async function teardownPrimaryBackendAndWait() {
-  // Capture the reference before resetHermesConnection() nulls hermesProcess.
-  const dying = hermesProcess && !hermesProcess.killed ? hermesProcess : null
   resetHermesConnection()
-
-  await waitForBackendExit(dying)
+  await primaryBackendTeardownPromise
 }
 
 async function waitForBackendExit(child, timeoutMs = 5000) {
@@ -5494,6 +5500,7 @@ async function startHermes() {
   if (connectionPromise) return connectionPromise
 
   connectionPromise = (async () => {
+    await primaryBackendTeardownPromise
     await advanceBootProgress('backend.resolve', 'Resolving Hermes backend', 8)
     // Resolve for the desktop's primary profile so a per-profile remote
     // override on the active profile is honored (falls back to env / global).
