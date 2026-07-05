@@ -855,6 +855,14 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                     function_result,
                     failed=is_error,
                 )
+                # Lightweight pattern detection for successful repeated
+                # tool calls (the guardrail only catches failures).
+                if not is_error:
+                    warning = agent._pattern_detector.record(
+                        function_name, function_args,
+                    )
+                    if warning and agent._should_emit_quiet_tool_messages():
+                        agent._vprint(f"  ⚠ {warning}")
 
             if is_error:
                 _err_text = _multimodal_text_summary(function_result)
@@ -1532,6 +1540,14 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                 function_result,
                 failed=_is_error_result,
             )
+            # Lightweight pattern detection for successful repeated
+            # tool calls (the guardrail only catches failures).
+            if not _is_error_result:
+                warning = agent._pattern_detector.record(
+                    function_name, function_args,
+                )
+                if warning and agent._should_emit_quiet_tool_messages():
+                    agent._vprint(f"  ⚠ {warning}")
             result_preview = function_result if agent.verbose_logging else (
                 function_result[:200] if len(function_result) > 200 else function_result
             )
