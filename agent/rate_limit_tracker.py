@@ -96,6 +96,17 @@ def parse_rate_limit_headers(
     """Parse x-ratelimit-* headers into a RateLimitState.
 
     Returns None if no rate limit headers are present.
+
+    Supports multiple header naming conventions:
+
+    - **Nous / OpenRouter / Groq** (standard):
+      ``x-ratelimit-{limit,remaining,reset}-{requests,tokens}{,-1h}``
+    - **Mistral**:
+      ``x-ratelimit-{limit,remaining}-{req,tokens}-minute``
+    - **Cerebras**:
+      ``x-ratelimit-{limit,remaining}-{requests,tokens}-{minute,hour,day}``
+    - **SambaNova**:
+      ``x-ratelimit-{limit,remaining,reset}-requests-day``
     """
     # Normalize to lowercase so lookups work regardless of how the server
     # capitalises headers (HTTP header names are case-insensitive per RFC 7230).
@@ -119,11 +130,36 @@ def parse_rate_limit_headers(
             captured_at=now,
         )
 
+    def _best_bucket(canonical_resource: str, variant_names: list[str]) -> RateLimitBucket:
+        """Try canonical format first, then provider-specific variants."""
+        b = _bucket(canonical_resource)
+        if b.limit > 0:
+            return b
+        for alt in variant_names:
+            b = _bucket(alt)
+            if b.limit > 0:
+                return b
+        return RateLimitBucket()
+
+    req_min = _best_bucket("requests", ["req", "request", "req-minute", "requests-minute"])
+    req_hour = _best_bucket("requests-1h", ["requests-hour", "request-1h", "requests-h"])
+    tok_min = _best_bucket("tokens", ["token", "tokens-minute"])
+    tok_hour = _best_bucket("tokens-1h", ["tokens-hour", "token-1h", "tokens-h"])
+
+    # SambaNova-style daily buckets — no direct slot in RateLimitState,
+    # so promote daily to hour-level if no hourly data exists.
+    req_day = _bucket("requests-day")
+    if req_day.limit > 0 and req_hour.limit <= 0:
+        req_hour = req_day
+    tok_day = _bucket("tokens-day")
+    if tok_day.limit > 0 and tok_hour.limit <= 0:
+        tok_hour = tok_day
+
     return RateLimitState(
-        requests_min=_bucket("requests"),
-        requests_hour=_bucket("requests", "-1h"),
-        tokens_min=_bucket("tokens"),
-        tokens_hour=_bucket("tokens", "-1h"),
+        requests_min=req_min,
+        requests_hour=req_hour,
+        tokens_min=tok_min,
+        tokens_hour=tok_hour,
         captured_at=now,
         provider=provider,
     )

@@ -2972,9 +2972,11 @@ def _get_tui_quota_snapshot(agent) -> dict:
     if "quota_pct" not in result:
         try:
             from agent.rate_limit_tracker import format_rate_limit_compact
-            rl = format_rate_limit_compact()
-            if rl:
-                result["quota_rl_text"] = rl
+            rl_state = getattr(agent, "get_rate_limit_state", lambda: getattr(agent, "_rate_limit_state", None))()
+            if rl_state and rl_state.has_data:
+                rl = format_rate_limit_compact(rl_state)
+                if rl and rl != "No rate limit data.":
+                    result["quota_rl_text"] = rl
         except Exception:
             pass
     _tui_quota_cache = result
