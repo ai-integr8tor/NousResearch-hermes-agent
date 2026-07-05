@@ -118,8 +118,23 @@ def _model_consumes_thought_signature(model: Any) -> bool:
 
 
 def _local_default_max_tokens(base_url: Any) -> int | None:
-    """Return a finite default output cap for local OpenAI-compatible endpoints."""
-    if not is_local_endpoint(str(base_url or "")):
+    """Return a finite default output cap for local OpenAI-compatible endpoints.
+
+    Only real HTTP(S) local LLM servers get the default cap. Virtual routing
+    endpoints with a non-HTTP scheme — notably the MoA aggregator placeholder
+    ``moa://local`` — are NOT real local servers: MoA fans each turn out to the
+    reference/aggregator providers' own runtimes, so a cap resolved for the
+    virtual endpoint would leak onto the (often cloud) aggregator call and
+    truncate long syntheses. Those endpoints must keep MoA's no-output-cap
+    contract, while genuine local HTTP endpoints keep the default. See
+    tests/run_agent/test_moa_loop_mode.py::test_moa_does_not_cap_output_tokens.
+    """
+    url = str(base_url or "")
+    if "://" in url:
+        scheme = url.split("://", 1)[0].lower()
+        if scheme not in ("http", "https"):
+            return None
+    if not is_local_endpoint(url):
         return None
 
     raw = (
