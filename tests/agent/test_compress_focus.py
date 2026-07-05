@@ -203,6 +203,32 @@ def test_auto_focus_skips_context_summary_handoff():
     assert "Bybit" not in focus_topic
 
 
+def test_summary_prompt_has_no_dutch_example_bias():
+    """The summarizer template should not seed Dutch into English chats."""
+    compressor = _make_compressor()
+    turns = [
+        {"role": "user", "content": "Why is provider set to OpenRouter?"},
+        {"role": "assistant", "content": "Investigating."},
+    ]
+
+    captured_prompt = {}
+
+    def mock_call_llm(**kwargs):
+        captured_prompt["messages"] = kwargs["messages"]
+        resp = MagicMock()
+        resp.choices = [MagicMock()]
+        resp.choices[0].message.content = "## Goal\nInvestigate provider routing."
+        return resp
+
+    with patch("agent.context_compressor.call_llm", mock_call_llm):
+        compressor._generate_summary(turns)
+
+    prompt_text = captured_prompt["messages"][0]["content"]
+    assert "waarom" not in prompt_text.lower()
+    assert "optie" not in prompt_text.lower()
+    assert "clear neutral English for internal reference" in prompt_text
+
+
 def test_compress_inserts_language_authority_before_foreign_language_summary():
     """Regression: the assembled handoff must place the reply-language rule
     before a foreign-language summary block in the outgoing transcript."""

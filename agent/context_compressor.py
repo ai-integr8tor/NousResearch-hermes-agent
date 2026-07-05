@@ -1753,8 +1753,8 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
 [THE SINGLE MOST IMPORTANT FIELD. Capture the user's most recent unfulfilled
 input verbatim — the exact words they used. This includes:
 - Explicit task assignments ("refactor the auth module")
-- Questions awaiting an answer ("waarom staat X op Y?", "wat zijn de volgende stappen?")
-- Decisions awaiting input ("optie A of B?")
+- Questions awaiting an answer ("why is X set to Y?", "what are the next steps?")
+- Decisions awaiting input ("option A or B?")
 - Ongoing discussions where the assistant owes the next substantive reply
 A conversation where the user just asked a question IS an active task — the
 task is "answer that question with full context". Do NOT write "None" merely
@@ -1764,7 +1764,7 @@ something like "thanks, that's all".
 If multiple items are outstanding, list only the ones NOT yet completed.
 Continuation should pick up exactly here. Examples:
 "User asked: 'Now refactor the auth module to use JWT instead of sessions'"
-"User asked: 'Waarom stond provider ineens op openrouter?' — needs investigation + answer"
+"User asked: 'Why was provider suddenly set to openrouter?' — needs investigation + answer"
 "User chose option A; awaiting implementation of step 2"
 If the user's most recent message was a reverse signal (stop, undo, roll
 back, never mind, just verify, change of topic) that supersedes earlier
