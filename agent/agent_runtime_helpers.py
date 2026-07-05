@@ -1151,6 +1151,11 @@ def restore_primary_runtime(agent) -> bool:
         return False
 
     if getattr(agent, "_rate_limited_until", 0) > time.monotonic():
+        # Primary still in rate-limit cooldown — stay on fallback, but
+        # reset the fallback index so the chain is re-evaluated fresh
+        # when the cooldown expires (prevents permanent deadlock where
+        # a prior exhausted-index state blocks all future attempts).
+        agent._fallback_index = 0
         return False  # primary still in rate-limit cooldown, stay on fallback
 
     rt = agent._primary_runtime
@@ -1267,6 +1272,13 @@ def restore_primary_runtime(agent) -> bool:
         # ── Reset fallback chain for the new turn ──
         agent._fallback_activated = False
         agent._fallback_index = 0
+        # Clear unavailable-fallback-key poison so previous transient
+        # errors do not permanently skip now-healthy chain entries.
+        agent._unavailable_fallback_keys.clear()
+
+        # Re-enable streaming (may have been disabled by a provider
+        # that rejected it while on fallback — primary supports it).
+        agent._disable_streaming = False
 
         # Undo the fallback's identity rewrite so the prompt is
         # byte-identical to the stored copy again (prefix cache match).
