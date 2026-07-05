@@ -232,7 +232,9 @@ class BlueBubblesAdapter(BasePlatformAdapter):
     # Lifecycle
     # ------------------------------------------------------------------
 
-    async def connect(self, *, is_reconnect: bool = False) -> bool:
+    async def connect(
+        self, *, is_reconnect: bool = False, send_only: bool = False
+    ) -> bool:
         if not self.server_url or not self.password:
             logger.error(
                 "[bluebubbles] BLUEBUBBLES_SERVER_URL and BLUEBUBBLES_PASSWORD are required"
@@ -263,6 +265,15 @@ class BlueBubblesAdapter(BasePlatformAdapter):
                 await self.client.aclose()
                 self.client = None
             return False
+
+        # send_only=True skips the local webhook server. Outbound-only callers
+        # (standalone cron delivery, send_message_tool) don't need to receive
+        # inbound events and must not bind self.webhook_port — the gateway
+        # process already holds it, so binding here raises OSError(EADDRINUSE)
+        # and aborts the send.
+        if send_only:
+            self._mark_connected()
+            return True
 
         app = web.Application()
         app.router.add_get("/health", lambda _: web.Response(text="ok"))
