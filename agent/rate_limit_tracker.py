@@ -92,10 +92,14 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
 def parse_rate_limit_headers(
     headers: Mapping[str, str],
     provider: str = "",
+    *,
+    status_code: int = 0,
+    error_body: str = "",
 ) -> Optional[RateLimitState]:
-    """Parse x-ratelimit-* headers into a RateLimitState.
+    """Parse x-ratelimit-* headers (and provider-specific fallbacks) into a
+    ``RateLimitState``.
 
-    Returns None if no rate limit headers are present.
+    Returns ``None`` if no rate limit data can be extracted.
 
     Supports multiple header naming conventions:
 
@@ -112,9 +116,25 @@ def parse_rate_limit_headers(
     # capitalises headers (HTTP header names are case-insensitive per RFC 7230).
     lowered = {k.lower(): v for k, v in headers.items()}
 
-    # Quick check: at least one rate limit header must exist
+    # Quick check: at least one rate limit header must exist.
+    # If absent, try provider-specific fallbacks before giving up.
     has_any = any(k.startswith("x-ratelimit-") for k in lowered)
-    if not has_any:
+    if has_any:
+        pass  # standard path continues below
+    else:
+        # Provider-specific fallbacks (no x-ratelimit-* headers).
+        prov = (provider or "").strip().lower()
+        if prov in ("google", "gemini", "generativelanguage") and status_code == 429 and error_body:
+            state = parse_google_quota_from_error(status_code, error_body)
+            if state is not None:
+                return state
+        # Cloudflare neurons tracking — ``cf-ai-neurons`` is the cost
+        # **per request**, not cumulative.  We cannot determine total
+        # daily usage from a single response header, so return ``None``
+        # here.  Callers that want to accumulate across requests should
+        # use ``parse_cloudflare_neuron_header`` directly and maintain
+        # their own running total (e.g. in Redis or a process-local
+        # counter).  See parse_cloudflare_neuron_header docstring.
         return None
 
     now = time.time()
@@ -163,6 +183,95 @@ def parse_rate_limit_headers(
         captured_at=now,
         provider=provider,
     )
+
+
+# ── Provider-specific quota parsers ────────────────────────────────────
+# These handle providers that expose quota info through mechanisms other
+# than standard x-ratelimit-* headers.
+
+
+def parse_google_quota_from_error(
+    status_code: int,
+    error_body: str,
+) -> Optional[RateLimitState]:
+    """Extract quota info from a Google Gemini 429 error response body.
+
+    Google Gemini free tier 429s include structured quota info in the
+    error message::
+
+      metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 50
+      metric: generativelanguage.googleapis.com/generate_content_free_tier_input_token_count, limit: 0
+
+    Returns a ``RateLimitState`` with the most restrictive bucket, or
+    ``None`` if the body does not contain quota metrics.
+    """
+    if status_code != 429 or not error_body:
+        return None
+
+    import re
+
+    now = time.time()
+    metrics: list[dict[str, Any]] = []
+
+    # Pattern: metric: <API>/<metric_name>, limit: <number>
+    for m in re.finditer(
+        r"metric:\s*([\w./]+)(?:,\s*limit:\s*(\d+))?", error_body
+    ):
+        metric_name = m.group(1)
+        limit = int(m.group(2)) if m.group(2) else 0
+        # Classify: requests vs tokens, tier
+        is_tokens = "token" in metric_name.lower()
+        tier = "free_tier" if "free_tier" in metric_name else "paid"
+        metrics.append(
+            {
+                "name": metric_name,
+                "limit": limit,
+                "is_tokens": is_tokens,
+                "tier": tier,
+            }
+        )
+
+    if not metrics:
+        return None
+
+    # Build buckets from the most restrictive metric of each type
+    req_bucket = RateLimitBucket()
+    tok_bucket = RateLimitBucket()
+
+    for m in metrics:
+        bucket = tok_bucket if m["is_tokens"] else req_bucket
+        if m["limit"] > 0:
+            bucket.limit = m["limit"]
+        # If limit is 0, quota is exhausted — remaining = 0
+        elif m["limit"] == 0 and bucket.limit == 0:
+            bucket.remaining = 0
+            bucket.limit = 1  # avoid div-by-zero, signals "exhausted"
+
+    return RateLimitState(
+        requests_min=req_bucket,
+        tokens_min=tok_bucket,
+        captured_at=now,
+        provider="google",
+    )
+
+
+def parse_cloudflare_neuron_header(
+    headers: Mapping[str, str],
+) -> Optional[float]:
+    """Extract the neuron cost from a Cloudflare Workers AI response.
+
+    Returns the ``cf-ai-neurons`` header value (float), or ``None`` if not
+    present.  Callers can accumulate this value to track daily usage vs.
+    the known daily limit (e.g. 10 000 neurons/day on free tier).
+    """
+    lowered = {k.lower(): v for k, v in headers.items()}
+    raw = lowered.get("cf-ai-neurons")
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
 
 
 # ── Formatting ──────────────────────────────────────────────────────────
