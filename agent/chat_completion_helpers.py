@@ -409,13 +409,51 @@ def interruptible_api_call(agent, api_kwargs: dict):
     t = threading.Thread(target=_call, daemon=True)
     t.start()
     _poll_count = 0
+    # The 0.3s poll window is the worst-case stall length on the main
+    # thread.  When ``interruptible_api_call`` runs on the asyncio event
+    # loop thread (the common case — ``run_conversation`` is sync but
+    # is invoked from the loop thread), each 0.3s ``t.join`` blocks the
+    # event loop from advancing, so the 2s heartbeat callback in
+    # ``hermes_cli/web_server.py`` and the desktop WebSocket heartbeats
+    # don't fire on time, tripping the 5s-stall watchdog.  Halving the
+    # window to 0.05s keeps the worst-case stall well under the 5s
+    # threshold and matches the cadence other tools in the agent use.
+    # See issue #57903.
+    _POLL_INTERVAL = _env_float("HERMES_INTERRUPTIBLE_API_POLL_SECONDS", 0.05)
+    if _POLL_INTERVAL <= 0:
+        _POLL_INTERVAL = 0.05
     while t.is_alive():
-        t.join(timeout=0.3)
+        t.join(timeout=_POLL_INTERVAL)
+        # Explicit GIL yield so other Python threads (web_server event
+        # loop in this process, future pool workers) get scheduled even
+        # if the join returned early because the thread finished.
+        time.sleep(0)
         _poll_count += 1
+        # Diagnostic for issue #57903 — measure the maximum wall-clock
+        # gap between consecutive polls. If the gap is much larger than
+        # ``_POLL_INTERVAL`` (default 50ms), the main thread was blocked
+        # somewhere *outside* this loop (e.g. CPU-bound JSON parsing on
+        # a streaming chunk, retry backoff sleep, or another sync call).
+        # Logged via agent._buffer_status so it shows up in the gateway
+        # status stream and the desktop UI.
+        _now = time.monotonic()
+        if "_last_poll_at" in dir():
+            _gap = _now - _last_poll_at
+            if _gap > _POLL_INTERVAL * 10:  # > 500ms gap is suspicious
+                try:
+                    agent._buffer_status(
+                        f"⚠️ interruptible_api_call poll gap: "
+                        f"{_gap * 1000:.0f}ms (expected <{_POLL_INTERVAL * 1000:.0f}ms) "
+                        f"after {_poll_count} polls; main thread was blocked outside the poll loop"
+                    )
+                except Exception:
+                    pass
+        _last_poll_at = _now
 
         # Touch activity every ~30s so the gateway's inactivity
         # monitor knows we're alive while waiting for the response.
-        if _poll_count % 100 == 0:  # 100 × 0.3s = 30s
+        # Cadence preserved: 600 × 0.05s = 30s (was 100 × 0.3s).
+        if _poll_count % 600 == 0:
             _elapsed = time.time() - _call_start
             agent._touch_activity(
                 f"waiting for non-streaming response ({int(_elapsed)}s elapsed)"
@@ -1875,8 +1913,16 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
 
         t = threading.Thread(target=_bedrock_call, daemon=True)
         t.start()
+        # Same poll-interval reduction as the non-streaming
+        # ``interruptible_api_call`` in this file: 50ms keeps the
+        # worst-case event-loop stall under the 5s-stall watchdog
+        # threshold. See issue #57903 for the diagnosis.
+        _POLL_INTERVAL = _env_float("HERMES_INTERRUPTIBLE_API_POLL_SECONDS", 0.05)
+        if _POLL_INTERVAL <= 0:
+            _POLL_INTERVAL = 0.05
         while t.is_alive():
-            t.join(timeout=0.3)
+            t.join(timeout=_POLL_INTERVAL)
+            time.sleep(0)  # explicit GIL yield
             if agent._interrupt_requested:
                 raise InterruptedError("Agent interrupted during Bedrock API call")
         if result["error"] is not None:
@@ -2820,8 +2866,19 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
     t.start()
     _last_heartbeat = time.time()
     _HEARTBEAT_INTERVAL = 30.0  # seconds between gateway activity touches
+    # Same poll-interval reduction as the non-streaming and Bedrock
+    # interruptible_*_api_call paths in this file. The 50ms window keeps
+    # the worst-case event-loop stall under the 5s-stall watchdog
+    # threshold. The streaming path is the one most often exercised by
+    # long-running LLM calls (large context prefill, reasoning models),
+    # so this is the most impactful of the three siblings. See
+    # issue #57903.
+    _POLL_INTERVAL = _env_float("HERMES_INTERRUPTIBLE_API_POLL_SECONDS", 0.05)
+    if _POLL_INTERVAL <= 0:
+        _POLL_INTERVAL = 0.05
     while t.is_alive():
-        t.join(timeout=0.3)
+        t.join(timeout=_POLL_INTERVAL)
+        time.sleep(0)  # explicit GIL yield
 
         # Periodic heartbeat: touch the agent's activity tracker so the
         # gateway's inactivity monitor knows we're alive while waiting
