@@ -767,4 +767,34 @@ def resolve_provider_full(
     except Exception:
         pass
 
+    # 4. Plugin registry (plugins/model-providers/<name>/__init__.py).
+    # User-installed or bundled providers that aren't in models.dev and don't
+    # need an entry in HERMES_OVERLAYS because they use the standard
+    # OpenAI-compatible chat transport (or whatever api_mode they declare).
+    # Eden AI is the motivating example: it ships as a plugin to avoid
+    # leaking aggregator-only metadata into core, but it is a perfectly
+    # normal api_key provider from the switch-model pipeline's perspective.
+    try:
+        from providers import get_provider_profile as _plugin_profile
+        profile = _plugin_profile(name)
+        if profile is not None:
+            return ProviderDef(
+                id=profile.name,
+                name=profile.display_name or profile.name,
+                transport=(
+                    "openai_chat"
+                    if profile.api_mode == "chat_completions"
+                    else profile.api_mode
+                ),
+                api_key_env_vars=profile.env_vars,
+                base_url=profile.base_url,
+                base_url_env_var="",
+                is_aggregator=False,
+                auth_type=profile.auth_type,
+                doc=profile.description,
+                source="plugin",
+            )
+    except Exception:
+        pass
+
     return None
