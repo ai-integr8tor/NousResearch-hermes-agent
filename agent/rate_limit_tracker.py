@@ -92,186 +92,145 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
 def parse_rate_limit_headers(
     headers: Mapping[str, str],
     provider: str = "",
-    *,
     status_code: int = 0,
     error_body: str = "",
 ) -> Optional[RateLimitState]:
-    """Parse x-ratelimit-* headers (and provider-specific fallbacks) into a
-    ``RateLimitState``.
+    """Parse x-ratelimit-* headers into a RateLimitState.
 
-    Returns ``None`` if no rate limit data can be extracted.
-
-    Supports multiple header naming conventions:
-
-    - **Nous / OpenRouter / Groq** (standard):
-      ``x-ratelimit-{limit,remaining,reset}-{requests,tokens}{,-1h}``
-    - **Mistral**:
-      ``x-ratelimit-{limit,remaining}-{req,tokens}-minute``
-    - **Cerebras**:
-      ``x-ratelimit-{limit,remaining}-{requests,tokens}-{minute,hour,day}``
-    - **SambaNova**:
-      ``x-ratelimit-{limit,remaining,reset}-requests-day``
+    Returns None if no rate limit headers are present.
+    Supports multiple provider header formats:
+      - OpenAI/Groq:      x-ratelimit-limit-requests, -remaining-requests, -reset-requests
+      - OpenAI hourly:    x-ratelimit-limit-requests-1h, -remaining-requests-1h
+      - Cerebras:         x-ratelimit-limit-requests-minute, -remaining-requests-minute, etc.
+      - Mistral:          x-ratelimit-limit-req-minute, -remaining-req-minute, -limit-tokens-minute
+      - SambaNova:        x-ratelimit-limit-requests-day, -remaining-requests-day
+      - Anthropic:        retry-after, x-ratelimit-* (via anthropic-ratelimit-* variant)
     """
     # Normalize to lowercase so lookups work regardless of how the server
     # capitalises headers (HTTP header names are case-insensitive per RFC 7230).
     lowered = {k.lower(): v for k, v in headers.items()}
 
-    # Quick check: at least one rate limit header must exist.
-    # If absent, try provider-specific fallbacks before giving up.
-    has_any = any(k.startswith("x-ratelimit-") for k in lowered)
-    if has_any:
-        pass  # standard path continues below
-    else:
-        # Provider-specific fallbacks (no x-ratelimit-* headers).
-        prov = (provider or "").strip().lower()
-        if prov in ("google", "gemini", "generativelanguage") and status_code == 429 and error_body:
-            state = parse_google_quota_from_error(status_code, error_body)
-            if state is not None:
-                return state
-        # Cloudflare neurons tracking — ``cf-ai-neurons`` is the cost
-        # **per request**, not cumulative.  We cannot determine total
-        # daily usage from a single response header, so return ``None``
-        # here.  Callers that want to accumulate across requests should
-        # use ``parse_cloudflare_neuron_header`` directly and maintain
-        # their own running total (e.g. in Redis or a process-local
-        # counter).  See parse_cloudflare_neuron_header docstring.
+    # Quick check: at least one rate limit header must exist
+    has_any = any(k.startswith("x-ratelimit-") for k in lowered) or \
+              any(k.startswith("anthropic-ratelimit-") for k in lowered) or \
+              "retry-after" in lowered
+    if not has_any:
         return None
 
     now = time.time()
 
-    def _bucket(resource: str, suffix: str = "") -> RateLimitBucket:
-        # e.g. resource="requests", suffix="" -> per-minute
-        #      resource="tokens", suffix="-1h" -> per-hour
-        tag = f"{resource}{suffix}"
+    # Build a flat lookup that normalizes different provider suffixes.
+    # We want to find limit/remaining/reset for these window tags:
+    #   requests (per-minute),  requests-1h (per-hour)
+    #   tokens   (per-minute),  tokens-1h   (per-hour)
+    # Each provider spells the suffix differently:
+    #   Groq/OpenAI: no suffix for minute, -1h for hour
+    #   Cerebras:    -minute / -hour / -day
+    #   Mistral:     -minute (and uses "req" instead of "requests")
+    #   SambaNova:   -day
+    #
+    # Strategy: for each (resource, window) pair, try a list of known
+    # header name variants and take the first match.
+
+    def _find_raw(prefix: str, resource: str, window_suffixes: list[str]) -> str:
+        """Search for a header value trying multiple naming conventions.
+
+        prefix: "limit", "remaining", or "reset"
+        resource: "requests" or "tokens"
+        window_suffixes: list of suffix variants, e.g. ["", "-minute", "-day"]
+        Returns the raw header value as string, or "" if not found.
+
+        Supports both orderings:
+          OpenAI/Groq:  x-ratelimit-{prefix}-{resource}{suffix}
+                        e.g. x-ratelimit-limit-requests
+          Anthropic:    anthropic-ratelimit-{resource}{suffix}-{prefix}
+                        e.g. anthropic-ratelimit-requests-limit
+        """
+        # Different providers use "req" vs "requests"
+        resource_variants = [resource]
+        if resource == "requests":
+            resource_variants.append("req")
+
+        for wsuf in window_suffixes:
+            for res in resource_variants:
+                # OpenAI/Groq/Cerebras/Mistral/SambaNova: prefix-resource
+                key = f"x-ratelimit-{prefix}-{res}{wsuf}"
+                if key in lowered:
+                    return lowered[key]
+                # Anthropic: resource-prefix (inverted)
+                key2 = f"anthropic-ratelimit-{res}{wsuf}-{prefix}"
+                if key2 in lowered:
+                    return lowered[key2]
+        return ""
+
+    def _find_int(prefix: str, resource: str, suffixes: list[str]) -> int:
+        return _safe_int(_find_raw(prefix, resource, suffixes))
+
+    def _find_float(prefix: str, resource: str, suffixes: list[str]) -> float:
+        return _safe_float(_find_raw(prefix, resource, suffixes))
+
+    # Window suffixes in priority order (minute first, then day, then bare)
+    MINUTE_SUFFIXES = ["", "-minute", "-1m"]
+    HOUR_SUFFIXES = ["-1h", "-hour"]
+    DAY_SUFFIXES = ["-day", "-1d"]
+
+    def _bucket(resource: str, suffixes: list[str]) -> RateLimitBucket:
         return RateLimitBucket(
-            limit=_safe_int(lowered.get(f"x-ratelimit-limit-{tag}")),
-            remaining=_safe_int(lowered.get(f"x-ratelimit-remaining-{tag}")),
-            reset_seconds=_safe_float(lowered.get(f"x-ratelimit-reset-{tag}")),
+            limit=_find_int("limit", resource, suffixes),
+            remaining=_find_int("remaining", resource, suffixes),
+            reset_seconds=_find_float("reset", resource, suffixes),
             captured_at=now,
         )
 
-    def _best_bucket(canonical_resource: str, variant_names: list[str]) -> RateLimitBucket:
-        """Try canonical format first, then provider-specific variants."""
-        b = _bucket(canonical_resource)
-        if b.limit > 0:
-            return b
-        for alt in variant_names:
-            b = _bucket(alt)
-            if b.limit > 0:
-                return b
-        return RateLimitBucket()
+    # Some providers (Anthropic) use reset with duration strings like "15s"
+    def _parse_duration(val: str) -> float:
+        if not val:
+            return 0.0
+        val = val.strip()
+        if val.isdigit():
+            return float(val)
+        # "15s", "2m", "1h"
+        try:
+            import re
+            m = re.match(r'^(\d+(?:\.\d+)?)([smh])?$', val)
+            if m:
+                num = float(m.group(1))
+                unit = m.group(2) or 's'
+                mult = {'s': 1, 'm': 60, 'h': 3600}[unit]
+                return num * mult
+        except Exception:
+            pass
+        return 0.0
 
-    req_min = _best_bucket("requests", ["req", "request", "req-minute", "requests-minute"])
-    req_hour = _best_bucket("requests-1h", ["requests-hour", "request-1h", "requests-h"])
-    tok_min = _best_bucket("tokens", ["token", "tokens-minute"])
-    tok_hour = _best_bucket("tokens-1h", ["tokens-hour", "token-1h", "tokens-h"])
-
-    # SambaNova-style daily buckets — no direct slot in RateLimitState,
-    # so promote daily to hour-level if no hourly data exists.
-    req_day = _bucket("requests-day")
-    if req_day.limit > 0 and req_hour.limit <= 0:
-        req_hour = req_day
-    tok_day = _bucket("tokens-day")
-    if tok_day.limit > 0 and tok_hour.limit <= 0:
-        tok_hour = tok_day
-
-    return RateLimitState(
-        requests_min=req_min,
-        requests_hour=req_hour,
-        tokens_min=tok_min,
-        tokens_hour=tok_hour,
+    state = RateLimitState(
+        requests_min=_bucket("requests", MINUTE_SUFFIXES),
+        requests_hour=_bucket("requests", HOUR_SUFFIXES),
+        tokens_min=_bucket("tokens", MINUTE_SUFFIXES),
+        tokens_hour=_bucket("tokens", HOUR_SUFFIXES),
         captured_at=now,
         provider=provider,
     )
 
+    # If minute data is empty but day data exists (SambaNova),
+    # put day data into the minute slot so it's still displayed
+    if state.requests_min.limit == 0 and state.requests_hour.limit == 0:
+        day_bucket = _bucket("requests", DAY_SUFFIXES)
+        if day_bucket.limit > 0:
+            state.requests_min = day_bucket
 
-# ── Provider-specific quota parsers ────────────────────────────────────
-# These handle providers that expose quota info through mechanisms other
-# than standard x-ratelimit-* headers.
+    if state.tokens_min.limit == 0 and state.tokens_hour.limit == 0:
+        day_bucket = _bucket("tokens", DAY_SUFFIXES)
+        if day_bucket.limit > 0:
+            state.tokens_min = day_bucket
 
+    # Anthropic retry-after as fallback
+    if not state.has_data and "retry-after" in lowered:
+        ra = _parse_duration(lowered.get("retry-after", ""))
+        if ra > 0:
+            state.captured_at = now
+            state.provider = provider
 
-def parse_google_quota_from_error(
-    status_code: int,
-    error_body: str,
-) -> Optional[RateLimitState]:
-    """Extract quota info from a Google Gemini 429 error response body.
-
-    Google Gemini free tier 429s include structured quota info in the
-    error message::
-
-      metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 50
-      metric: generativelanguage.googleapis.com/generate_content_free_tier_input_token_count, limit: 0
-
-    Returns a ``RateLimitState`` with the most restrictive bucket, or
-    ``None`` if the body does not contain quota metrics.
-    """
-    if status_code != 429 or not error_body:
-        return None
-
-    import re
-
-    now = time.time()
-    metrics: list[dict[str, Any]] = []
-
-    # Pattern: metric: <API>/<metric_name>, limit: <number>
-    for m in re.finditer(
-        r"metric:\s*([\w./]+)(?:,\s*limit:\s*(\d+))?", error_body
-    ):
-        metric_name = m.group(1)
-        limit = int(m.group(2)) if m.group(2) else 0
-        # Classify: requests vs tokens, tier
-        is_tokens = "token" in metric_name.lower()
-        tier = "free_tier" if "free_tier" in metric_name else "paid"
-        metrics.append(
-            {
-                "name": metric_name,
-                "limit": limit,
-                "is_tokens": is_tokens,
-                "tier": tier,
-            }
-        )
-
-    if not metrics:
-        return None
-
-    # Build buckets from the most restrictive metric of each type
-    req_bucket = RateLimitBucket()
-    tok_bucket = RateLimitBucket()
-
-    for m in metrics:
-        bucket = tok_bucket if m["is_tokens"] else req_bucket
-        if m["limit"] > 0:
-            bucket.limit = m["limit"]
-        # If limit is 0, quota is exhausted — remaining = 0
-        elif m["limit"] == 0 and bucket.limit == 0:
-            bucket.remaining = 0
-            bucket.limit = 1  # avoid div-by-zero, signals "exhausted"
-
-    return RateLimitState(
-        requests_min=req_bucket,
-        tokens_min=tok_bucket,
-        captured_at=now,
-        provider="google",
-    )
-
-
-def parse_cloudflare_neuron_header(
-    headers: Mapping[str, str],
-) -> Optional[float]:
-    """Extract the neuron cost from a Cloudflare Workers AI response.
-
-    Returns the ``cf-ai-neurons`` header value (float), or ``None`` if not
-    present.  Callers can accumulate this value to track daily usage vs.
-    the known daily limit (e.g. 10 000 neurons/day on free tier).
-    """
-    lowered = {k.lower(): v for k, v in headers.items()}
-    raw = lowered.get("cf-ai-neurons")
-    if not raw:
-        return None
-    try:
-        return float(raw)
-    except ValueError:
-        return None
+    return state
 
 
 # ── Formatting ──────────────────────────────────────────────────────────
