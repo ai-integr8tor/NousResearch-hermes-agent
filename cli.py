@@ -69,8 +69,8 @@ def _get_quota_snapshot(agent) -> Dict[str, Any]:
             base_url=_base_url,
             api_key=_api_key,
         )
-        if snap_acc:
-            best_w = max(snap_acc, key=lambda w: w.used_percent)
+        if snap_acc and snap_acc.windows:
+            best_w = max(snap_acc.windows, key=lambda w: w.used_percent)
             result["quota_pct"] = round(best_w.used_percent)
             if best_w.reset_at:
                 from datetime import datetime, timezone

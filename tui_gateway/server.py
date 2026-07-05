@@ -2955,8 +2955,8 @@ def _get_tui_quota_snapshot(agent) -> dict:
             base_url=_base_url,
             api_key=_api_key,
         )
-        if snap_acc:
-            _best = max(snap_acc, key=lambda w: w.used_percent)
+        if snap_acc and snap_acc.windows:
+            _best = max(snap_acc.windows, key=lambda w: w.used_percent)
             result["quota_pct"] = round(_best.used_percent)
             if _best.reset_at:
                 from datetime import datetime, timezone
