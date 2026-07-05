@@ -3257,6 +3257,11 @@ def systemd_restart(system: bool = False):
             if _systemd_service_is_start_limited(system=system):
                 return
 
+        # SIGUSR1 timed out — the gateway didn't exit gracefully in time.
+        # Write the planned-restart marker so the next startup sends the
+        # "♻️ Gateway online" home-channel notification.  (On the graceful
+        # path the gateway writes this itself; here it didn't complete.)
+        _write_planned_restart_marker()
         print(
             f"⚠ Graceful restart did not complete within {int(drain_timeout + 5)}s; "
             "forcing a service restart..."
@@ -3289,6 +3294,10 @@ def systemd_restart(system: bool = False):
     if _recover_pending_systemd_restart(system=system, previous_pid=pid):
         return
 
+    # No running PID and no pending restart to recover — this is a cold
+    # `systemctl restart` with no gateway running.  Write the marker so the
+    # freshly started gateway sends the "♻️ Gateway online" notification.
+    _write_planned_restart_marker()
     _run_systemctl(
         ["reset-failed", get_service_name()],
         system=system,
