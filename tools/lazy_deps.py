@@ -616,6 +616,23 @@ def _core_constraints_file() -> Optional[Path]:
         return None
 
 
+def _install_env_for_specs(
+    specs: tuple[str, ...],
+    base_env: Optional[dict[str, str]] = None,
+) -> dict[str, str]:
+    """Return subprocess env overrides needed by specific lazy deps."""
+    env = dict(base_env or os.environ)
+    if (
+        sys.platform == "win32"
+        and any(
+            _pkg_name_from_spec(spec) == "mautrix" and "[encryption]" in spec
+            for spec in specs
+        )
+    ):
+        env.setdefault("CMAKE_POLICY_VERSION_MINIMUM", "3.5")
+    return env
+
+
 def _venv_pip_install(specs: tuple[str, ...], *, timeout: int = 300) -> _InstallResult:
     """Install ``specs`` using the uv → pip → ensurepip ladder.
 
@@ -657,6 +674,7 @@ def _venv_pip_install(specs: tuple[str, ...], *, timeout: int = 300) -> _Install
         from tools.environments.local import hermes_subprocess_env
         uv_env = hermes_subprocess_env(inherit_credentials=False)
         uv_env["VIRTUAL_ENV"] = str(venv_root)
+        install_env = _install_env_for_specs(specs, uv_env)
 
         # Tier 1: uv (preferred — fast, doesn't need pip in the venv)
         uv_bin = shutil.which("uv")
@@ -664,7 +682,7 @@ def _venv_pip_install(specs: tuple[str, ...], *, timeout: int = 300) -> _Install
             try:
                 r = subprocess.run(
                     [uv_bin, "pip", "install", *target_args, *constraint_args, *specs],
-                    capture_output=True, text=True, timeout=timeout, env=uv_env,
+                    capture_output=True, text=True, timeout=timeout, env=install_env,
                     stdin=subprocess.DEVNULL,
                 )
                 if r.returncode == 0:
@@ -700,6 +718,7 @@ def _venv_pip_install(specs: tuple[str, ...], *, timeout: int = 300) -> _Install
             r = subprocess.run(
                 pip_cmd + ["install", *target_args, *constraint_args, *specs],
                 capture_output=True, text=True, timeout=timeout,
+                env=install_env,
                 stdin=subprocess.DEVNULL,
             )
             if r.returncode == 0 and target is not None:
