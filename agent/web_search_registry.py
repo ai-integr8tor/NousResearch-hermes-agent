@@ -126,7 +126,6 @@ _LEGACY_PREFERENCE = (
     "exa",
     "searxng",
     "brave-free",
-    "anysearch",
     "ddgs",
 )
 

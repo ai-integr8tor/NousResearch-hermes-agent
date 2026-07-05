@@ -524,15 +524,9 @@ class TestSegmentBreakOnToolBoundary:
 
         consumer.on_delta("Hello")
         task = asyncio.create_task(consumer.run())
-        for _ in range(100):
-            if consumer._message_id:
-                break
-            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.08)
         consumer.on_delta(" world")
-        for _ in range(300):
-            if consumer._fallback_final_send:
-                break
-            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.08)
         consumer.finish()
         await task
 
@@ -562,15 +556,9 @@ class TestSegmentBreakOnToolBoundary:
 
         consumer.on_delta("Hello")
         task = asyncio.create_task(consumer.run())
-        for _ in range(100):
-            if consumer._message_id:
-                break
-            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.08)
         consumer.on_delta(" world")
-        for _ in range(300):
-            if consumer._fallback_final_send:
-                break
-            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.08)
         consumer.on_delta(None)
         consumer.on_delta("Next segment")
         consumer.finish()
@@ -613,20 +601,11 @@ class TestSegmentBreakOnToolBoundary:
 
         consumer.on_delta("Hello")
         task = asyncio.create_task(consumer.run())
-        for _ in range(100):
-            if consumer._message_id:
-                break
-            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.08)
         consumer.on_delta(" world")
-        for _ in range(100):
-            if adapter.edit_message.call_count >= 1:
-                break
-            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.08)
         consumer.on_delta(" more")
-        for _ in range(300):
-            if consumer._fallback_final_send:
-                break
-            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.08)
         consumer.on_delta(None)  # tool boundary
         consumer.on_delta("Here is the tool result.")
         consumer.finish()
@@ -753,15 +732,9 @@ class TestSegmentBreakOnToolBoundary:
         tail = "x" * 620
         consumer.on_delta(prefix)
         task = asyncio.create_task(consumer.run())
-        for _ in range(100):
-            if consumer._message_id:
-                break
-            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.08)
         consumer.on_delta(tail)
-        for _ in range(300):
-            if consumer._fallback_final_send:
-                break
-            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.08)
         consumer.finish()
         await task
 
@@ -1493,16 +1466,6 @@ class TestFilterAndAccumulate:
         # Still inside think block — subsequent text should be suppressed
         c._filter_and_accumulate("still hidden</think>visible")
         assert c._accumulated == "visible"
-
-    def test_chinese_think_tags_stripped(self):
-        """Chinese reasoning tags like ' 思考', ' 反思', etc. are stripped case-insensitively."""
-        c = _make_consumer()
-        c._filter_and_accumulate(" 思考internal reasoning 思考Visible output")
-        assert c._accumulated == "Visible output"
-
-        c = _make_consumer()
-        c._filter_and_accumulate(" 反思internal reasoning 反思Visible output")
-        assert c._accumulated == "Visible output"
 
 
 class TestFilterAndAccumulateIntegration:

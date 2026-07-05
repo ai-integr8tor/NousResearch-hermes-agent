@@ -58,7 +58,7 @@ class TestZombieReproduction:
         finally:
             for pid in pids:
                 try:
-                    os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+                    os.kill(pid, signal.SIGKILL)
                 except (ProcessLookupError, PermissionError):
                     pass
 

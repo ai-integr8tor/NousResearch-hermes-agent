@@ -144,13 +144,13 @@ class SubdirectoryHintTracker:
                 if parent == p:
                     break  # filesystem root
                 p = parent
-        except (OSError, ValueError, RuntimeError):
+        except (OSError, ValueError):
             pass
 
     def _extract_paths_from_command(self, cmd: str, candidates: Set[Path]):
         """Extract path-like tokens from a shell command string."""
         try:
-            tokens = shlex.split(cmd, posix=(os.name != "nt"))
+            tokens = shlex.split(cmd)
         except ValueError:
             tokens = cmd.split()
 
@@ -158,8 +158,8 @@ class SubdirectoryHintTracker:
             # Skip flags
             if token.startswith("-"):
                 continue
-            # Must look like a path (contains / or \ or .)
-            if "/" not in token and "\\" not in token and "." not in token:
+            # Must look like a path (contains / or .)
+            if "/" not in token and "." not in token:
                 continue
             # Skip URLs
             if token.startswith(("http://", "https://", "git@")):

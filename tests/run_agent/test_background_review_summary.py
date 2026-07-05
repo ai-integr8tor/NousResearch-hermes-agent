@@ -7,10 +7,10 @@ history before the review started (e.g. an earlier "Cron job '...' created.").
 
 import json
 
-from agent.background_review import summarize_background_review_actions
+from run_agent import AIAgent
 
 
-_summarize = summarize_background_review_actions
+_summarize = AIAgent._summarize_background_review_actions
 
 
 def _tool_msg(tool_call_id, payload):

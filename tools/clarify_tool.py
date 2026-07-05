@@ -20,8 +20,6 @@ from typing import List, Optional, Callable
 MAX_CHOICES = 4
 
 
-import re
-
 def _flatten_choice(c) -> str:
     """Coerce a single choice into its user-facing display string.
 
@@ -54,17 +52,6 @@ def _flatten_choice(c) -> str:
         return " ".join(_flatten_choice(x) for x in c).strip()
     return str(c).strip()
 
-def _sanitize_clarify_text(text: str) -> str:
-    if not isinstance(text, str):
-        return text
-    # Strip user mentions (<@123>, <@!123>), role mentions (<@&123>), channel mentions (<#123>)
-    text = re.sub(r'<@[!&]?\d+>', '', text)
-    text = re.sub(r'<#\d+>', '', text)
-    # Strip mass mentions @everyone, @here
-    text = re.sub(r'@everyone\b', '', text)
-    text = re.sub(r'@here\b', '', text)
-    return text
-
 
 def clarify_tool(
     question: str,
@@ -88,9 +75,7 @@ def clarify_tool(
     if not question or not question.strip():
         return tool_error("Question text is required.")
 
-    question = _sanitize_clarify_text(question).strip()
-    if not question:
-        return tool_error("Question text is required after sanitization.")
+    question = question.strip()
 
     # Validate and trim choices
     if choices is not None:
@@ -101,8 +86,7 @@ def clarify_tool(
         # user-facing text here — the single platform-agnostic entry point —
         # so the CLI panel, Discord buttons, and Telegram list all render clean
         # text and the resolved answer is never a raw Python dict repr.
-        choices = [_sanitize_clarify_text(_flatten_choice(c)).strip() for c in choices]
-        choices = [c for c in choices if c]
+        choices = [s for s in (_flatten_choice(c) for c in choices) if s]
         if len(choices) > MAX_CHOICES:
             choices = choices[:MAX_CHOICES]
         if not choices:
