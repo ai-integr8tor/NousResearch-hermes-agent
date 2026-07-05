@@ -993,7 +993,7 @@ def run_conversation(
         request_pressure_tokens = estimate_request_tokens_rough(
             api_messages, tools=agent.tools or None
         )
-        _emit_preflight_token_usage(agent, approx_request_tokens)
+        _emit_preflight_token_usage(agent, request_pressure_tokens)
 
         _runtime_context_error = _ollama_context_limit_error(
             agent, request_pressure_tokens
