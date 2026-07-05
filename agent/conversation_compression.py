@@ -385,8 +385,18 @@ def conversation_history_after_compression(agent: Any, messages: list) -> Option
 
     A shallow copy is intentional: it captures the current compacted dict
     identities as history while allowing later same-turn appends to remain new.
+
+    ``_last_compaction_in_place`` is a run-level gateway signal: it stays true
+    once a turn compacted in place so outer adapters can re-baseline their
+    transcript handling. This helper needs the *latest attempt* result instead,
+    because a later aborted/no-op compression must not reuse the previous
+    in-place flush baseline.
     """
-    if bool(getattr(agent, "_last_compaction_in_place", False)):
+    if bool(getattr(agent, "_last_compression_attempt_recorded", False)):
+        attempt_in_place = getattr(agent, "_last_compression_attempt_in_place", False)
+    else:
+        attempt_in_place = getattr(agent, "_last_compaction_in_place", False)
+    if bool(attempt_in_place):
         return list(messages)
     return None
 
@@ -465,6 +475,12 @@ def compress_context(
         prompt — the session is NOT rotated.  Callers should detect the
         no-op via ``len(returned) == len(input)`` and stop the retry loop.
     """
+    # Per-attempt result flag consumed by conversation_history_after_compression().
+    # Reset it before every compression attempt so a previous successful
+    # in-place compaction cannot make a later abort/no-op look persisted.
+    agent._last_compression_attempt_in_place = False
+    agent._last_compression_attempt_recorded = True
+
     # Lazy feasibility check — run the auxiliary-provider probe + context
     # length lookup just-in-time on the first compression attempt instead of
     # at AIAgent.__init__. Saves ~400ms cold off every short session that
@@ -932,7 +948,11 @@ def compress_context(
         # via a rotation-independent flag. The gateway uses this — NOT an
         # id-change diff — to re-baseline transcript handling (history_offset=0 +
         # rewrite on the same id) when compaction happened in place. See #38763.
-        agent._last_compaction_in_place = compacted_in_place
+        agent._last_compression_attempt_in_place = compacted_in_place
+        if compacted_in_place:
+            agent._last_compaction_in_place = True
+        elif not bool(getattr(agent, "_last_compaction_in_place", False)):
+            agent._last_compaction_in_place = False
 
         # Keep the post-compression rough estimate for diagnostics, but do not
         # treat it as provider-reported prompt usage. Schema-heavy rough estimates
