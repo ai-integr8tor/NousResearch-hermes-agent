@@ -560,6 +560,12 @@ def run_conversation(
         except Exception:
             pass
 
+    # Run-level compression signal read by gateways after the turn finishes.
+    # AIAgent instances can be reused across turns, so reset it before any
+    # prologue compression can set it again for this specific run.
+    agent._last_compaction_in_place = False
+    agent._last_compression_attempt_recorded = False
+
     # ── Per-turn setup (the prologue) ──
     # All once-per-turn setup — stdio guarding, retry-counter resets, user
     # message sanitization, todo/nudge hydration, system-prompt restore-or-
