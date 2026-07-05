@@ -71,6 +71,8 @@ export const en: Translations = {
       startingDesktopConnection: 'Starting desktop connection',
       startingHermesDesktop: 'Starting Hermes Desktop…'
     },
+    connectingPrefix: 'CONN',
+    connectingTail: 'ECTING',
     errors: {
       backgroundExited: 'Hermes background process exited.',
       backgroundExitedDuringStartup: 'Hermes background process exited during startup.',
@@ -2443,6 +2445,37 @@ export const en: Translations = {
       systemNote: platform => `↻ Handed off to ${platform} — resume here anytime.`,
       failed: error => `Handoff failed: ${error}`,
       timedOut: 'Timed out waiting for the gateway. Is `hermes gateway` running?'
+    }
+  },
+
+  uninstall: {
+    dangerZone: 'Danger Zone',
+    checking: 'Checking what is installed…',
+    confirmTitle: 'Confirm uninstall',
+    confirmBody: consequence => `This will remove ${consequence}. This action is irreversible.`,
+    uninstalling: 'Uninstalling…',
+    yesUninstall: 'Yes, uninstall',
+    couldNotStart: 'Uninstall could not start.',
+    cancel: 'Cancel',
+    uninstallHermes: 'Uninstall Hermes',
+    uninstallDescription:
+      'Choose what you want to remove. The app will close to finish; reopen the installer anytime to come back.',
+    options: {
+      gui: {
+        title: 'Uninstall GUI only',
+        description: 'Removes this desktop application. The Hermes agent, your configuration, and conversations are kept.',
+        consequence: 'the desktop application'
+      },
+      lite: {
+        title: 'Uninstall Hermes',
+        description: 'Removes the Hermes agent and this desktop application. Your configuration and conversations are kept.',
+        consequence: 'the Hermes agent and this desktop application'
+      },
+      full: {
+        title: 'Full uninstall',
+        description: 'Removes everything: the agent, this application, all configurations, and all your conversations.',
+        consequence: 'the Hermes agent, this application, all configurations, and all your conversations'
+      }
     }
   },
 
