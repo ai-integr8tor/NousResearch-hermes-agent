@@ -207,3 +207,113 @@ class TestAgentIntegration:
         # None should not crash
         result = parse_rate_limit_headers({})
         assert result is None
+
+
+class TestProviderFormats:
+    """Test that parse_rate_limit_headers handles real-world header formats
+    from every LLM provider that exposes rate-limit data."""
+
+    def test_groq_openai_standard(self):
+        """Groq uses bare OpenAI format (no window suffix = minute)."""
+        headers = {
+            "x-ratelimit-limit-requests": "1000",
+            "x-ratelimit-remaining-requests": "999",
+            "x-ratelimit-reset-requests": "23s",
+            "x-ratelimit-limit-tokens": "600000",
+            "x-ratelimit-remaining-tokens": "599500",
+        }
+        state = parse_rate_limit_headers(headers, provider="groq")
+        assert state is not None
+        assert state.has_data
+        assert state.requests_min.limit == 1000
+        assert state.requests_min.remaining == 999
+
+    def test_cerebras_minute_suffix(self):
+        """Cerebras uses -minute suffix instead of bare."""
+        headers = {
+            "x-ratelimit-limit-requests-minute": "5",
+            "x-ratelimit-remaining-requests-minute": "4",
+            "x-ratelimit-limit-tokens-minute": "20000",
+            "x-ratelimit-remaining-tokens-minute": "18000",
+        }
+        state = parse_rate_limit_headers(headers, provider="cerebras")
+        assert state is not None
+        assert state.has_data
+        assert state.requests_min.limit == 5
+        assert state.requests_min.remaining == 4
+
+    def test_mistral_req_minute(self):
+        """Mistral uses req instead of requests + -minute suffix."""
+        headers = {
+            "x-ratelimit-limit-req-minute": "50",
+            "x-ratelimit-remaining-req-minute": "49",
+            "x-ratelimit-limit-tokens-minute": "500000",
+            "x-ratelimit-remaining-tokens-minute": "490000",
+        }
+        state = parse_rate_limit_headers(headers, provider="mistral")
+        assert state is not None
+        assert state.has_data
+        assert state.requests_min.limit == 50
+        assert state.requests_min.remaining == 49
+
+    def test_sambanova_day_window(self):
+        """SambaNova uses -day suffix; should promote to minute slot."""
+        headers = {
+            "x-ratelimit-limit-requests-day": "200",
+            "x-ratelimit-remaining-requests-day": "180",
+            "x-ratelimit-limit-tokens-day": "1000000",
+            "x-ratelimit-remaining-tokens-day": "900000",
+        }
+        state = parse_rate_limit_headers(headers, provider="sambanova")
+        assert state is not None
+        assert state.has_data
+        # Day-window data should land in requests_min when no minute/hour
+        assert state.requests_min.limit == 200
+        assert state.requests_min.remaining == 180
+
+    def test_anthropic_inverted_order(self):
+        """Anthropic inverts resource/metric order."""
+        headers = {
+            "anthropic-ratelimit-requests-limit": "1000",
+            "anthropic-ratelimit-requests-remaining": "950",
+            "anthropic-ratelimit-requests-reset": "2025-01-01T00:01:00Z",
+            "anthropic-ratelimit-tokens-limit": "80000",
+            "anthropic-ratelimit-tokens-remaining": "79500",
+        }
+        state = parse_rate_limit_headers(headers, provider="anthropic")
+        assert state is not None
+        assert state.has_data
+        assert state.requests_min.limit == 1000
+        assert state.requests_min.remaining == 950
+        assert state.tokens_min.limit == 80000
+
+    def test_openrouter_nous_format(self):
+        """OpenRouter passes through Nous format with -1h suffix."""
+        headers = {
+            "x-ratelimit-limit-requests": "800",
+            "x-ratelimit-limit-requests-1h": "33600",
+            "x-ratelimit-remaining-requests": "795",
+            "x-ratelimit-remaining-requests-1h": "33590",
+        }
+        state = parse_rate_limit_headers(headers, provider="openrouter")
+        assert state is not None
+        assert state.has_data
+        assert state.requests_min.limit == 800
+        assert state.requests_hour.limit == 33600
+
+    def test_zai_no_headers_returns_none(self):
+        """Z.AI (GLM) does not send rate-limit headers at all."""
+        headers = {
+            "content-type": "text/event-stream;charset=UTF-8",
+            "server": "nginx",
+            "x-log-id": "202607060407386d5a6af83cd6456e",
+        }
+        state = parse_rate_limit_headers(headers, provider="zai")
+        assert state is None
+
+    def test_retry_after_only(self):
+        """Some providers send only retry-after on 429."""
+        headers = {"retry-after": "30"}
+        state = parse_rate_limit_headers(headers)
+        assert state is not None
+        assert state.has_data is True

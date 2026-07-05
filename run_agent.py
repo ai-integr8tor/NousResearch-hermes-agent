@@ -3079,7 +3079,18 @@ class AIAgent:
             return
         try:
             from agent.rate_limit_tracker import parse_rate_limit_headers
-            state = parse_rate_limit_headers(headers, provider=self.provider)
+            # Pass status_code + body for provider-specific fallbacks
+            # (e.g. Google Gemini 429 error body contains quota metrics).
+            sc = getattr(http_response, "status_code", 0)
+            body = ""
+            try:
+                body = getattr(http_response, "text", "")
+            except Exception:
+                pass  # body may already be consumed or unreadable
+            state = parse_rate_limit_headers(
+                headers, provider=self.provider,
+                status_code=sc, error_body=body,
+            )
             if state is not None:
                 self._rate_limit_state = state
         except Exception:

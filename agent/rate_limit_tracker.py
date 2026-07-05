@@ -92,41 +92,145 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
 def parse_rate_limit_headers(
     headers: Mapping[str, str],
     provider: str = "",
+    status_code: int = 0,
+    error_body: str = "",
 ) -> Optional[RateLimitState]:
     """Parse x-ratelimit-* headers into a RateLimitState.
 
     Returns None if no rate limit headers are present.
+    Supports multiple provider header formats:
+      - OpenAI/Groq:      x-ratelimit-limit-requests, -remaining-requests, -reset-requests
+      - OpenAI hourly:    x-ratelimit-limit-requests-1h, -remaining-requests-1h
+      - Cerebras:         x-ratelimit-limit-requests-minute, -remaining-requests-minute, etc.
+      - Mistral:          x-ratelimit-limit-req-minute, -remaining-req-minute, -limit-tokens-minute
+      - SambaNova:        x-ratelimit-limit-requests-day, -remaining-requests-day
+      - Anthropic:        retry-after, x-ratelimit-* (via anthropic-ratelimit-* variant)
     """
     # Normalize to lowercase so lookups work regardless of how the server
     # capitalises headers (HTTP header names are case-insensitive per RFC 7230).
     lowered = {k.lower(): v for k, v in headers.items()}
 
     # Quick check: at least one rate limit header must exist
-    has_any = any(k.startswith("x-ratelimit-") for k in lowered)
+    has_any = any(k.startswith("x-ratelimit-") for k in lowered) or \
+              any(k.startswith("anthropic-ratelimit-") for k in lowered) or \
+              "retry-after" in lowered
     if not has_any:
         return None
 
     now = time.time()
 
-    def _bucket(resource: str, suffix: str = "") -> RateLimitBucket:
-        # e.g. resource="requests", suffix="" -> per-minute
-        #      resource="tokens", suffix="-1h" -> per-hour
-        tag = f"{resource}{suffix}"
+    # Build a flat lookup that normalizes different provider suffixes.
+    # We want to find limit/remaining/reset for these window tags:
+    #   requests (per-minute),  requests-1h (per-hour)
+    #   tokens   (per-minute),  tokens-1h   (per-hour)
+    # Each provider spells the suffix differently:
+    #   Groq/OpenAI: no suffix for minute, -1h for hour
+    #   Cerebras:    -minute / -hour / -day
+    #   Mistral:     -minute (and uses "req" instead of "requests")
+    #   SambaNova:   -day
+    #
+    # Strategy: for each (resource, window) pair, try a list of known
+    # header name variants and take the first match.
+
+    def _find_raw(prefix: str, resource: str, window_suffixes: list[str]) -> str:
+        """Search for a header value trying multiple naming conventions.
+
+        prefix: "limit", "remaining", or "reset"
+        resource: "requests" or "tokens"
+        window_suffixes: list of suffix variants, e.g. ["", "-minute", "-day"]
+        Returns the raw header value as string, or "" if not found.
+
+        Supports both orderings:
+          OpenAI/Groq:  x-ratelimit-{prefix}-{resource}{suffix}
+                        e.g. x-ratelimit-limit-requests
+          Anthropic:    anthropic-ratelimit-{resource}{suffix}-{prefix}
+                        e.g. anthropic-ratelimit-requests-limit
+        """
+        # Different providers use "req" vs "requests"
+        resource_variants = [resource]
+        if resource == "requests":
+            resource_variants.append("req")
+
+        for wsuf in window_suffixes:
+            for res in resource_variants:
+                # OpenAI/Groq/Cerebras/Mistral/SambaNova: prefix-resource
+                key = f"x-ratelimit-{prefix}-{res}{wsuf}"
+                if key in lowered:
+                    return lowered[key]
+                # Anthropic: resource-prefix (inverted)
+                key2 = f"anthropic-ratelimit-{res}{wsuf}-{prefix}"
+                if key2 in lowered:
+                    return lowered[key2]
+        return ""
+
+    def _find_int(prefix: str, resource: str, suffixes: list[str]) -> int:
+        return _safe_int(_find_raw(prefix, resource, suffixes))
+
+    def _find_float(prefix: str, resource: str, suffixes: list[str]) -> float:
+        return _safe_float(_find_raw(prefix, resource, suffixes))
+
+    # Window suffixes in priority order (minute first, then day, then bare)
+    MINUTE_SUFFIXES = ["", "-minute", "-1m"]
+    HOUR_SUFFIXES = ["-1h", "-hour"]
+    DAY_SUFFIXES = ["-day", "-1d"]
+
+    def _bucket(resource: str, suffixes: list[str]) -> RateLimitBucket:
         return RateLimitBucket(
-            limit=_safe_int(lowered.get(f"x-ratelimit-limit-{tag}")),
-            remaining=_safe_int(lowered.get(f"x-ratelimit-remaining-{tag}")),
-            reset_seconds=_safe_float(lowered.get(f"x-ratelimit-reset-{tag}")),
+            limit=_find_int("limit", resource, suffixes),
+            remaining=_find_int("remaining", resource, suffixes),
+            reset_seconds=_find_float("reset", resource, suffixes),
             captured_at=now,
         )
 
-    return RateLimitState(
-        requests_min=_bucket("requests"),
-        requests_hour=_bucket("requests", "-1h"),
-        tokens_min=_bucket("tokens"),
-        tokens_hour=_bucket("tokens", "-1h"),
+    # Some providers (Anthropic) use reset with duration strings like "15s"
+    def _parse_duration(val: str) -> float:
+        if not val:
+            return 0.0
+        val = val.strip()
+        if val.isdigit():
+            return float(val)
+        # "15s", "2m", "1h"
+        try:
+            import re
+            m = re.match(r'^(\d+(?:\.\d+)?)([smh])?$', val)
+            if m:
+                num = float(m.group(1))
+                unit = m.group(2) or 's'
+                mult = {'s': 1, 'm': 60, 'h': 3600}[unit]
+                return num * mult
+        except Exception:
+            pass
+        return 0.0
+
+    state = RateLimitState(
+        requests_min=_bucket("requests", MINUTE_SUFFIXES),
+        requests_hour=_bucket("requests", HOUR_SUFFIXES),
+        tokens_min=_bucket("tokens", MINUTE_SUFFIXES),
+        tokens_hour=_bucket("tokens", HOUR_SUFFIXES),
         captured_at=now,
         provider=provider,
     )
+
+    # If minute data is empty but day data exists (SambaNova),
+    # put day data into the minute slot so it's still displayed
+    if state.requests_min.limit == 0 and state.requests_hour.limit == 0:
+        day_bucket = _bucket("requests", DAY_SUFFIXES)
+        if day_bucket.limit > 0:
+            state.requests_min = day_bucket
+
+    if state.tokens_min.limit == 0 and state.tokens_hour.limit == 0:
+        day_bucket = _bucket("tokens", DAY_SUFFIXES)
+        if day_bucket.limit > 0:
+            state.tokens_min = day_bucket
+
+    # Anthropic retry-after as fallback
+    if not state.has_data and "retry-after" in lowered:
+        ra = _parse_duration(lowered.get("retry-after", ""))
+        if ra > 0:
+            state.captured_at = now
+            state.provider = provider
+
+    return state
 
 
 # ── Formatting ──────────────────────────────────────────────────────────
