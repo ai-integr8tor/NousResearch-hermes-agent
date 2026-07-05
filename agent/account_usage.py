@@ -683,6 +683,337 @@ def _fetch_zai_account_usage(api_key: Optional[str]) -> Optional[AccountUsageSna
     )
 
 
+def _fetch_cloudflare_account_usage(
+    base_url: Optional[str], api_key: Optional[str]
+) -> Optional[AccountUsageSnapshot]:
+    """Fetch Cloudflare Workers AI neuron usage via GraphQL Analytics API.
+
+    Requires an API Token (not URL token ``cfut_``) with
+    ``Account > Workers AI Analytics > Read`` scope.
+    """
+    token = str(api_key or "").strip()
+    if not token:
+        return None
+
+    # Extract account_id from base_url
+    # e.g. https://api.cloudflare.com/client/v4/accounts/{id}/ai/v1
+    account_id: Optional[str] = None
+    if base_url:
+        import re
+
+        m = re.search(r"/accounts/([0-9a-f]+)", base_url)
+        if m:
+            account_id = m.group(1)
+    if not account_id:
+        return None
+
+    # Free tier: 10,000 neurons/day
+    FREE_TIER_DAILY = 10_000
+
+    # Query today's neuron usage
+    now = _utc_now()
+    today_start = now.strftime("%Y-%m-%dT00:00:00Z")
+    tomorrow_start = (now.replace(hour=0, minute=0, second=0, microsecond=0))
+    from datetime import timedelta as _td
+
+    tomorrow_start = (tomorrow_start + _td(days=1)).strftime("%Y-%m-%dT00:00:00Z")
+
+    gql_query = {
+        "query": (
+            "{ viewer { accounts(filter: { accountTag: \""
+            + account_id
+            + "\" }) { aiInferenceAdaptiveGroups("
+            "filter: { datetime_geq: \"" + today_start + "\", "
+            "datetime_leq: \"" + tomorrow_start + "\" }, limit: 1000"
+            ") { sum { totalNeurons totalInputTokens totalOutputTokens } "
+            "dimensions { modelId } } } } }"
+        ),
+    }
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            resp = client.post(
+                "https://api.cloudflare.com/client/v4/graphql",
+                json=gql_query,
+                headers=headers,
+            )
+            resp.raise_for_status()
+    except Exception:
+        return None
+
+    payload = resp.json() or {}
+    if payload.get("errors"):
+        # Token lacks analytics scope (common with cfut_ URL tokens)
+        return AccountUsageSnapshot(
+            provider="cloudflare",
+            source="graphql_analytics",
+            fetched_at=_utc_now(),
+            unavailable_reason=(
+                "Token lacks Workers AI Analytics scope. "
+                "Create an API Token with "
+                "Account > Workers AI Analytics > Read."
+            ),
+        )
+
+    accounts_data = (payload.get("data") or {}).get("viewer", {}).get("accounts", [])
+    if not accounts_data:
+        return None
+
+    groups = accounts_data[0].get("aiInferenceAdaptiveGroups") or []
+    total_neurons = 0
+    total_input_tokens = 0
+    total_output_tokens = 0
+    model_details: list[str] = []
+    for g in groups:
+        s = g.get("sum") or {}
+        total_neurons += int(s.get("totalNeurons") or 0)
+        total_input_tokens += int(s.get("totalInputTokens") or 0)
+        total_output_tokens += int(s.get("totalOutputTokens") or 0)
+        model = (g.get("dimensions") or {}).get("modelId", "?")
+        model_neurons = int(s.get("totalNeurons") or 0)
+        if model_neurons > 0:
+            model_details.append(f"{model}: {model_neurons} neurons")
+
+    if total_neurons == 0 and not model_details:
+        return AccountUsageSnapshot(
+            provider="cloudflare",
+            source="graphql_analytics",
+            fetched_at=_utc_now(),
+            windows=(
+                AccountUsageWindow(
+                    label="Neurons (daily)",
+                    used_percent=0.0,
+                    detail=f"0 / {FREE_TIER_DAILY} neurons used today",
+                ),
+            ),
+            details=("Free tier: 10,000 neurons/day",),
+        )
+
+    used_pct = (total_neurons / FREE_TIER_DAILY) * 100 if FREE_TIER_DAILY > 0 else 0
+    windows = [
+        AccountUsageWindow(
+            label="Neurons (daily)",
+            used_percent=min(used_pct, 100.0),
+            detail=f"{total_neurons} / {FREE_TIER_DAILY} neurons used today",
+        ),
+    ]
+    details = [
+        f"Tokens today: {total_input_tokens:,} in / {total_output_tokens:,} out",
+        f"Free tier: {FREE_TIER_DAILY:,} neurons/day",
+    ]
+    # Show top 3 models by neuron usage
+    if model_details:
+        details.append("Models: " + ", ".join(model_details[:3]))
+
+    return AccountUsageSnapshot(
+        provider="cloudflare",
+        source="graphql_analytics",
+        fetched_at=_utc_now(),
+        windows=tuple(windows),
+        details=tuple(details),
+    )
+
+
+def _fetch_google_account_usage(api_key: Optional[str]) -> Optional[AccountUsageSnapshot]:
+    """Fetch Google Gemini quota via Cloud Code Assist internal API.
+
+    Uses the same ``v1internal:fetchAvailableModels`` endpoint discovered in
+    the Antigravity Cockpit project. Requires a Google OAuth token (not an API
+    key) with ``cloud-platform`` scope.
+    """
+    token = str(api_key or "").strip()
+    if not token:
+        return None
+
+    # OAuth tokens contain dots (eyJ...), API keys (AIza...) do not
+    is_oauth = token.startswith("ya29.") or token.startswith("4/") or "." in token[:20]
+    if not is_oauth:
+        return AccountUsageSnapshot(
+            provider="google",
+            source="cloud_code_assist",
+            fetched_at=_utc_now(),
+            unavailable_reason=(
+                "Google quota requires an OAuth token (Antigravity/Gemini Code "
+                "Assist credential), not an API key. API keys have no quota "
+                "endpoint."
+            ),
+        )
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    base_url = "https://cloudcode-pa.googleapis.com"
+
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            # Step 1: loadCodeAssist to get project ID
+            resp1 = client.post(
+                f"{base_url}/v1internal:loadCodeAssist",
+                json={"metadata": {"ideType": "ANTIGRAVITY"}},
+                headers=headers,
+            )
+            resp1.raise_for_status()
+            data1 = resp1.json() or {}
+            project_id = data1.get("cloudaicompanionProject")
+            current_tier = data1.get("currentTier") or data1.get("paidTier")
+
+            if not project_id:
+                return AccountUsageSnapshot(
+                    provider="google",
+                    source="cloud_code_assist",
+                    fetched_at=_utc_now(),
+                    unavailable_reason="No Cloud Code Assist project found",
+                )
+
+            # Step 2: fetchAvailableModels with project ID
+            resp2 = client.post(
+                f"{base_url}/v1internal:fetchAvailableModels",
+                json={"project": project_id},
+                headers=headers,
+            )
+            resp2.raise_for_status()
+            data2 = resp2.json() or {}
+    except Exception:
+        return None
+
+    models = data2.get("models") or []
+    windows: list[AccountUsageWindow] = []
+    details: list[str] = []
+
+    for model_info in models:
+        name = model_info.get("name") or model_info.get("id") or "?"
+        quota_info = model_info.get("quota") or {}
+        pct = quota_info.get("usedPercent")
+        remaining = quota_info.get("remaining")
+        limit = quota_info.get("limit")
+
+        if pct is not None:
+            windows.append(
+                AccountUsageWindow(
+                    label=f"{name} quota",
+                    used_percent=float(pct),
+                    detail=(
+                        f"{remaining}/{limit} remaining"
+                        if remaining is not None and limit is not None
+                        else None
+                    ),
+                )
+            )
+
+    if current_tier:
+        details.append(f"Tier: {current_tier}")
+
+    if not windows:
+        return AccountUsageSnapshot(
+            provider="google",
+            source="cloud_code_assist",
+            fetched_at=_utc_now(),
+            unavailable_reason="No model quota information available",
+        )
+
+    return AccountUsageSnapshot(
+        provider="google",
+        source="cloud_code_assist",
+        fetched_at=_utc_now(),
+        windows=tuple(windows),
+        details=tuple(details),
+    )
+
+
+def _fetch_nvidia_account_usage(api_key: Optional[str]) -> Optional[AccountUsageSnapshot]:
+    """Fetch NVIDIA NGC account info as a minimal usage indicator.
+
+    NVIDIA does not expose a consumption/quota API endpoint. This function
+    retrieves the NGC subscription tier and expiry, which is the closest
+    available signal.
+    """
+    token = str(api_key or "").strip()
+    if not token:
+        return None
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+    }
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            # /v2/orgs returns the org list with enablements
+            resp = client.get(
+                "https://api.ngc.nvidia.com/v2/orgs",
+                headers=headers,
+            )
+            resp.raise_for_status()
+            data = resp.json() or {}
+
+            # /v2/users/me/subscriptions shows active products
+            sub_resp = client.get(
+                "https://api.ngc.nvidia.com/v2/users/me/subscriptions",
+                headers=headers,
+            )
+            sub_data = {}
+            if sub_resp.status_code == 200:
+                sub_data = sub_resp.json() or {}
+    except Exception:
+        return None
+
+    orgs = data.get("organizations") or []
+    details: list[str] = []
+
+    if orgs:
+        org = orgs[0]
+        display_name = org.get("displayName")
+        org_type = org.get("type")
+        if display_name:
+            label = f"Org: {display_name}"
+            if org_type:
+                label += f" ({org_type})"
+            details.append(label)
+
+        enablements = org.get("productEnablements") or []
+        for pe in enablements:
+            pe_type = str(pe.get("type") or "")
+            product = str(pe.get("productName") or "")
+            expiry = str(pe.get("expirationDate") or "")
+
+            if product:
+                label = product
+                if pe_type:
+                    label += f" ({pe_type})"
+                if expiry:
+                    label += f" -- expires {expiry}"
+                details.append(label)
+
+    subs = sub_data.get("subscriptions") or []
+    for sub in subs:
+        products = sub.get("products") or []
+        pending = sub.get("pendingProducts") or []
+        expired = sub.get("expiredProducts") or []
+        if products:
+            details.append(f"Active products: {', '.join(products)}")
+        if pending:
+            details.append(f"Pending: {', '.join(pending)}")
+        if expired:
+            details.append(f"Expired: {', '.join(expired)}")
+
+    if not details:
+        return None
+
+    return AccountUsageSnapshot(
+        provider="nvidia",
+        source="ngc_account_api",
+        fetched_at=_utc_now(),
+        details=tuple(details),
+        unavailable_reason=(
+            "NVIDIA does not expose a consumption/quota API. "
+            "Showing subscription info instead."
+        ),
+    )
+
+
 def fetch_account_usage(
     provider: Optional[str],
     *,
@@ -692,7 +1023,7 @@ def fetch_account_usage(
     normalized = str(provider or "").strip().lower()
     # Heuristic: resolve real provider from base_url when the name is not
     # directly recognised (e.g. "xai-oauth" hitting api.z.ai for glm models).
-    if normalized not in {"openai-codex", "anthropic", "openrouter", "zai", "nous"}:
+    if normalized not in {"openai-codex", "anthropic", "openrouter", "zai", "nous", "cloudflare", "google", "nvidia"}:
         _host = (base_url or "").lower()
         if "api.z.ai" in _host or "open.bigmodel.cn" in _host:
             normalized = "zai"
@@ -720,6 +1051,12 @@ def fetch_account_usage(
             return _fetch_openrouter_account_usage(base_url, api_key)
         if normalized == "zai":
             return _fetch_zai_account_usage(api_key)
+        if normalized == "cloudflare":
+            return _fetch_cloudflare_account_usage(base_url, api_key)
+        if normalized == "google":
+            return _fetch_google_account_usage(api_key)
+        if normalized == "nvidia":
+            return _fetch_nvidia_account_usage(api_key)
     except Exception:
         return None
     return None
