@@ -48,6 +48,20 @@ def _add_server_runtime_args(parser) -> None:
         ),
     )
     parser.add_argument(
+        "--light",
+        action="store_true",
+        help=(
+            "Start in lightweight dashboard mode: session/status UI only, "
+            "without admin pages, channels, plugins, or MCP catalog views"
+        ),
+    )
+    parser.add_argument(
+        "--legacy",
+        dest="light",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
         "--isolated",
         action="store_true",
         help=(

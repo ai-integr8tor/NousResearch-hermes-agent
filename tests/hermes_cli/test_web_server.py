@@ -2962,6 +2962,8 @@ class TestBuildSchemaFromConfig:
             assert entry["type"] == "select"
             assert "options" in entry
             assert "local" in entry["options"]
+        assert CONFIG_SCHEMA["dashboard.mode"]["type"] == "select"
+        assert CONFIG_SCHEMA["dashboard.mode"]["options"] == ["full", "lightweight"]
 
     def test_empty_prefix_produces_correct_keys(self):
         from hermes_cli.web_server import _build_schema_from_config
@@ -3021,6 +3023,35 @@ class TestConfigRoundTrip:
         config = self.client.get("/api/config").json()
         internal = [k for k in config if k.startswith("_")]
         assert not internal, f"Internal keys leaked to frontend: {internal}"
+
+    def test_get_config_includes_dashboard_mode_default(self):
+        config = self.client.get("/api/config").json()
+        assert config.get("dashboard", {}).get("mode") == "full"
+
+    def test_get_config_reflects_dashboard_mode_override(self):
+        from hermes_cli import web_server
+
+        try:
+            web_server.set_dashboard_mode_override("lightweight")
+            config = self.client.get("/api/config").json()
+            assert config.get("dashboard", {}).get("mode") == "lightweight"
+        finally:
+            web_server.set_dashboard_mode_override(None)
+
+    def test_lightweight_mode_skips_dashboard_plugin_catalog_scan(self, monkeypatch):
+        from hermes_cli import web_server
+
+        def boom(*args, **kwargs):
+            raise AssertionError("lightweight mode should not scan dashboard plugins")
+
+        monkeypatch.setattr(web_server, "_get_dashboard_plugins", boom)
+        try:
+            web_server.set_dashboard_mode_override("lightweight")
+            resp = self.client.get("/api/dashboard/plugins")
+            assert resp.status_code == 200
+            assert resp.json() == []
+        finally:
+            web_server.set_dashboard_mode_override(None)
 
     def test_get_config_model_is_string(self):
         """GET /api/config should normalize model dict to a string."""

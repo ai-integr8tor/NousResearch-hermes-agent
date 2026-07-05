@@ -11906,6 +11906,24 @@ def cmd_dashboard(args):
         remaining = _find_stale_dashboard_pids()
         sys.exit(1 if remaining else 0)
 
+    dashboard_lightweight = bool(getattr(args, "light", False))
+    if not dashboard_lightweight:
+        try:
+            from hermes_cli.config import cfg_get, load_config
+
+            configured_mode = str(
+                cfg_get(load_config(), "dashboard", "mode", default="full") or "full"
+            ).strip().lower()
+            dashboard_lightweight = configured_mode in {
+                "light",
+                "legacy",
+                "minimal",
+                "lite",
+                "lightweight",
+            }
+        except Exception:
+            dashboard_lightweight = False
+
     # ── Unified profile launch routing ────────────────────────────────
     # The dashboard is a MACHINE management surface: it can read/write any
     # profile via the per-request ?profile= scoping. Running one dashboard
@@ -11962,6 +11980,8 @@ def cmd_dashboard(args):
             reexec_argv.append("--insecure")
         if getattr(args, "skip_build", False):
             reexec_argv.append("--skip-build")
+        if dashboard_lightweight:
+            reexec_argv.append("--light")
         env = os.environ.copy()
         # Pin the child to the machine ROOT, not the launching profile's
         # HERMES_HOME.  We must resolve the root explicitly instead of just
@@ -12065,17 +12085,21 @@ def cmd_dashboard(args):
     try:
         from hermes_cli.mcp_startup import start_background_mcp_discovery
 
-        start_background_mcp_discovery(
-            logger=logger,
-            thread_name="dashboard-mcp-discovery",
-        )
+        if not dashboard_lightweight:
+            start_background_mcp_discovery(
+                logger=logger,
+                thread_name="dashboard-mcp-discovery",
+            )
+        else:
+            logger.info("Skipping dashboard MCP discovery in lightweight mode")
     except Exception:
         logger.debug(
             "Background MCP tool discovery failed at dashboard startup",
             exc_info=True,
         )
 
-    from hermes_cli.web_server import start_server
+    from hermes_cli.web_server import set_dashboard_mode_override, start_server
+    set_dashboard_mode_override("lightweight" if dashboard_lightweight else None)
 
     # Interactive auth setup: if this bind will engage the auth gate but no
     # provider is registered yet, offer to configure one here (TTY only)
