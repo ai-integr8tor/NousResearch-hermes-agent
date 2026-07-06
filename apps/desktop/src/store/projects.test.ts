@@ -14,7 +14,8 @@ import {
   openProjectCreate,
   pickProjectFolder,
   refreshProjects,
-  refreshWorktrees
+  refreshWorktrees,
+  scanAndRecordRepos
 } from './projects'
 
 vi.mock('@/i18n', () => ({
@@ -32,6 +33,10 @@ vi.mock('@/lib/desktop-fs', () => ({
   writeDesktopFileText: vi.fn()
 }))
 
+vi.mock('@/lib/desktop-git', () => ({
+  desktopGit: vi.fn()
+}))
+
 vi.mock('@/store/gateway', () => ({
   activeGateway: vi.fn(),
   ensureActiveGatewayOpen: vi.fn()
@@ -41,6 +46,9 @@ const fs = await import('@/lib/desktop-fs')
 const desktopDefaultCwd = vi.mocked(fs.desktopDefaultCwd)
 const isDesktopFsRemoteMode = vi.mocked(fs.isDesktopFsRemoteMode)
 const selectDesktopPaths = vi.mocked(fs.selectDesktopPaths)
+
+const git = await import('@/lib/desktop-git')
+const desktopGit = vi.mocked(git.desktopGit)
 
 const gw = await import('@/store/gateway')
 const activeGateway = vi.mocked(gw.activeGateway)
@@ -192,5 +200,46 @@ describe('projects RPC capability', () => {
     expect(notify).toHaveBeenCalledWith(
       expect.objectContaining({ kind: 'warning', message: 'sidebar.projects.staleBackend' })
     )
+  })
+})
+
+describe('repo discovery scan', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('records scan results on the gateway that was active when the scan started', async () => {
+    let finishScan: (repos: Array<{ label: string; root: string }>) => void = () => undefined
+
+    const scanRepos = vi.fn(
+      () =>
+        new Promise<Array<{ label: string; root: string }>>(resolve => {
+          finishScan = resolve
+        })
+    )
+
+    const profileARequest = vi.fn(async () => ({ active_id: null, projects: [], repos: [], scoped_session_ids: [] }))
+    const profileBRequest = vi.fn(async () => ({ active_id: null, projects: [], repos: [], scoped_session_ids: [] }))
+    const profileAGateway = { connectionState: 'open', request: profileARequest }
+    const profileBGateway = { connectionState: 'open', request: profileBRequest }
+
+    desktopGit.mockReturnValue({ scanRepos } as never)
+    activeGateway.mockReturnValue(profileAGateway as never)
+
+    const pending = scanAndRecordRepos(true)
+
+    await Promise.resolve()
+
+    expect(scanRepos).toHaveBeenCalled()
+
+    activeGateway.mockReturnValue(profileBGateway as never)
+    finishScan([{ label: 'alpha', root: '/work/alpha' }])
+
+    await pending
+
+    expect(profileARequest).toHaveBeenCalledWith('projects.record_repos', {
+      repos: [{ label: 'alpha', root: '/work/alpha' }]
+    })
+    expect(profileBRequest).not.toHaveBeenCalled()
   })
 })
