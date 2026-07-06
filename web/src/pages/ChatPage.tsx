@@ -36,6 +36,10 @@ import { usePageHeader } from "@/contexts/usePageHeader";
 import { useI18n } from "@/i18n";
 import { api } from "@/lib/api";
 import { normalizeSessionTitle } from "@/lib/chat-title";
+import {
+  firstImageFromClipboard,
+  uploadPastedImage,
+} from "@/lib/chatImagePaste";
 import { PluginSlot } from "@/plugins";
 import { useTheme } from "@/themes";
 import { useProfileScope } from "@/contexts/useProfileScope";
@@ -522,6 +526,47 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       return false;
     });
 
+    // ── Image paste ──────────────────────────────────────────────────────
+    // Bare Ctrl+V / Ctrl+Shift+V text paste is handled by the key handler
+    // above (and by the browser's own paste into the focused terminal). Image
+    // paste can't go through the server-side clipboard: the TUI runs inside
+    // the gateway (often a remote Docker container) with no access to the
+    // browser clipboard. So we intercept the DOM `paste` event here, upload
+    // the image bytes the browser holds to the gateway's managed-files root,
+    // then drive the TUI's existing `/image <path>` command over the PTY.
+    const onHostPaste = (ev: ClipboardEvent) => {
+      const blob = firstImageFromClipboard(ev.clipboardData);
+      if (!blob) return; // no image → let text paste proceed normally
+      ev.preventDefault();
+      ev.stopPropagation();
+      void (async () => {
+        try {
+          const { path } = await uploadPastedImage(blob);
+          const ws = wsRef.current;
+          if (!ws || ws.readyState !== WebSocket.OPEN) {
+            term.write(
+              "\r\n\x1b[33m[image paste] chat not connected — try again]\x1b[0m\r\n",
+            );
+            return;
+          }
+          // Mirror handleCopyLast's burst-then-Return timing so Ink's stdin
+          // tokenizer sees the slash command as keypresses, then submits.
+          ws.send(`/image ${path}`);
+          setTimeout(() => {
+            const s = wsRef.current;
+            if (s && s.readyState === WebSocket.OPEN) s.send("\r");
+          }, 100);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.warn("[dashboard clipboard] image paste failed:", msg);
+          term.write(
+            `\r\n\x1b[31m[image paste failed: ${msg}]\x1b[0m\r\n`,
+          );
+        }
+      })();
+    };
+    host.addEventListener("paste", onHostPaste);
+
     const unicode11 = new Unicode11Addon();
     term.loadAddon(unicode11);
     term.unicode.activeVersion = "11";
@@ -829,6 +874,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       syncMetricsRef.current = null;
       onDataDisposable?.dispose();
       onResizeDisposable?.dispose();
+      host.removeEventListener("paste", onHostPaste);
       if (metricsDebounce) clearTimeout(metricsDebounce);
       window.removeEventListener("resize", scheduleSyncTerminalMetrics);
       window.visualViewport?.removeEventListener(
