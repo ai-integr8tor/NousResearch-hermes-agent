@@ -10167,6 +10167,33 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if _is_shared_multi_user and source.user_name:
             message_text = f"[{source.user_name}] {message_text}"
 
+        # Durable deferred clarify text answers must be consumed before the
+        # normal message reaches the agent; otherwise an open-ended answer (or
+        # an "Other" response) becomes an unrelated user turn after restart.
+        if message_text and not str(message_text).lstrip().startswith("/"):
+            try:
+                from gateway.extensions.deferred_clarify import build_recovery_prompt
+                from tools.clarify_interaction import resolve_text_for_session
+
+                _resolved_clarify = resolve_text_for_session(
+                    session_key,
+                    str(message_text),
+                    user_id=str(source.user_id) if source.user_id is not None else None,
+                    chat_id=str(source.chat_id) if source.chat_id is not None else None,
+                    thread_id=str(source.thread_id) if source.thread_id is not None else None,
+                )
+                if _resolved_clarify is not None:
+                    message_text = build_recovery_prompt(
+                        question=_resolved_clarify.question,
+                        answer=_resolved_clarify.answer or str(message_text),
+                    )
+                    try:
+                        event.metadata["deferred_clarify_interaction_id"] = _resolved_clarify.interaction_id
+                    except Exception:
+                        pass
+            except Exception:
+                logger.debug("deferred clarify text intercept failed", exc_info=True)
+
         # Prepend channel context from history backfill (if any).  This
         # happens after sender-prefix so the prefix only applies to the
         # trigger message, not the backfill block.
@@ -17957,12 +17984,87 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 if not _status_adapter:
                     return ""
 
+                choice_list = list(choices) if choices else None
+                use_deferred = source.platform == Platform.TELEGRAM
+
+                # Telegram gateway clarify is durable/deferred: store the
+                # prompt, send buttons/text, return a provider-valid tool
+                # result marker, and let the current turn end cleanly. The
+                # callback/text answer starts a new recovery turn later.
+                if use_deferred:
+                    try:
+                        from gateway.extensions.deferred_clarify import make_deferred_marker
+                        from tools.clarify_interaction import (
+                            cancel_interaction as _cancel_deferred_interaction,
+                            create_clarify_interaction,
+                            set_prompt_message_id,
+                        )
+
+                        ttl = float(
+                            user_config.get("gateway", {}).get(
+                                "clarify_interaction_ttl",
+                                user_config.get("agent", {}).get("clarify_interaction_ttl", 24 * 60 * 60),
+                            )
+                        )
+                        metadata = dict(_status_thread_metadata or {})
+                        metadata["durable_clarify"] = True
+                        metadata["reply_to_message_id"] = event_message_id
+                        interaction = create_clarify_interaction(
+                            session_id=session_entry.session_id,
+                            session_key=session_key or "",
+                            platform=source.platform.value if source.platform else "telegram",
+                            question=question,
+                            choices=choice_list,
+                            chat_id=str(source.chat_id or _status_chat_id or ""),
+                            thread_id=str(source.thread_id) if source.thread_id is not None else None,
+                            user_id=str(source.user_id) if source.user_id is not None else None,
+                            metadata={"chat_type": source.chat_type or ""},
+                            ttl_seconds=ttl,
+                        )
+
+                        try:
+                            _status_adapter.pause_typing_for_chat(_status_chat_id)
+                        except Exception:
+                            pass
+
+                        fut = safe_schedule_threadsafe(
+                            _status_adapter.send_clarify(
+                                chat_id=_status_chat_id,
+                                question=question,
+                                choices=choice_list,
+                                clarify_id=interaction.interaction_id,
+                                session_key=session_key or "",
+                                metadata=metadata,
+                            ),
+                            _loop_for_step,
+                            logger=logger,
+                            log_message="Deferred clarify send failed to schedule",
+                        )
+                        send_ok = False
+                        result = None
+                        if fut is not None:
+                            try:
+                                result = fut.result(timeout=15)
+                                send_ok = bool(getattr(result, "success", False))
+                            except Exception as exc:
+                                logger.warning("Deferred clarify send failed: %s", exc)
+                        if not send_ok:
+                            _cancel_deferred_interaction(interaction.interaction_id, reason="send_failed")
+                            return "[clarify prompt could not be delivered]"
+                        set_prompt_message_id(
+                            interaction.interaction_id,
+                            str(getattr(result, "message_id", "") or "") or None,
+                        )
+                        return make_deferred_marker(interaction.interaction_id)
+                    except Exception as exc:
+                        logger.warning("Deferred clarify setup failed; falling back to blocking clarify: %s", exc)
+
                 clarify_id = _uuid.uuid4().hex[:10]
                 _clarify_mod.register(
                     clarify_id=clarify_id,
                     session_key=session_key or "",
                     question=question,
-                    choices=list(choices) if choices else None,
+                    choices=choice_list,
                 )
 
                 # Pause typing — like approval, we don't want a "thinking..."
@@ -17979,7 +18081,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     _status_adapter.send_clarify(
                         chat_id=_status_chat_id,
                         question=question,
-                        choices=list(choices) if choices else None,
+                        choices=choice_list,
                         clarify_id=clarify_id,
                         session_key=session_key or "",
                         metadata=_status_thread_metadata,
