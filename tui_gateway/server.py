@@ -316,8 +316,14 @@ class _SlashWorker:
             creationflags=windows_hide_flags(),
             start_new_session=True,
         )
-        threading.Thread(target=self._drain_stdout, daemon=True).start()
-        threading.Thread(target=self._drain_stderr, daemon=True).start()
+        self._drain_thread_stdout = threading.Thread(
+            target=self._drain_stdout, daemon=True, name="slash-drain-stdout"
+        )
+        self._drain_thread_stderr = threading.Thread(
+            target=self._drain_stderr, daemon=True, name="slash-drain-stderr"
+        )
+        self._drain_thread_stdout.start()
+        self._drain_thread_stderr.start()
 
     def _drain_stdout(self):
         for line in self.proc.stdout or []:
@@ -387,6 +393,18 @@ class _SlashWorker:
                     stream.close()
                 except Exception:
                     pass
+            # Join drain threads so they don't outlive the worker. After
+            # proc.terminate() and stream.close(), the readline() in
+            # _drain_stdout/_drain_stderr hits EOF and the threads exit
+            # promptly. The timeout is a safety net for edge cases where
+            # the subprocess is mid-write (#53303).
+            for t in (getattr(self, '_drain_thread_stdout', None),
+                      getattr(self, '_drain_thread_stderr', None)):
+                if t is not None:
+                    try:
+                        t.join(timeout=2)
+                    except Exception:
+                        pass
 
 
 def _load_busy_input_mode() -> str:
@@ -652,6 +670,7 @@ def _close_session_by_id(sid: str, *, end_reason: str = "tui_close") -> bool:
         session = _sessions.pop(sid, None)
     if session is None:
         return False
+    logger.info("session closed sid=%s end_reason=%s", sid, end_reason)
     _teardown_session(session, end_reason=end_reason)
     return True
 
@@ -730,6 +749,21 @@ def _close_sessions_for_transport(
             # _ws_session_is_orphaned recognizes them and the grace-reap can
             # actually fire; a standalone `hermes --tui` keeps real _stdio.
             session["transport"] = _detached_ws_transport
+            # Close the slash_worker immediately on detach — it's ~13 MB per
+            # process and the Desktop app uses one WS for all sessions, so
+            # switching sessions leaves the old workers alive until the 6 h TTL
+            # reaper or the 20 s orphan reaper fires (which may not fire at all
+            # if the session is flagged running by a background curator review).
+            # The worker is recreated lazily on the next slash command: the
+            # slash.exec handler and _restart_slash_worker both handle
+            # worker=None.
+            worker = session.get("slash_worker")
+            if worker:
+                try:
+                    worker.close()
+                except Exception:
+                    pass
+                session["slash_worker"] = None
             detached += 1
             try:
                 _schedule_ws_orphan_reap(sid)
@@ -3081,11 +3115,18 @@ def _get_usage(agent) -> dict:
 
 
 def _probe_credentials(agent) -> str:
-    """Light credential check at session creation — returns warning or ''."""
+    """Light credential check at session creation — returns warning or ''.
+
+    'no-key-required' is a valid sentinel for keyless custom providers (local
+    models, self-hosted endpoints, routers that accept any key).  Only warn
+    when the key is genuinely missing — empty string or None.
+    """
     try:
         key = getattr(agent, "api_key", "") or ""
         provider = getattr(agent, "provider", "") or ""
-        if not key or key == "no-key-required":
+        # 'no-key-required' means the provider intentionally needs no credential
+        # (e.g. custom:myrouter, local llama.cpp).  This is valid — don't warn.
+        if not key:
             return f"No API key configured for provider '{provider}'. First message will fail."
     except Exception:
         pass
@@ -8345,6 +8386,83 @@ def _notification_event_dedup_key(evt: dict) -> tuple:
     return (evt_sid, evt_type)
 
 
+def _drain_owned_notifications(
+    completion_queue: "queue.Queue",
+    session: dict,
+) -> "list[tuple[dict, str]]":
+    """Pop all pending notification events, keeping only those owned by this session.
+
+    ``process_registry.drain_notifications()`` pops every event from the global
+    queue regardless of ``session_key`` — a turn finishing in session B would
+    consume an event started by session A.  This wrapper applies the same
+    ownership check used by ``_notification_poller_loop``, so only events that
+    belong to *this* session (plus global/system events with no ``session_key``)
+    are dispatched here.  Events owned by another live session are re-queued;
+    orphaned events (owner gone) are dropped (#42674, #35652).
+
+    Returns the same ``[(raw_event, formatted_text)]`` shape as
+    ``drain_notifications()``, filtered to this session's events only.
+    """
+    from tools.process_registry import format_process_notification, process_registry
+
+    _my_key = str(session.get("session_key") or "")
+
+    # Snapshot live session keys (excluding our own) for ownership routing.
+    # Must be computed fresh so a just-closed session isn't treated as live.
+    try:
+        with _sessions_lock:
+            snapshot = list(_sessions.values())
+    except Exception:
+        snapshot = []
+    live_owner_keys = {
+        str(s.get("session_key") or "")
+        for s in snapshot
+        if s is not session and str(s.get("session_key") or "")
+    }
+
+    owned: list[tuple[dict, str]] = []
+    requeue: list[dict] = []
+
+    while not completion_queue.empty():
+        try:
+            evt = completion_queue.get_nowait()
+        except Exception:
+            break
+
+        _evt_key = str(evt.get("session_key") or "")
+        if not _evt_key:
+            # Global/system event with no owner — handle here.
+            pass
+        elif _evt_key == _my_key:
+            # Owned by this session — handle here.
+            pass
+        elif _evt_key in live_owner_keys:
+            # Owned by another live session — requeue.
+            requeue.append(evt)
+            continue
+        else:
+            # Orphaned event (owner gone) — drop silently.
+            logger.debug(
+                "Dropping orphaned background notification for "
+                "session_key=%s (owner gone, current=%s)",
+                _evt_key, _my_key,
+            )
+            continue
+
+        _evt_sid = evt.get("session_id", "")
+        if evt.get("type") == "completion" and process_registry.is_completion_consumed(_evt_sid):
+            continue
+        text = format_process_notification(evt)
+        if text:
+            owned.append((evt, text))
+
+    # Re-queue events for live sessions so their pollers can handle them.
+    for evt in requeue:
+        completion_queue.put(evt)
+
+    return owned
+
+
 def _notification_poller_loop(
     stop_event: threading.Event, sid: str, session: dict
 ) -> None:
@@ -8361,6 +8479,8 @@ def _notification_poller_loop(
     """
     from tools.process_registry import process_registry, format_process_notification
 
+    _my_key = str(session.get("session_key") or "")
+
     _emitted = set()  # dedup re-queued events so same completion isn't emitted 50 times while session is busy
     while not stop_event.is_set() and not session.get("_finalized"):
         try:
@@ -8376,6 +8496,20 @@ def _notification_poller_loop(
         if _notification_event_belongs_elsewhere(session, evt):
             process_registry.completion_queue.put(evt)
             time.sleep(0.1)
+            continue
+
+        # Orphan guard: _notification_event_belongs_elsewhere returns False for
+        # events whose owner is no longer live (session closed / /new'd away).
+        # Previously these orphans were consumed by whichever poller dequeued
+        # them — injecting an unrelated background-process notification into the
+        # wrong session's transcript (#42674, #35652).  Drop them instead.
+        _evt_key = str(evt.get("session_key") or "")
+        if _evt_key and _evt_key != _my_key:
+            logger.debug(
+                "Dropping orphaned background notification for "
+                "session_key=%s (owner gone, current=%s)",
+                _evt_key, _my_key,
+            )
             continue
 
         _evt_sid = evt.get("session_id", "")
@@ -8417,6 +8551,7 @@ def _notification_poller_loop(
     # Drain any remaining events after stop signal (process all pending
     # before exiting so nothing is lost on shutdown). Events owned by other
     # live sessions are set aside and re-queued so their poller still sees them.
+    # Orphaned events (owner gone) are dropped — same guard as the main loop.
     deferred: list = []
     while not process_registry.completion_queue.empty():
         try:
@@ -8425,6 +8560,15 @@ def _notification_poller_loop(
             break
         if _notification_event_belongs_elsewhere(session, evt):
             deferred.append(evt)
+            continue
+        # Orphan guard: same check as the main loop above.
+        _evt_key = str(evt.get("session_key") or "")
+        if _evt_key and _evt_key != _my_key:
+            logger.debug(
+                "Dropping orphaned background notification for "
+                "session_key=%s (owner gone, current=%s)",
+                _evt_key, _my_key,
+            )
             continue
         _evt_sid = evt.get("session_id", "")
         if evt.get("type") == "completion" and process_registry.is_completion_consumed(_evt_sid):
@@ -8975,10 +9119,20 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
         # Drain completion notifications that arrived during this turn.
         # The background poller handles between-turn delivery; this is
         # the safety net for events that arrived mid-turn.
+        #
+        # Ownership filter (#42674, #35652): drain_notifications() pops
+        # every event from the global queue regardless of session_key.
+        # A turn finishing in session B must not consume an event that
+        # belongs to session A.  Owned events are re-queued so the
+        # owning session's poller can handle them; orphaned events
+        # (owner gone) are dropped silently.
         try:
             from tools.process_registry import process_registry
 
-            for _evt, synth in process_registry.drain_notifications():
+            _post_turn_events = _drain_owned_notifications(
+                process_registry.completion_queue, session
+            )
+            for _evt, synth in _post_turn_events:
                 with session["history_lock"]:
                     if session.get("running"):
                         process_registry.completion_queue.put(_evt)

@@ -1685,7 +1685,12 @@ class APIServerAdapter(BasePlatformAdapter):
         if db is None:
             return []
         try:
-            return db.get_messages_as_conversation(session_id)
+            # Include compression-ancestor messages so the API server returns
+            # the full transcript after a compression rotation, not just the
+            # child continuation (#51058).
+            return db.get_messages_as_conversation(
+                session_id, include_ancestors=True
+            )
         except Exception as exc:
             logger.warning("Failed to load session history for %s: %s", session_id, exc)
             return []
