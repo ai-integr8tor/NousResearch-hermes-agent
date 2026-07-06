@@ -2443,6 +2443,10 @@ class TestMemoryProviderExternalPaths:
         (outside / "leak.json").unlink()
         outside.rmdir()
 
+    @pytest.mark.skipif(
+        os.name == "nt",
+        reason="POSIX mode bits are a no-op under os.chmod on Windows; see #56923",
+    )
     def test_import_restores_external_to_home_relative_location(self, tmp_path, monkeypatch):
         """_external/ members restore to ~/<relpath>, not under HERMES_HOME,
         and credential-shaped files get 0600."""
