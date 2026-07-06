@@ -144,6 +144,36 @@ class TestTirithAllowDangerous:
         # allow_permanent should be True (no tirith warning)
         assert cb.call_args[1]["allow_permanent"] is True
 
+    @patch(_TIRITH_PATCH, return_value=_tirith_result("allow"))
+    @patch("hermes_cli.config.load_config", return_value={"approvals": {"mode": "manual"}})
+    def test_security_config_cli_set_prompts(self, mock_config, mock_tirith):
+        os.environ["HERMES_INTERACTIVE"] = "1"
+        cb = MagicMock(return_value="deny")
+        result = check_all_command_guards(
+            "hermes config set approvals.mode off",
+            "local",
+            approval_callback=cb,
+        )
+
+        assert result["approved"] is False
+        cb.assert_called_once()
+        assert "security config" in cb.call_args.args[1].lower()
+        assert cb.call_args.kwargs["allow_permanent"] is True
+
+    @patch(_TIRITH_PATCH, return_value=_tirith_result("allow"))
+    @patch("hermes_cli.config.load_config", return_value={"approvals": {"mode": "manual"}})
+    def test_non_security_config_cli_set_stays_auto_approved(self, mock_config, mock_tirith):
+        os.environ["HERMES_INTERACTIVE"] = "1"
+        cb = MagicMock(return_value="deny")
+        result = check_all_command_guards(
+            "hermes config set display.show_cost true",
+            "local",
+            approval_callback=cb,
+        )
+
+        assert result["approved"] is True
+        cb.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # tirith warn + safe command

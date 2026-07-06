@@ -528,6 +528,38 @@ class TestHermesConfigWriteProtection:
         dangerous, key, desc = detect_dangerous_command("cp /tmp/evil.yaml ~/.hermes/config.yaml")
         assert dangerous is True
 
+    def test_cli_config_set_approval_mode(self):
+        dangerous, key, desc = detect_dangerous_command("hermes config set approvals.mode off")
+        assert dangerous is True
+        assert key is not None
+        assert "security config" in desc.lower()
+
+    def test_cli_config_set_yolo(self):
+        dangerous, key, desc = detect_dangerous_command("hermes config set yolo true")
+        assert dangerous is True
+        assert "security config" in desc.lower()
+
+    def test_cli_config_set_approval_deny_with_profile_flag(self):
+        dangerous, key, desc = detect_dangerous_command(
+            "hermes --profile prod config set approvals.deny '[\"python *\"]'"
+        )
+        assert dangerous is True
+        assert "security config" in desc.lower()
+
+    def test_cli_config_set_security_key_with_short_profile_flag(self):
+        dangerous, key, desc = detect_dangerous_command(
+            "hermes -p prod config set security.tirith_enabled false"
+        )
+        assert dangerous is True
+        assert "security config" in desc.lower()
+
+    def test_cli_config_set_display_key_safe(self):
+        dangerous, key, desc = detect_dangerous_command(
+            "hermes config set display.show_cost true"
+        )
+        assert dangerous is False
+        assert key is None
+
     def test_sed_in_place(self):
         # The gap the pairing closes: sed -i mutates the file directly,
         # bypassing the redirection/tee patterns.
