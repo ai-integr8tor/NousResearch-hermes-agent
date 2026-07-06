@@ -43,6 +43,8 @@ contextBridge.exposeInMainWorld('hermesDesktop', {
   oauthLogoutConnectionConfig: remoteUrl => ipcRenderer.invoke('hermes:connection-config:oauth-logout', remoteUrl),
   profile: {
     get: () => ipcRenderer.invoke('hermes:profile:get'),
+    getScope: () => ipcRenderer.invoke('hermes:profile-scope:get'),
+    setScope: name => ipcRenderer.invoke('hermes:profile-scope:set', name),
     set: name => ipcRenderer.invoke('hermes:profile:set', name)
   },
   api: request => ipcRenderer.invoke('hermes:api', request),
@@ -52,6 +54,7 @@ contextBridge.exposeInMainWorld('hermesDesktop', {
   readFileText: filePath => ipcRenderer.invoke('hermes:readFileText', filePath),
   selectPaths: options => ipcRenderer.invoke('hermes:selectPaths', options),
   writeClipboard: text => ipcRenderer.invoke('hermes:writeClipboard', text),
+  copyImageFromUrl: url => ipcRenderer.invoke('hermes:copyImageFromUrl', url),
   saveImageFromUrl: url => ipcRenderer.invoke('hermes:saveImageFromUrl', url),
   saveImageBuffer: (data, ext) => ipcRenderer.invoke('hermes:saveImageBuffer', { data, ext }),
   saveClipboardImage: () => ipcRenderer.invoke('hermes:saveClipboardImage'),
