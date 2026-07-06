@@ -224,6 +224,12 @@ _HERMES_CONFIG_PATH = (
     r'(?:\$hermes_home|\$\{hermes_home\})/)'
     r'config\.yaml\b'
 )
+_HERMES_SECURITY_CONFIG_KEY = (
+    r'(?:approvals(?:\.[^\s"\'`]+)?|'
+    r'yolo|'
+    r'command_allowlist(?:\.[^\s"\'`]+)?|'
+    r'security(?:\.[^\s"\'`]+)?)'
+)
 _PROJECT_ENV_PATH = r'(?:(?:/|\.{1,2}/)?(?:[^\s/"\'`]+/)*\.env(?:\.[^/\s"\'`]+)*)'
 _PROJECT_CONFIG_PATH = r'(?:(?:/|\.{1,2}/)?(?:[^\s/"\'`]+/)*config\.yaml)'
 _SHELL_RC_FILES = (
@@ -625,6 +631,14 @@ DANGEROUS_PATTERNS = [
     # profile flag can't slip the agent past the guard.
     (r'\bhermes\s+(?:-{1,2}\S+(?:\s+\S+)?\s+)*gateway\s+(stop|restart)\b', "stop/restart hermes gateway (kills running agents)"),
     (r'\bhermes\s+update\b', "hermes update (restarts gateway, kills running agents)"),
+    # `~/.hermes/config.yaml` is already protected against direct shell writes
+    # above, but `hermes config set` is the documented front door to the same
+    # security policy. Gate only approval/security keys so ordinary display or
+    # UX config edits remain usable.
+    (
+        rf'\bhermes\s+(?:-{{1,2}}\S+(?:\s+\S+)?\s+)*config\s+set\s+["\']?{_HERMES_SECURITY_CONFIG_KEY}["\']?(?:\s|$)',
+        "modify Hermes security config via CLI",
+    ),
     # Docker container lifecycle — any user with docker.sock mounted (a common
     # Docker Compose pattern) gives the agent the ability to restart/stop/kill
     # containers without approval.  These are agent-initiated lifecycle operations
