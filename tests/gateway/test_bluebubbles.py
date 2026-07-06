@@ -750,6 +750,12 @@ class TestBlueBubblesConnectSendOnly:
         bound = {"setup": False, "site": False, "registered": False}
         self._patch_webhook_server(monkeypatch, adapter, bound)
 
+        marked = {"connected": 0}
+        monkeypatch.setattr(
+            adapter, "_mark_connected",
+            lambda: marked.__setitem__("connected", marked["connected"] + 1),
+        )
+
         ok = asyncio.get_event_loop().run_until_complete(
             adapter.connect(send_only=True)
         )
@@ -758,6 +764,37 @@ class TestBlueBubblesConnectSendOnly:
         assert bound == {"setup": False, "site": False, "registered": False}
         # Client is live so sends work.
         assert adapter.client is not None
+        # A send-only adapter shares config with the gateway adapter; it must
+        # not overwrite gateway-owned runtime status.
+        assert marked["connected"] == 0
+        assert adapter._runner is None
+
+    def test_disconnect_send_only_leaves_gateway_state(self, monkeypatch):
+        """disconnect() on a send-only adapter (no _runner) must not
+        unregister the shared webhook or write disconnected runtime status."""
+        import asyncio
+        adapter = _make_adapter(monkeypatch)
+        self._stub_api_get(adapter)
+        bound = {"setup": False, "site": False, "registered": False}
+        self._patch_webhook_server(monkeypatch, adapter, bound)
+
+        called = {"unregister": 0, "mark_disconnected": 0}
+
+        async def fake_unregister():
+            called["unregister"] += 1
+            return True
+        monkeypatch.setattr(adapter, "_unregister_webhook", fake_unregister)
+        monkeypatch.setattr(
+            adapter, "_mark_disconnected",
+            lambda: called.__setitem__("mark_disconnected", called["mark_disconnected"] + 1),
+        )
+
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(adapter.connect(send_only=True))
+        assert adapter._runner is None
+        loop.run_until_complete(adapter.disconnect())
+
+        assert called == {"unregister": 0, "mark_disconnected": 0}
 
     def test_connect_default_still_binds_webhook(self, monkeypatch):
         import asyncio

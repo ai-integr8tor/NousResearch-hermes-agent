@@ -271,8 +271,16 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         # inbound events and must not bind self.webhook_port — the gateway
         # process already holds it, so binding here raises OSError(EADDRINUSE)
         # and aborts the send.
+        #
+        # A send-only adapter also must not touch gateway-owned runtime state:
+        # it shares the same BlueBubbles config/webhook URL as the running
+        # gateway adapter, so calling _mark_connected() here (and later
+        # _mark_disconnected() / _unregister_webhook() in disconnect()) would
+        # overwrite the gateway's runtime status and could delete the webhook
+        # the gateway registered. This adapter never created the listener, so
+        # it must not manage that lifecycle. disconnect() gates cleanup on
+        # self._runner, which stays None on the send_only path.
         if send_only:
-            self._mark_connected()
             return True
 
         app = web.Application()
@@ -300,8 +308,16 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         return True
 
     async def disconnect(self) -> None:
-        # Unregister webhook before cleaning up
-        await self._unregister_webhook()
+        # Only this instance's own resources may be torn down. A send-only
+        # adapter (connect(send_only=True)) never started a webhook server, so
+        # self._runner is None; in that case we must not unregister the webhook
+        # or write disconnected runtime status, since those belong to the
+        # gateway adapter that shares the same BlueBubbles config.
+        owns_webhook_lifecycle = self._runner is not None
+
+        if owns_webhook_lifecycle:
+            # Unregister webhook before cleaning up
+            await self._unregister_webhook()
 
         if self.client:
             await self.client.aclose()
@@ -309,7 +325,9 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         if self._runner:
             await self._runner.cleanup()
             self._runner = None
-        self._mark_disconnected()
+
+        if owns_webhook_lifecycle:
+            self._mark_disconnected()
 
     @property
     def _webhook_url(self) -> str:
