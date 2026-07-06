@@ -476,12 +476,25 @@ class PlatformConfig:
                 if isinstance(ov_data, dict):
                     channel_overrides[str(cid)] = ChannelOverride.from_dict(ov_data)
 
+        # Normalize legacy boolean reply_to_mode values:
+        #   False -> "off"  (user meant "no replies")
+        #   True  -> "first" (user meant "default on")
+        # String values ("off", "first", "all") pass through unchanged.
+        # YAML 1.1 (PyYAML default) parses bare `off`/`false` as bool False,
+        # which would otherwise reach the adapter and be silently discarded by
+        # its `or 'first'` fallback.
+        _rtm_raw = data.get("reply_to_mode", "first")
+        if isinstance(_rtm_raw, bool):
+            _rtm = "off" if not _rtm_raw else "first"
+        else:
+            _rtm = _rtm_raw
+
         return cls(
             enabled=_coerce_bool(data.get("enabled"), False),
             token=data.get("token"),
             api_key=data.get("api_key"),
             home_channel=home_channel,
-            reply_to_mode=data.get("reply_to_mode", "first"),
+            reply_to_mode=_rtm,
             gateway_restart_notification=_coerce_bool(_grn, True),
             typing_indicator=_coerce_bool(_typing, True),
             channel_overrides=channel_overrides,
