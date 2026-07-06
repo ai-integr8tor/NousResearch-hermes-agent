@@ -1066,6 +1066,72 @@ def test_initialize_does_not_emit_cli_warning_when_callback_absent(monkeypatch):
     assert provider._client is None
 
 
+def test_runtime_api_key_memories_use_authenticated_user_namespace(monkeypatch):
+    _clear_openviking_env(monkeypatch)
+    monkeypatch.setenv("OPENVIKING_ENDPOINT", "https://openviking.example")
+    monkeypatch.setenv("OPENVIKING_API_KEY", "user-key")
+    monkeypatch.setenv("OPENVIKING_AGENT", "hermes")
+    events = []
+
+    class FakeVikingClient:
+        def __init__(self, endpoint, api_key="", account="", user="", agent=""):
+            assert endpoint == "https://openviking.example"
+            assert api_key == "user-key"
+            assert account == ""
+            assert user == ""
+            assert agent == "hermes"
+
+        def health_payload(self):
+            events.append("health")
+            return {"healthy": True}
+
+        def authenticated_user_id(self):
+            events.append("auth-user")
+            return "default"
+
+    monkeypatch.setattr(openviking_module, "_VikingClient", FakeVikingClient)
+
+    provider = OpenVikingMemoryProvider()
+    provider.initialize("session-1")
+
+    assert provider._memory_user_id == "default"
+    assert provider._build_memory_uri("entities").startswith(
+        "viking://user/default/peers/hermes/memories/entities/mem_"
+    )
+    assert events == ["health", "auth-user"]
+
+
+def test_runtime_api_key_memory_namespace_prefers_configured_user(monkeypatch):
+    _clear_openviking_env(monkeypatch)
+    monkeypatch.setenv("OPENVIKING_ENDPOINT", "https://openviking.example")
+    monkeypatch.setenv("OPENVIKING_API_KEY", "root-key")
+    monkeypatch.setenv("OPENVIKING_USER", "alice")
+    monkeypatch.setenv("OPENVIKING_AGENT", "hermes")
+    events = []
+
+    class FakeVikingClient:
+        def __init__(self, endpoint, api_key="", account="", user="", agent=""):
+            pass
+
+        def health_payload(self):
+            events.append("health")
+            return {"healthy": True}
+
+        def authenticated_user_id(self):
+            raise AssertionError("configured OPENVIKING_USER should avoid status probe")
+
+    monkeypatch.setattr(openviking_module, "_VikingClient", FakeVikingClient)
+
+    provider = OpenVikingMemoryProvider()
+    provider.initialize("session-1")
+
+    assert provider._memory_user_id == "alice"
+    assert provider._build_memory_uri("entities").startswith(
+        "viking://user/alice/peers/hermes/memories/entities/mem_"
+    )
+    assert events == ["health"]
+
+
 def test_post_setup_local_server_down_can_offer_autostart(tmp_path, monkeypatch):
     _clear_openviking_env(monkeypatch)
     hermes_home = tmp_path / "hermes"
@@ -2839,10 +2905,13 @@ def test_on_memory_write_uses_content_write_independent_of_session_rotation():
     finally:
         _mod._VikingClient = real_client_cls
 
-    assert captured_paths == ["/api/v1/content/write"]
-    assert captured_payloads[0]["content"] == "remember this"
-    assert captured_payloads[0]["mode"] == "create"
-    assert captured_payloads[0]["uri"].startswith(
+    assert captured_paths == ["/api/v1/fs/mkdir", "/api/v1/content/write"]
+    assert captured_payloads[0] == {
+        "uri": captured_payloads[1]["uri"].rsplit("/", 1)[0],
+    }
+    assert captured_payloads[1]["content"] == "remember this"
+    assert captured_payloads[1]["mode"] == "create"
+    assert captured_payloads[1]["uri"].startswith(
         "viking://user/peers/hermes/memories/preferences/mem_"
     )
 
@@ -2868,6 +2937,8 @@ def test_shutdown_waits_for_memory_write_worker(monkeypatch):
             pass
 
         def post(self, path, payload=None, **kwargs):
+            if path == "/api/v1/fs/mkdir":
+                return {}
             assert path == "/api/v1/content/write"
             worker_started.set()
             release_worker.wait(timeout=2.0)
@@ -2893,6 +2964,30 @@ def test_shutdown_waits_for_memory_write_worker(monkeypatch):
     assert not returned_before_worker_finished
     assert worker_finished.is_set()
     assert provider._memory_write_threads == set()
+
+
+def test_viking_remember_creates_parent_before_content_write():
+    provider = OpenVikingMemoryProvider()
+    provider._client = MagicMock()
+    provider._client.post.side_effect = [
+        {"status": "ok", "result": {"uri": "viking://user/peers/hermes/memories/entities"}},
+        {"status": "ok", "result": {"written_bytes": 12}},
+    ]
+    provider._agent = "hermes"
+
+    result = json.loads(provider.handle_tool_call(
+        "viking_remember",
+        {"content": "remember this", "category": "entity"},
+    ))
+
+    mkdir_call, write_call = provider._client.post.call_args_list
+    assert mkdir_call.args[0] == "/api/v1/fs/mkdir"
+    assert mkdir_call.kwargs == {}
+    parent_uri = mkdir_call.args[1]["uri"]
+    assert parent_uri.startswith("viking://user/peers/hermes/memories/entities")
+    assert write_call.args[0] == "/api/v1/content/write"
+    assert write_call.args[1]["uri"].startswith(f"{parent_uri}/mem_")
+    assert result["status"] == "stored"
 
 
 @pytest.mark.parametrize(

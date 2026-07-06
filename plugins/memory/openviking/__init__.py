@@ -384,6 +384,13 @@ class _VikingClient:
         """Validate authenticated OpenViking access without mutating state."""
         return self.get("/api/v1/system/status")
 
+    def authenticated_user_id(self) -> str:
+        """Return the user id reported by the authenticated OpenViking request."""
+        payload = self.validate_auth()
+        result = payload.get("result", {}) if isinstance(payload, dict) else {}
+        user = result.get("user", "") if isinstance(result, dict) else ""
+        return str(user or "").strip()
+
     def validate_root_access(self) -> dict:
         """Validate ROOT access against a read-only admin endpoint."""
         return self.get("/api/v1/admin/accounts")
@@ -1800,6 +1807,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
         self._agent = ""
         self._session_id = ""
         self._turn_count = 0
+        self._memory_user_id = ""
         # Guards the (_session_id, _turn_count) pair. sync_turn runs on the
         # MemoryManager's background sync executor while on_session_end /
         # on_session_switch run on the caller's thread, so the snapshot+reset
@@ -2167,6 +2175,8 @@ class OpenVikingMemoryProvider(MemoryProvider):
                     warning_callback,
                 )
                 self._client = None
+            elif self._api_key:
+                self._memory_user_id = self._user or self._client.authenticated_user_id()
         except ImportError:
             logger.warning("httpx not installed — OpenViking plugin disabled")
             self._client = None
@@ -3242,7 +3252,26 @@ class OpenVikingMemoryProvider(MemoryProvider):
     def _build_memory_uri(self, subdir: str) -> str:
         """Build a viking:// memory URI under the configured peer namespace."""
         slug = uuid.uuid4().hex[:12]
-        return f"viking://user/peers/{self._agent}/memories/{subdir}/mem_{slug}.md"
+        user_part = f"{self._memory_user_id.strip()}/" if self._memory_user_id else ""
+        return f"viking://user/{user_part}peers/{self._agent}/memories/{subdir}/mem_{slug}.md"
+
+    @staticmethod
+    def _memory_parent_uri(uri: str) -> str:
+        return uri.rsplit("/", 1)[0]
+
+    @staticmethod
+    def _is_already_exists_error(exc: Exception) -> bool:
+        message = str(exc).lower()
+        return "already_exists" in message or ("already" in message and "exist" in message)
+
+    def _ensure_memory_parent(self, client: _VikingClient, uri: str) -> None:
+        """Create the parent directory for direct content/write memory creates."""
+        try:
+            client.post("/api/v1/fs/mkdir", {"uri": self._memory_parent_uri(uri)})
+        except Exception as exc:
+            if self._is_already_exists_error(exc):
+                return
+            raise
 
     def on_memory_write(
         self,
@@ -3264,6 +3293,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
                     self._endpoint, self._api_key,
                     account=self._account, user=self._user, agent=self._agent,
                 )
+                self._ensure_memory_parent(client, uri)
                 client.post("/api/v1/content/write", {
                     "uri": uri,
                     "content": content,
@@ -3609,10 +3639,15 @@ class OpenVikingMemoryProvider(MemoryProvider):
         uri = self._build_memory_uri(subdir)
 
         # Write directly via content/write API.
-        # This creates the file, stores the content, and queues vector indexing
-        # in a single call — no dependency on session commit / VLM extraction.
+        # This stores the content and queues vector indexing without depending
+        # on session commit / VLM extraction. Pre-create the category directory
+        # because OpenViking create mode requires the parent to exist.
         try:
-            result = self._client.post("/api/v1/content/write", {
+            client = self._client
+            if client is None:
+                return tool_error("OpenViking server not connected")
+            self._ensure_memory_parent(client, uri)
+            result = client.post("/api/v1/content/write", {
                 "uri": uri,
                 "content": content,
                 "mode": "create",
