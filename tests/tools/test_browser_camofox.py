@@ -235,6 +235,7 @@ class TestCamofoxInteractions:
         mock_post.return_value = _mock_response(json_data={"ok": True})
         result = json.loads(camofox_type("@e3", "hello world", task_id="t5"))
         assert result["success"] is True
+        # Normal text is left readable.
         assert result["typed"] == "hello world"
 
     @patch("tools.browser_camofox.requests.post")
@@ -248,12 +249,12 @@ class TestCamofoxInteractions:
         assert result["success"] is True
         assert result["clicked"] == "button.submit"
 
-        # Verify POST payload contains selector instead of ref
         call_args = mock_post.call_args_list[-1]
         payload = call_args.kwargs["json"]
         assert "selector" in payload
         assert payload["selector"] == "button.submit"
         assert "ref" not in payload
+
 
     @patch("tools.browser_camofox.requests.post")
     def test_type_with_selector(self, mock_post, monkeypatch):
@@ -267,13 +268,44 @@ class TestCamofoxInteractions:
         assert result["typed"] == "myusername"
         assert result["element"] == "input.username"
 
-        # Verify POST payload contains selector instead of ref
         call_args = mock_post.call_args_list[-1]
         payload = call_args.kwargs["json"]
         assert "selector" in payload
         assert payload["selector"] == "input.username"
         assert payload["text"] == "myusername"
         assert "ref" not in payload
+
+
+    @patch("tools.browser_camofox.requests.post")
+    def test_type_redacts_api_key(self, mock_post, monkeypatch):
+        monkeypatch.setenv("CAMOFOX_URL", "http://localhost:9377")
+        monkeypatch.setenv("HERMES_REDACT_SECRETS", "true")
+        mock_post.return_value = _mock_response(json_data={"tabId": "tab5b", "url": "https://x.com"})
+        camofox_navigate("https://x.com", task_id="t5b")
+
+        secret = "sk-proj-ABCD1234567890EFGH"
+        mock_post.return_value = _mock_response(json_data={"ok": True})
+        result = json.loads(camofox_type("@apikey", secret, task_id="t5b"))
+        assert result["success"] is True
+        assert secret not in json.dumps(result)
+        assert result["typed"].startswith("sk-pro")
+
+
+    @patch("tools.browser_camofox.requests.post")
+    def test_type_failure_redacts_api_key(self, mock_post, monkeypatch):
+        monkeypatch.setenv("CAMOFOX_URL", "http://localhost:9377")
+        monkeypatch.setenv("HERMES_REDACT_SECRETS", "true")
+        mock_post.return_value = _mock_response(json_data={"tabId": "tab5c", "url": "https://x.com"})
+        camofox_navigate("https://x.com", task_id="t5c")
+
+        secret = "sk-proj-ABCD1234567890EFGH"
+        mock_post.side_effect = RuntimeError(f"camofox failed while typing {secret}")
+        raw_result = camofox_type("@apikey", secret, task_id="t5c")
+        result = json.loads(raw_result)
+
+        assert result["success"] is False
+        assert secret not in raw_result
+        assert "sk-pro" in raw_result
 
     @patch("tools.browser_camofox.requests.post")
     def test_scroll(self, mock_post, monkeypatch):
