@@ -288,7 +288,7 @@ async def test_platform_send_failure_raises_for_delivery_result(tmp_path, monkey
 # ---------------------------------------------------------------------------
 
 class ChunkingAdapter:
-    """Adapter that declares splits_long_messages=True (like Discord/Telegram)."""
+    """Adapter that declares splits_long_messages=True (like Signal/Discord/Telegram)."""
     splits_long_messages = True
 
     def __init__(self):

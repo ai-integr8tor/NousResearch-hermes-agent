@@ -248,6 +248,7 @@ class SignalAdapter(BasePlatformAdapter):
     """Signal messenger adapter using signal-cli HTTP daemon."""
 
     platform = Platform.SIGNAL
+    splits_long_messages = True  # send() chunks via truncate_message(MAX_MESSAGE_LENGTH)
     # Signal has no real edit API for already-sent messages. Mark it explicitly
     # so streaming suppresses the visible cursor instead of leaving a stale tofu
     # square behind in chat clients when edit attempts fail.
@@ -1051,40 +1052,61 @@ class SignalAdapter(BasePlatformAdapter):
         reply_to: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
-        """Send a text message with native Signal formatting."""
+        """Send a text message with native Signal formatting.
+
+        Long messages are chunked adapter-side so gateway delivery can pass the
+        full cron/agent output through without inserting its generic
+        ``[truncated, full output saved to ...]`` footer.
+        """
         await self._stop_typing_indicator(chat_id)
 
-        plain_text, text_styles = self._markdown_to_signal(content)
+        if not content or not content.strip():
+            return SendResult(success=True, message_id=None)
 
-        params: Dict[str, Any] = {
-            "account": self.account,
-            "message": plain_text,
-        }
+        chunks = self.truncate_message(content, MAX_MESSAGE_LENGTH)
+        recipient: Optional[str] = None
+        if not chat_id.startswith("group:"):
+            recipient = await self._resolve_recipient(chat_id)
 
-        if text_styles:
-            if len(text_styles) == 1:
-                params["textStyle"] = text_styles[0]
+        logger.info(
+            "[Signal] Sending response (%d chars, %d chunk(s)) to %s",
+            len(content), len(chunks), chat_id,
+        )
+
+        last_result: Any = None
+        for chunk in chunks:
+            plain_text, text_styles = self._markdown_to_signal(chunk)
+            params: Dict[str, Any] = {
+                "account": self.account,
+                "message": plain_text,
+            }
+
+            if text_styles:
+                if len(text_styles) == 1:
+                    params["textStyle"] = text_styles[0]
+                else:
+                    params["textStyles"] = text_styles
+
+            if chat_id.startswith("group:"):
+                params["groupId"] = chat_id[6:]
             else:
-                params["textStyles"] = text_styles
+                params["recipient"] = [recipient]
 
-        if chat_id.startswith("group:"):
-            params["groupId"] = chat_id[6:]
-        else:
-            params["recipient"] = [await self._resolve_recipient(chat_id)]
+            result = await self._rpc("send", params)
+            if result is None:
+                return SendResult(success=False, error="RPC send failed", raw_response=last_result)
 
-        logger.info("[Signal] Sending response (%d chars) to %s", len(plain_text), chat_id)
-        result = await self._rpc("send", params)
-
-        if result is not None:
             success, err_msg = self._validate_send_result(result)
             if not success:
                 return SendResult(success=False, error=err_msg, raw_response=result)
+
             self._track_sent_timestamp(result)
-            # Signal has no editable message identifier. Returning None keeps the
-            # stream consumer on the non-edit fallback path instead of pretending
-            # future edits can remove an in-progress cursor from the chat thread.
-            return SendResult(success=True, message_id=None)
-        return SendResult(success=False, error="RPC send failed")
+            last_result = result
+
+        # Signal has no editable message identifier. Returning None keeps the
+        # stream consumer on the non-edit fallback path instead of pretending
+        # future edits can remove an in-progress cursor from the chat thread.
+        return SendResult(success=True, message_id=None)
 
     def _track_sent_timestamp(self, rpc_result) -> None:
         """Record outbound message timestamp for echo-back filtering."""
