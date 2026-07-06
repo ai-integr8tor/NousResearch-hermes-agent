@@ -3727,7 +3727,10 @@ class SessionDB:
 
 
     def get_messages(
-        self, session_id: str, include_inactive: bool = False
+        self,
+        session_id: str,
+        include_inactive: bool = False,
+        include_ancestors: bool = False,
     ) -> List[Dict[str, Any]]:
         """Load messages for a session in insertion order.
 
@@ -3736,15 +3739,26 @@ class SessionDB:
         audit / debug views of rewound history). See
         :meth:`rewind_to_message` for the soft-delete mechanic.
 
+        Pass ``include_ancestors=True`` to also load messages from parent
+        sessions in the compression-continuation chain (root → tip).
+        This mirrors ``get_messages_as_conversation(include_ancestors=True)``
+        and ensures the REST messages endpoint returns the full transcript
+        after a compression rotation, not just the child continuation.
+
         Ordered by AUTOINCREMENT id (true insertion order) rather than
         timestamp — see c03acca50 for the WSL2 clock-regression rationale.
         """
+        session_ids = [session_id]
+        if include_ancestors:
+            session_ids = self._session_lineage_root_to_tip(session_id)
+
         active_clause = "" if include_inactive else " AND active = 1"
         with self._lock:
+            placeholders = ",".join("?" for _ in session_ids)
             cursor = self._conn.execute(
-                "SELECT * FROM messages WHERE session_id = ?"
+                f"SELECT * FROM messages WHERE session_id IN ({placeholders})"
                 f"{active_clause} ORDER BY id",
-                (session_id,),
+                tuple(session_ids),
             )
             rows = cursor.fetchall()
         result = []
