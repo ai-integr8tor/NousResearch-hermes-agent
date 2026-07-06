@@ -169,6 +169,8 @@ VALID_HOOKS: Set[str] = {
     #   {"action": "skip",    "reason": "..."}  -> drop message (no reply)
     #   {"action": "rewrite", "text": "..."}    -> replace event.text, continue
     #   {"action": "allow"}  /  None             -> normal dispatch
+    # The reply action runs before normal gateway authorization, so the gateway
+    # applies a per-(platform, chat_id/user_id) rate limit before sending.
     # Kwargs: event: MessageEvent, gateway: GatewayRunner, session_store.
     "pre_gateway_dispatch",
     # Approval lifecycle hooks. Fired by tools/approval.py when a dangerous

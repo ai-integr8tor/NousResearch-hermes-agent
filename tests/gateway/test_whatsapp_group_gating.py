@@ -30,7 +30,7 @@ def _make_adapter(require_mention=None, mention_patterns=None, free_response_cha
     adapter._message_handler = AsyncMock()
     adapter._dm_policy = str(extra.get("dm_policy", "pairing")).strip().lower()
     adapter._allow_from = WhatsAppAdapter._coerce_allow_list(extra.get("allow_from"))
-    adapter._group_policy = str(extra.get("group_policy", "pairing")).strip().lower()
+    adapter._group_policy = str(extra.get("group_policy", "open")).strip().lower()
     adapter._group_allow_from = WhatsAppAdapter._coerce_allow_list(extra.get("group_allow_from"))
     adapter._mention_patterns = adapter._compile_mention_patterns()
     adapter._free_response_chats = adapter._whatsapp_free_response_chats()
@@ -280,11 +280,19 @@ def test_group_policy_open_allows_all_groups():
     assert adapter._should_process_message(_group_message("/status")) is True
 
 
-def test_group_policy_pairing_default_blocks_groups():
-    adapter = _make_adapter()
+def test_group_policy_default_open_keeps_groups_on_gateway_auth_path():
+    adapter = _make_adapter(require_mention=True)
 
-    assert adapter._group_policy == "pairing"
-    assert adapter._is_group_allowed("120363001234567890@g.us") is False
+    assert adapter._group_policy == "open"
+    assert adapter._is_group_allowed("120363001234567890@g.us") is True
+    assert adapter._should_process_message(_group_message("hello")) is False
+
+
+def test_group_policy_pairing_does_not_silently_block_groups():
+    adapter = _make_adapter(group_policy="pairing", require_mention=True)
+
+    assert adapter._is_group_allowed("120363001234567890@g.us") is True
+    # The group still needs a direct trigger unless configured otherwise.
     assert adapter._should_process_message(_group_message("hello")) is False
 
 

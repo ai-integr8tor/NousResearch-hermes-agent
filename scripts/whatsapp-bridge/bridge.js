@@ -194,7 +194,7 @@ function trackSentMessageId(sent) {
 
 function normalizeWhatsAppId(value) {
   if (!value) return '';
-  return String(value).replace(':', '@');
+  return String(value).replace(/:(\d+)(?=@)/, '');
 }
 
 function getMessageContent(msg) {
@@ -217,6 +217,21 @@ function getContextInfo(messageContent) {
     }
   }
   return {};
+}
+
+function extractMessageText(messageContent) {
+  if (!messageContent || typeof messageContent !== 'object') return '';
+  if (messageContent.conversation) return messageContent.conversation;
+  if (messageContent.extendedTextMessage?.text) return messageContent.extendedTextMessage.text;
+  if (messageContent.imageMessage?.caption) return messageContent.imageMessage.caption;
+  if (messageContent.videoMessage?.caption) return messageContent.videoMessage.caption;
+  if (messageContent.documentMessage?.caption) return messageContent.documentMessage.caption;
+  if (messageContent.documentMessage?.fileName) return messageContent.documentMessage.fileName;
+  if (messageContent.audioMessage || messageContent.pttMessage) return '[audio primit]';
+  if (messageContent.imageMessage) return '[imagine primită]';
+  if (messageContent.videoMessage) return '[video primit]';
+  if (messageContent.documentMessage) return '[document primit]';
+  return '';
 }
 
 mkdirSync(SESSION_DIR, { recursive: true });
