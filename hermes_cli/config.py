@@ -3717,10 +3717,17 @@ OPTIONAL_ENV_VARS = {
         "description": "Optional bearer token sent as Authorization header to a remote/authenticated Camofox server",
         "prompt": "Camofox API key",
         "url": "https://github.com/jo-inc/camofox-browser",
-        "tools": ["browser_navigate", "browser_click"],
+        "tools": ["browser_navigate", "browser_click", "browser_import_cookies"],
         "password": True,
         "category": "tool",
         "advanced": True,
+    },
+    "CAMOFOX_COOKIES_DIR": {
+        "description": "Directory containing Netscape-format cookie files importable via browser_import_cookies (default: ~/.camofox/cookies)",
+        "prompt": "Cookies directory",
+        "tools": ["browser_import_cookies"],
+        "password": False,
+        "category": "tool",
     },
     "FAL_KEY": {
         "description": "FAL API key for image and video generation",
