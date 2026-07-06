@@ -1461,6 +1461,25 @@ def submit_pending(session_key: str, approval: dict):
         _pending[session_key] = approval
 
 
+def _approval_metadata(
+    pattern_key: str,
+    pattern_keys: Optional[list[str]] = None,
+    *,
+    allow_permanent: Optional[bool] = None,
+) -> dict:
+    """Build shared approval metadata for gateway/desktop renderers."""
+    keys = list(pattern_keys or [pattern_key])
+    metadata = {
+        "allowlist_key": pattern_key,
+        "pattern_keys": keys,
+    }
+    if allow_permanent is not None:
+        metadata["allow_permanent"] = allow_permanent
+    if pattern_key.startswith("plugin_rule:"):
+        metadata["rule_key"] = pattern_key[len("plugin_rule:"):]
+    return metadata
+
+
 def approve_session(session_key: str, pattern_key: str):
     """Approve a pattern for this session only."""
     with _lock:
@@ -2059,14 +2078,17 @@ def _run_approval_gate(
         return {"approved": True, "message": None}
 
     if is_gateway or env_var_enabled("HERMES_EXEC_ASK"):
-        submit_pending(session_key, {
+        approval_data = {
             "command": display_target,
             "pattern_key": pattern_key,
+            **_approval_metadata(pattern_key, allow_permanent=True),
             "description": description,
-        })
+        }
+        submit_pending(session_key, approval_data)
         return {
             "approved": False,
             "pattern_key": pattern_key,
+            **_approval_metadata(pattern_key, allow_permanent=True),
             "status": "approval_required",
             "command": display_target,
             "description": description,
@@ -2665,11 +2687,8 @@ def check_all_command_guards(command: str, env_type: str,
             approval_data = {
                 "command": redact_sensitive_text(command),
                 "pattern_key": primary_key,
-                "pattern_keys": all_keys,
+                **_approval_metadata(primary_key, all_keys, allow_permanent=not has_tirith),
                 "description": redact_sensitive_text(combined_desc),
-                # Mirror the CLI's allow_permanent gate: a tirith warning downgrades
-                # "always" to session scope below, so the UI must not offer it.
-                "allow_permanent": not has_tirith,
             }
             decision = _await_gateway_decision(
                 session_key, notify_cb, approval_data, surface="gateway"
@@ -2747,12 +2766,13 @@ def check_all_command_guards(command: str, env_type: str,
         submit_pending(session_key, {
             "command": _disp_command,
             "pattern_key": primary_key,
-            "pattern_keys": all_keys,
+            **_approval_metadata(primary_key, all_keys, allow_permanent=not has_tirith),
             "description": _disp_combined_desc,
         })
         return {
             "approved": False,
             "pattern_key": primary_key,
+            **_approval_metadata(primary_key, all_keys, allow_permanent=not has_tirith),
             "status": "pending_approval",
             "approval_pending": True,
             "command": _disp_command,
@@ -2946,12 +2966,13 @@ def check_execute_code_guard(code: str, env_type: str,
         submit_pending(session_key, {
             "command": display_command,
             "pattern_key": pattern_key,
-            "pattern_keys": [pattern_key],
+            **_approval_metadata(pattern_key, allow_permanent=True),
             "description": display_description,
         })
         return {
             "approved": False,
             "pattern_key": pattern_key,
+            **_approval_metadata(pattern_key, allow_permanent=True),
             "status": "pending_approval",
             "approval_pending": True,
             "command": display_command,
@@ -2965,7 +2986,7 @@ def check_execute_code_guard(code: str, env_type: str,
     approval_data = {
         "command": display_command,
         "pattern_key": pattern_key,
-        "pattern_keys": [pattern_key],
+        **_approval_metadata(pattern_key, allow_permanent=True),
         "description": display_description,
     }
     decision = _await_gateway_decision(

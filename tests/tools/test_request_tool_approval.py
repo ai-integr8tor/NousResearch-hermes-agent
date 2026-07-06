@@ -99,6 +99,12 @@ class TestRequestToolApproval:
         assert res["approved"] is False
         assert res["status"] == "approval_required"
         assert submitted["pattern_key"] == "plugin_rule:ext-nav"
+        assert submitted["pattern_keys"] == ["plugin_rule:ext-nav"]
+        assert submitted["allowlist_key"] == "plugin_rule:ext-nav"
+        assert submitted["rule_key"] == "ext-nav"
+        assert submitted["allow_permanent"] is True
+        assert res["allowlist_key"] == "plugin_rule:ext-nav"
+        assert res["rule_key"] == "ext-nav"
 
     def test_cron_deny_mode_blocks(self, monkeypatch):
         monkeypatch.setattr(approval, "_is_interactive_cli", lambda: False)

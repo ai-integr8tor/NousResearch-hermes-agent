@@ -71,8 +71,11 @@ function keyedPromptStore<T extends KeyedPrompt>(): PromptStore<T> {
 export interface ApprovalRequest extends KeyedPrompt {
   // false when the backend won't honor a permanent allow (tirith warning) → hide "Always allow".
   allowPermanent?: boolean
+  allowlistKey?: string
   command: string
   description: string
+  patternKey?: string
+  ruleKey?: string
 }
 
 export interface SudoRequest extends KeyedPrompt {
