@@ -4486,6 +4486,13 @@ def set_moa_models(body: MoaConfigPayload, profile: Optional[str] = None):
                     "enabled": body.enabled,
                 }
             normalized = normalize_moa_config(raw)
+            # Preserve fields that the Desktop/Dashboard MOA panel does not
+            # expose (save_traces, trace_dir) so hand-edited values survive
+            # saves.  See #58819.
+            _existing = cfg.get("moa", {})
+            for _key in ("save_traces", "trace_dir"):
+                if _key in _existing and _key not in normalized:
+                    normalized[_key] = _existing[_key]
             cfg["moa"] = normalized
             save_config(cfg)
             return {"ok": True, **normalized}
