@@ -8471,6 +8471,48 @@ def _start_notification_poller(sid: str, session: dict) -> threading.Event:
     return stop
 
 
+# Captured at import time. Several _run_prompt_submit tests monkeypatch
+# threading.Thread with a stub that runs the target synchronously to keep the
+# turn deterministic. This ticker's loop only exits once the caller sets `stop`
+# *after* run_conversation returns, so running it inline would spin forever.
+# It's a non-critical, fire-and-forget background poller, so it always uses a
+# real daemon thread regardless of any such patch.
+_RealThread = threading.Thread
+
+
+def _start_usage_ticker(sid: str, agent, interval: float = 1.0) -> threading.Event:
+    """Push live usage snapshots while a turn runs.
+
+    The desktop/TUI status-bar context-window figure is otherwise refreshed
+    only at ``message.complete``, so it stays frozen for the whole (often
+    multi-minute, multi-tool) turn even though the agent's token counters grow
+    after every internal API call. This daemon emits a lightweight
+    ``session.usage`` event every ``interval`` seconds so the bar tracks
+    context growth live; the caller sets the returned Event to stop it.
+    """
+    stop = threading.Event()
+
+    def _loop() -> None:
+        # Wait one interval before the first push: message.start just fired and
+        # the token counters have not moved yet.
+        last: dict | None = None
+        while not stop.wait(interval):
+            try:
+                usage = _get_usage(agent)
+                if usage == last:
+                    # Counters frozen (e.g. one long API call in flight) —
+                    # skip the redundant frame so idle ticks don't re-render
+                    # the client status bar every second.
+                    continue
+                last = usage
+                _emit("session.usage", sid, {"usage": usage})
+            except Exception:
+                pass
+
+    _RealThread(target=_loop, daemon=True).start()
+    return stop
+
+
 def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
     with session["history_lock"]:
         history = list(session["history"])
@@ -8622,7 +8664,11 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
                     run_kwargs["task_id"] = session["session_key"]
             except (TypeError, ValueError):
                 pass
-            result = agent.run_conversation(run_message, **run_kwargs)
+            _usage_ticker = _start_usage_ticker(sid, agent)
+            try:
+                result = agent.run_conversation(run_message, **run_kwargs)
+            finally:
+                _usage_ticker.set()
             if "moa_one_shot_restore" in session:
                 _restore = session.pop("moa_one_shot_restore", None)
                 # Restore the model the user was on before the /moa one-shot.

@@ -223,6 +223,15 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
             queryKey: explicitSid && sessionId ? ['model-options', sessionId] : ['model-options']
           })
         }
+      } else if (event.type === 'session.usage') {
+        // Live usage tick emitted while a turn is mid-flight (see tui_gateway
+        // _start_usage_ticker) so the status-bar context window tracks growth
+        // during the turn instead of only jumping at message.complete. Scope
+        // to the focused session — $currentUsage is a single global store
+        // driving one bar.
+        if (payload?.usage && (!explicitSid || isActiveEvent)) {
+          setCurrentUsage(current => ({ ...current, ...payload.usage }))
+        }
       } else if (event.type === 'message.start') {
         if (!sessionId) {
           return
@@ -340,7 +349,10 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
           }
         }
 
-        if (payload?.usage) {
+        // Scope the global usage bar to the focused session — a background
+        // session finishing must not overwrite the active chat's context
+        // window (matches the session.info / session.usage branches above).
+        if (payload?.usage && (!explicitSid || isActiveEvent)) {
           setCurrentUsage(current => ({ ...current, ...payload.usage }))
         }
       } else if (event.type === 'session.title') {

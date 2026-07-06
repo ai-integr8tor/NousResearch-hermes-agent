@@ -315,6 +315,66 @@ def test_write_json_drops_detached_ws_frames(monkeypatch):
         server._sessions.pop("detached-sid", None)
 
 
+def test_usage_ticker_emits_wrapped_usage_payload(monkeypatch):
+    # The live ticker must nest the snapshot under a "usage" key, matching the
+    # message.complete / session.info payloads the desktop & TUI handlers read
+    # as payload.usage. Emitting the bare _get_usage() dict (payload.input/total
+    # …) silently drops every live tick on the client side.
+    events: list[tuple[str, str, dict]] = []
+    monkeypatch.setattr(
+        server, "_emit", lambda event_type, sid, payload: events.append((event_type, sid, payload))
+    )
+    monkeypatch.setattr(server, "_get_usage", lambda agent: {"input": 1200, "total": 1280})
+
+    stop = server._start_usage_ticker("sess-1", object(), interval=0.01)
+    deadline = time.time() + 1.0
+    while not events and time.time() < deadline:
+        time.sleep(0.01)
+    stop.set()
+
+    assert events, "ticker never emitted"
+    event_type, sid, payload = events[0]
+    assert event_type == "session.usage"
+    assert sid == "sess-1"
+    assert payload == {"usage": {"input": 1200, "total": 1280}}
+
+
+def test_usage_ticker_skips_unchanged_snapshots(monkeypatch):
+    # A single long API call leaves the token counters frozen for many
+    # intervals; the ticker must not spam identical frames (each one triggers
+    # a client status-bar re-render). Only a changed snapshot emits again.
+    events: list[dict] = []
+    monkeypatch.setattr(
+        server, "_emit", lambda event_type, sid, payload: events.append(payload)
+    )
+    snapshot = {"input": 1200, "total": 1280}
+    monkeypatch.setattr(server, "_get_usage", lambda agent: dict(snapshot))
+
+    stop = server._start_usage_ticker("sess-1", object(), interval=0.01)
+    try:
+        deadline = time.time() + 1.0
+        while not events and time.time() < deadline:
+            time.sleep(0.01)
+        assert events == [{"usage": {"input": 1200, "total": 1280}}]
+
+        # ~10 more ticks with unchanged counters: no new frames.
+        time.sleep(0.1)
+        assert events == [{"usage": {"input": 1200, "total": 1280}}]
+
+        # Counters move → the next tick emits the new snapshot.
+        snapshot["total"] = 2400
+        deadline = time.time() + 1.0
+        while len(events) < 2 and time.time() < deadline:
+            time.sleep(0.01)
+    finally:
+        stop.set()
+
+    assert events == [
+        {"usage": {"input": 1200, "total": 1280}},
+        {"usage": {"input": 1200, "total": 2400}},
+    ]
+
+
 def test_tui_verbose_tool_details_fail_closed_when_redaction_fails(monkeypatch):
     redact_module = types.ModuleType("agent.redact")
 
