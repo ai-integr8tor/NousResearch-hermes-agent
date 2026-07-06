@@ -2875,6 +2875,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         self._running_agents_ts: Dict[str, float] = {}  # start timestamp per session
         self._active_session_leases: Dict[str, Any] = {}
         self._pending_messages: Dict[str, str] = {}  # Queued messages during interrupt
+        # Streaming stashes the final response text here (keyed by chat_id or
+        # session_key) so /goal continuation can extract it even when
+        # _handle_message_with_agent returns None to avoid double-delivery.
+        self._last_streamed_response: Dict[str, str] = {}
         # Last successfully-resolved (non-empty) model, keyed by session. Used
         # as a fallback when a fresh config read transiently returns an empty
         # model (e.g. an mtime-keyed config-cache miss during a post-interrupt
@@ -10069,6 +10073,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     _final_text = str(_agent_result.get("final_response") or "")
                 elif isinstance(_agent_result, str):
                     _final_text = _agent_result
+                elif _agent_result is None:
+                    # Streaming path: the response text was already delivered
+                    # and _handle_message_with_agent returned None to avoid
+                    # double-delivery.  Retrieve the stashed text so the goal
+                    # judge runs even when streaming is enabled.
+                    _final_text = self._last_streamed_response.get(
+                        source.chat_id or _quick_key, ""
+                    )
                 # Skip for empty responses (interrupted / errored) — the
                 # judge would almost always say "continue" and we'd loop
                 # on error. Let the user drive the next turn.
@@ -11813,6 +11825,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             )
                     except Exception as _e:
                         logger.debug("trailing footer send failed: %s", _e)
+                # Stash the streamed response so the /goal continuation hook
+                # (in _handle_message) can extract the text even when we return
+                # None to avoid double-delivery. Without this, the goal judge
+                # is never called when streaming is enabled, and /goal status
+                # always shows 0/n turns.
+                self._last_streamed_response[source.chat_id or session_key] = response
                 return None
 
             return response
