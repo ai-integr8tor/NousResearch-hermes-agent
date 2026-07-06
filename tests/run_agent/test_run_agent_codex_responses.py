@@ -629,7 +629,7 @@ def test_run_codex_stream_returns_collected_items_when_stream_ends_without_termi
     assert response.output == [output_item]
 
 
-def test_consume_codex_stream_routes_commentary_phase_deltas_to_reasoning(monkeypatch):
+def test_consume_codex_stream_routes_commentary_phase_deltas_to_interim(monkeypatch):
     from agent.codex_runtime import _consume_codex_event_stream
 
     commentary_item = SimpleNamespace(
@@ -647,6 +647,7 @@ def test_consume_codex_stream_routes_commentary_phase_deltas_to_reasoning(monkey
     )
     streamed = []
     reasoning_streamed = []
+    interim_commentary = []
 
     response = _consume_codex_event_stream(
         _FakeCreateStream([
@@ -667,10 +668,12 @@ def test_consume_codex_stream_routes_commentary_phase_deltas_to_reasoning(monkey
         model="gpt-5-codex",
         on_text_delta=streamed.append,
         on_reasoning_delta=reasoning_streamed.append,
+        on_commentary_message=interim_commentary.append,
     )
 
     assert streamed == []
-    assert reasoning_streamed == ["I’ll call the tool now."]
+    assert reasoning_streamed == []
+    assert interim_commentary == ["I’ll call the tool now."]
     assert response.output == [commentary_item, function_item]
     assert response.output_text == ""
 
@@ -2049,6 +2052,74 @@ def test_stream_delta_preserves_code_fence_newlines(monkeypatch):
     combined = "".join(observed)
     assert "```python\n" in combined
     assert combined.startswith("Here is the code:\n```python\n")
+
+
+def test_codex_stream_commentary_phase_emits_interim_not_reasoning(monkeypatch):
+    """Codex Harmony commentary is user-facing progress narration.
+
+    It must be visible as one interim-assistant message, but must not be routed
+    through final answer deltas or the private reasoning stream.
+    """
+    from agent.codex_runtime import _consume_codex_event_stream
+
+    commentary = []
+    reasoning = []
+    visible_text = []
+    events = [
+        SimpleNamespace(
+            type="response.output_item.added",
+            item=SimpleNamespace(type="message", phase="commentary"),
+        ),
+        SimpleNamespace(type="response.output_text.delta", delta="Je vais vérifier "),
+        SimpleNamespace(type="response.output_text.delta", delta="la WebUI."),
+        SimpleNamespace(type="response.output_item.done", item=SimpleNamespace(type="message", phase="commentary")),
+        SimpleNamespace(type="response.output_item.added", item=SimpleNamespace(type="function_call")),
+        SimpleNamespace(type="response.function_call_arguments.delta", delta='{}'),
+        SimpleNamespace(
+            type="response.output_item.done",
+            item=SimpleNamespace(type="function_call", name="terminal", arguments="{}"),
+        ),
+        SimpleNamespace(type="response.completed", response=SimpleNamespace(status="completed")),
+    ]
+
+    _consume_codex_event_stream(
+        events,
+        model="gpt-5-codex",
+        on_text_delta=visible_text.append,
+        on_reasoning_delta=reasoning.append,
+        on_commentary_message=commentary.append,
+    )
+
+    assert commentary == ["Je vais vérifier la WebUI."]
+    assert reasoning == []
+    assert visible_text == []
+
+
+def test_codex_stream_analysis_phase_stays_reasoning(monkeypatch):
+    """Codex Harmony analysis is private reasoning and must not become interim prose."""
+    from agent.codex_runtime import _consume_codex_event_stream
+
+    commentary = []
+    reasoning = []
+    events = [
+        SimpleNamespace(
+            type="response.output_item.added",
+            item=SimpleNamespace(type="message", phase="analysis"),
+        ),
+        SimpleNamespace(type="response.output_text.delta", delta="private deliberation"),
+        SimpleNamespace(type="response.output_item.done", item=SimpleNamespace(type="message", phase="analysis")),
+        SimpleNamespace(type="response.completed", response=SimpleNamespace(status="completed")),
+    ]
+
+    _consume_codex_event_stream(
+        events,
+        model="gpt-5-codex",
+        on_reasoning_delta=reasoning.append,
+        on_commentary_message=commentary.append,
+    )
+
+    assert commentary == []
+    assert reasoning == ["private deliberation"]
 
 
 def test_run_conversation_codex_continues_after_commentary_phase_message(monkeypatch):

@@ -529,6 +529,7 @@ def _consume_codex_event_stream(
     model: str,
     on_text_delta=None,
     on_reasoning_delta=None,
+    on_commentary_message=None,
     on_first_delta=None,
     on_event=None,
     interrupt_check=None,
@@ -560,7 +561,12 @@ def _consume_codex_event_stream(
     * ``on_text_delta(str)`` — fires per ``response.output_text.delta``, suppressed
       once a function_call event is seen (so tool-call turns don't bleed text
       into the chat).
-    * ``on_reasoning_delta(str)`` — fires per ``response.reasoning.*.delta``.
+    * ``on_reasoning_delta(str)`` — fires per ``response.reasoning.*.delta`` and
+      per Harmony ``analysis`` message deltas.
+    * ``on_commentary_message(str)`` — fires once per assembled Harmony
+      ``commentary`` message. Commentary is user-facing mid-turn narration; it
+      must not be merged into final assistant text, but it should remain visible
+      through the interim-assistant channel when one exists.
     * ``on_first_delta()`` — one-shot, fires on the first text delta only.
     * ``on_event(event)`` — fires for every event before any other processing.
       Used for watchdog activity, debug logging, anything wire-shape-agnostic.
@@ -571,12 +577,26 @@ def _consume_codex_event_stream(
     has_tool_calls = False
     first_delta_fired = False
     active_message_phase: str | None = None
+    commentary_message_parts: List[str] = []
     terminal_status: str = "completed"
     terminal_usage: Any = None
     terminal_response_id: str = None
     terminal_incomplete_details: Any = None
     terminal_error: Any = None
     saw_terminal = False
+
+    def _flush_commentary_message() -> None:
+        nonlocal commentary_message_parts
+        if not commentary_message_parts:
+            return
+        text = "".join(commentary_message_parts).strip()
+        commentary_message_parts = []
+        if not text or on_commentary_message is None:
+            return
+        try:
+            on_commentary_message(text)
+        except Exception:
+            logger.debug("Codex stream on_commentary_message raised", exc_info=True)
 
     for event in event_iter:
         if on_event is not None:
@@ -605,11 +625,14 @@ def _consume_codex_event_stream(
             _raise_stream_error(event)
 
         # Track the phase of the active streamed message item.  Codex/Harmony
-        # ``commentary``/``analysis`` text is mid-turn preamble/progress
-        # narration, never the final answer.  We still collect completed output
-        # items for replay, but route those deltas to the reasoning callback so
-        # they display like thinking text instead of assistant content.
+        # ``commentary`` text is user-facing mid-turn preamble/progress
+        # narration; route it to the interim-assistant channel in one assembled
+        # chunk so WebUI/gateway users understand why tools are being used.
+        # ``analysis`` remains private reasoning and must not become visible
+        # assistant text.  Neither phase is part of the final answer.
         if event_type == "response.output_item.added":
+            if active_message_phase == "commentary":
+                _flush_commentary_message()
             item = _event_field(event, "item")
             item_type = _item_field(item, "type", "")
             if item_type == "message":
@@ -623,10 +646,9 @@ def _consume_codex_event_stream(
 
         if "output_text.delta" in event_type or event_type == "response.output_text.delta":
             delta_text = _event_field(event, "delta", "")
-            is_commentary_delta = active_message_phase in {"commentary", "analysis"}
-            if delta_text and is_commentary_delta:
-                # Commentary streams through the reasoning channel, not the
-                # visible answer stream (and stays out of output_text).
+            if delta_text and active_message_phase == "commentary":
+                commentary_message_parts.append(delta_text)
+            elif delta_text and active_message_phase == "analysis":
                 if on_reasoning_delta is not None:
                     try:
                         on_reasoning_delta(delta_text)
@@ -650,6 +672,8 @@ def _consume_codex_event_stream(
             continue
 
         if "function_call" in event_type:
+            if active_message_phase == "commentary":
+                _flush_commentary_message()
             has_tool_calls = True
             # fall through — function_call items still get added on output_item.done
 
@@ -663,12 +687,18 @@ def _consume_codex_event_stream(
             continue
 
         if event_type == "response.output_item.done":
+            if active_message_phase == "commentary":
+                _flush_commentary_message()
             done_item = _event_field(event, "item")
             if done_item is not None:
                 collected_output_items.append(done_item)
+            if _item_field(done_item, "type", "") == "message":
+                active_message_phase = None
             continue
 
         if event_type in _TERMINAL_EVENT_TYPES:
+            if active_message_phase == "commentary":
+                _flush_commentary_message()
             saw_terminal = True
             resp_obj = _event_field(event, "response")
             if resp_obj is not None:
@@ -700,6 +730,11 @@ def _consume_codex_event_stream(
                 terminal_status = terminal_status or "failed"
             # Stop on terminal event.
             break
+
+    # If the stream ended without a normal item boundary, still surface the
+    # assembled user-facing commentary before we inspect the final output.
+    if active_message_phase == "commentary":
+        _flush_commentary_message()
 
     # Build the final output list.  Prefer items observed via output_item.done;
     # if none arrived but we streamed plain text deltas (no tool calls), synthesize
@@ -766,6 +801,9 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
     def _on_reasoning_delta(text: str) -> None:
         agent._fire_reasoning_delta(text)
 
+    def _on_commentary_message(text: str) -> None:
+        agent._emit_interim_assistant_message({"role": "assistant", "content": text})
+
     def _on_event(event: Any) -> None:
         # TTFB watchdog and activity touch — runs once per SSE event.
         agent._codex_stream_last_event_ts = time.time()
@@ -805,6 +843,7 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
                     model=api_kwargs.get("model"),
                     on_text_delta=_on_text_delta,
                     on_reasoning_delta=_on_reasoning_delta,
+                    on_commentary_message=_on_commentary_message,
                     on_first_delta=on_first_delta,
                     on_event=_on_event,
                     interrupt_check=_interrupt_check,
