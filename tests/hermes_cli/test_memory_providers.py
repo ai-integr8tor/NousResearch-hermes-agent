@@ -15,6 +15,10 @@ def test_hindsight_is_declared():
     assert {field.key for field in provider.fields} == {
         "mode",
         "api_key",
+        "llm_api_key",
+        "llm_provider",
+        "llm_base_url",
+        "llm_model",
         "api_url",
         "bank_id",
         "recall_budget",
@@ -27,9 +31,7 @@ def test_hindsight_mode_gating_is_expressed_as_select_options():
 
     mode = next(field for field in provider.fields if field.key == "mode")
     assert mode.kind == KIND_SELECT
-    assert mode.allowed_values() == {"cloud", "local_external"}
-    # local_embedded is intentionally unsupported on desktop.
-    assert "local_embedded" not in mode.allowed_values()
+    assert mode.allowed_values() == {"cloud", "local_embedded", "local_external"}
 
 
 def test_api_key_is_a_secret_bound_to_env():
@@ -40,6 +42,16 @@ def test_api_key_is_a_secret_bound_to_env():
     assert api_key.kind == KIND_SECRET
     assert api_key.is_secret is True
     assert api_key.env_key == "HINDSIGHT_API_KEY"
+
+
+def test_llm_api_key_is_a_secret_bound_to_env():
+    provider = get_memory_provider("hindsight")
+    assert provider is not None
+
+    llm_api_key = next(field for field in provider.fields if field.key == "llm_api_key")
+    assert llm_api_key.kind == KIND_SECRET
+    assert llm_api_key.is_secret is True
+    assert llm_api_key.env_key == "HINDSIGHT_LLM_API_KEY"
 
 
 def test_unknown_provider_is_none():
