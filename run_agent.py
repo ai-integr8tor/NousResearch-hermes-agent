@@ -4329,6 +4329,72 @@ class AIAgent:
         logger.info("Copilot credentials refreshed from %s", token_source)
         return True
 
+    def _try_recover_stale_copilot_credential(self) -> bool:
+        """Force a fresh Copilot token exchange + client rebuild after a 400.
+
+        Copilot surfaces a stale/degraded credential as a
+        ``400 model_not_available_for_integrator`` /
+        ``model_not_supported`` — NOT a clean 401 — so the normal 401 refresh
+        path never fires. The most common trigger is a raw ``ghu_`` OAuth token
+        that got seeded (and cached) when the startup token exchange degraded:
+        the raw token routes the request to the restricted
+        ``copilot-language-server`` integrator whose allowlist omits
+        enterprise-only models (e.g. ``claude-opus-4.8``).
+
+        Recovery = evict the poisoned cache entry, force a fresh exchange to
+        mint the real ~437-char API token, re-apply the Copilot headers, and
+        rebuild the shared client. Single-shot (guarded by the caller) so a
+        genuinely unavailable model can't loop.
+        """
+        if self.provider != "copilot":
+            return False
+
+        try:
+            from hermes_cli.copilot_auth import (
+                resolve_copilot_token,
+                get_copilot_api_token,
+                evict_cached_exchanged_token,
+            )
+
+            raw_token, token_source = resolve_copilot_token()
+            if not isinstance(raw_token, str) or not raw_token.strip():
+                return False
+            raw_token = raw_token.strip()
+
+            # Drop any cached (possibly degraded/raw) exchanged token so the
+            # next exchange hits the network and mints a fresh one.
+            evict_cached_exchanged_token(raw_token)
+
+            api_token, enterprise_base_url = get_copilot_api_token(raw_token)
+        except Exception as exc:
+            logger.debug("Copilot stale-credential recovery failed: %s", exc)
+            return False
+
+        if not isinstance(api_token, str) or not api_token.strip():
+            return False
+
+        # If the exchange STILL degraded to the raw token, a rebuild won't help
+        # — don't burn the single-shot retry on an identical request.
+        if api_token == raw_token and not enterprise_base_url:
+            logger.warning(
+                "Copilot stale-credential recovery: exchange still degraded to "
+                "raw token; skipping retry (network/exchange endpoint unavailable)."
+            )
+            return False
+
+        self.api_key = api_token.strip()
+        if enterprise_base_url:
+            self.base_url = enterprise_base_url.rstrip("/")
+        self._client_kwargs["api_key"] = self.api_key
+        self._client_kwargs["base_url"] = self.base_url
+        self._apply_client_headers_for_base_url(str(self.base_url or ""))
+
+        if not self._replace_primary_openai_client(reason="copilot_stale_credential_recovery"):
+            return False
+
+        logger.info("Copilot credentials re-exchanged after stale-credential 400 (source=%s)", token_source)
+        return True
+
     def _try_refresh_anthropic_client_credentials(self) -> bool:
         if self.api_mode != "anthropic_messages" or not hasattr(self, "_anthropic_api_key"):
             return False
