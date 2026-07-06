@@ -2445,6 +2445,10 @@ DEFAULT_CONFIG = {
     "approvals": {
         "mode": "manual",
         "timeout": 60,
+        "gateway_timeout": 1800,    # Gateway/email approval timeout (seconds, default 1800).
+                                    # Email users: set to match agent.gateway_timeout (1800s)
+                                    # to prevent timeouts during email round-trips. Normal
+                                    # chat messages do NOT extend this timeout (Issue #27352).
         "cron_mode": "deny",
         # User-defined deny rules: fnmatch globs matched against terminal
         # commands. A match blocks the command unconditionally — BEFORE the
