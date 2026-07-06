@@ -4,7 +4,6 @@ Uses the Daytona Python SDK to run commands in cloud sandboxes.
 Supports persistent sandboxes: when enabled, sandboxes are stopped on cleanup
 and resumed on next creation, preserving the filesystem across sessions.
 """
-
 import logging
 import math
 import os
@@ -23,8 +22,39 @@ from tools.environments.file_sync import (
     quoted_rm_command,
     unique_parent_dirs,
 )
+from tools.environments.local import (
+    _HERMES_PROVIDER_ENV_BLOCKLIST,
+    _HERMES_PROVIDER_ENV_FORCE_PREFIX,
+    _is_hermes_internal_secret,
+)
+from tools.env_passthrough import is_env_passthrough as _is_passthrough
 
 logger = logging.getLogger(__name__)
+
+
+def _build_daytona_env() -> dict[str, str]:
+    """Build a sanitized environment dict for Daytona sandbox exec calls.
+
+    Mirrors the filtering logic in ``tools.environments.local._make_run_env``
+    so that ``terminal.env_passthrough`` and skill-declared passthrough vars
+    are forwarded to the remote sandbox while provider credentials and
+    Hermes-internal secrets are stripped.
+
+    Returns a dict suitable for the ``env=`` parameter of
+    ``sandbox.process.exec()``.
+    """
+    env: dict[str, str] = {}
+    for key, value in os.environ.items():
+        # Strip Hermes-internal force-prefix vars (used for gateway routing).
+        if key.startswith(_HERMES_PROVIDER_ENV_FORCE_PREFIX):
+            continue
+        # Strip Hermes-internal dynamic secrets (AUXILIARY_*_API_KEY, etc.).
+        if _is_hermes_internal_secret(key):
+            continue
+        # Allow if not in blocklist, or if explicitly allowed via passthrough.
+        if key not in _HERMES_PROVIDER_ENV_BLOCKLIST or _is_passthrough(key):
+            env[key] = value
+    return env
 
 
 class DaytonaEnvironment(BaseEnvironment):
@@ -235,8 +265,13 @@ class DaytonaEnvironment(BaseEnvironment):
         else:
             shell_cmd = f"bash -c {shlex.quote(cmd_string)}"
 
+        # Build a sanitized env dict that honors terminal.env_passthrough
+        # and skill-declared passthrough vars, stripping provider credentials
+        # and Hermes-internal secrets.
+        run_env = _build_daytona_env()
+
         def exec_fn() -> tuple[str, int]:
-            response = sandbox.process.exec(shell_cmd, timeout=timeout)
+            response = sandbox.process.exec(shell_cmd, env=run_env, timeout=timeout)
             return (response.result or "", response.exit_code)
 
         return _ThreadedProcessHandle(exec_fn, cancel_fn=cancel)
