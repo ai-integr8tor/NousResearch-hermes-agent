@@ -732,8 +732,16 @@ def _to_openai_base_url(base_url: str) -> str:
     return url
 
 
-def _select_pool_entry(provider: str) -> Tuple[bool, Optional[Any]]:
-    """Return (pool_exists_for_provider, selected_entry)."""
+def _select_pool_entry(
+    provider: str, requested_model: Optional[str] = None,
+) -> Tuple[bool, Optional[Any]]:
+    """Return (pool_exists_for_provider, selected_entry).
+
+    When *requested_model* is supplied, a credential exhausted for a
+    DIFFERENT model (``last_error_model``) is not treated as blocked — this
+    is what lets a shared OAuth credential still serve e.g. Spark after
+    ``gpt-5.5`` alone hit its usage limit (issue #47986).
+    """
     try:
         pool = load_pool(provider)
     except Exception as exc:
@@ -742,7 +750,7 @@ def _select_pool_entry(provider: str) -> Tuple[bool, Optional[Any]]:
     if not pool or not pool.has_credentials():
         return False, None
     try:
-        return True, pool.select()
+        return True, pool.select(requested_model=requested_model)
     except Exception as exc:
         logger.debug("Auxiliary client: could not select pool entry for %s: %s", provider, exc)
         return True, None
@@ -1666,7 +1674,7 @@ def _resolve_xai_oauth_for_aux() -> Optional[Tuple[str, str]]:
     return api_key, base_url
 
 
-def _read_codex_access_token() -> Optional[str]:
+def _read_codex_access_token(requested_model: Optional[str] = None) -> Optional[str]:
     """Read a valid, non-expired Codex OAuth access token from Hermes auth store.
 
     If a credential pool exists but currently has no selectable runtime entry
@@ -1674,8 +1682,16 @@ def _read_codex_access_token() -> Optional[str]:
     profile's auth.json token instead of hard-failing. This keeps explicit
     fallback-to-Codex working when the pool state is stale but the stored OAuth
     token is still valid.
+
+    When *requested_model* is supplied, it is threaded into the pool selection
+    so a credential exhausted for a DIFFERENT model (``last_error_model``) is
+    not treated as blocked. Without this, the raw-Codex failover path (used by
+    the main agent loop) would skip e.g. Spark whenever ``gpt-5.5`` alone hit
+    its usage limit on the shared OAuth credential (issue #47986).
     """
-    pool_present, entry = _select_pool_entry("openai-codex")
+    pool_present, entry = _select_pool_entry(
+        "openai-codex", requested_model=requested_model
+    )
     if pool_present:
         token = _pool_runtime_api_key(entry)
         if token:
@@ -2356,18 +2372,18 @@ def _build_codex_client(model: str) -> Tuple[Optional[Any], Optional[str]]:
             "pass model explicitly (auxiliary.<task>.model in config.yaml)."
         )
         return None, None
-    pool_present, entry = _select_pool_entry("openai-codex")
+    pool_present, entry = _select_pool_entry("openai-codex", requested_model=model)
     if pool_present:
         codex_token = _pool_runtime_api_key(entry)
         if codex_token:
             base_url = _pool_runtime_base_url(entry, _CODEX_AUX_BASE_URL) or _CODEX_AUX_BASE_URL
         else:
-            codex_token = _read_codex_access_token()
+            codex_token = _read_codex_access_token(model)
             if not codex_token:
                 return None, None
             base_url = _CODEX_AUX_BASE_URL
     else:
-        codex_token = _read_codex_access_token()
+        codex_token = _read_codex_access_token(model)
         if not codex_token:
             return None, None
         base_url = _CODEX_AUX_BASE_URL
@@ -3220,13 +3236,25 @@ def _recoverable_pool_provider(
     return None
 
 
-def _recover_provider_pool(provider: str, exc: Exception, *, failed_api_key: str = "") -> bool:
+def _recover_provider_pool(
+    provider: str,
+    exc: Exception,
+    *,
+    failed_api_key: str = "",
+    model_id: Optional[str] = None,
+) -> bool:
     """Try same-provider credential-pool recovery for auxiliary calls.
 
     ``failed_api_key`` is the API key that was actually used for the failing
     request.  Passing it lets mark_exhausted_and_rotate identify the correct
     pool entry even when another process has already rotated the pool (which
     would leave current() as None, causing the wrong entry to be marked).
+
+    ``model_id`` is the model that actually hit the limit.  Threading it into
+    mark_exhausted_and_rotate keeps the exhaustion block scoped to that model
+    so sibling models on the same credential (e.g. Spark vs gpt-5.5 on a shared
+    openai-codex account) stay usable instead of being swept into a
+    provider-wide block.
     """
     normalized = _normalize_aux_provider(provider)
     try:
@@ -3250,6 +3278,7 @@ def _recover_provider_pool(provider: str, exc: Exception, *, failed_api_key: str
             status_code=status_code if status_code is not None else 401,
             error_context=error_context,
             api_key_hint=hint,
+            model_id=model_id,
         )
         if next_entry is not None:
             _evict_cached_clients(normalized)
@@ -3262,6 +3291,7 @@ def _recover_provider_pool(provider: str, exc: Exception, *, failed_api_key: str
             status_code=status_code if status_code is not None else fallback_status,
             error_context=error_context,
             api_key_hint=hint,
+            model_id=model_id,
         )
         if next_entry is not None:
             _evict_cached_clients(normalized)
@@ -4310,7 +4340,7 @@ def resolve_provider_client(
         if raw_codex:
             # Return the raw OpenAI client for callers that need direct
             # access to responses.stream() (e.g., the main agent loop).
-            codex_token = _read_codex_access_token()
+            codex_token = _read_codex_access_token(model)
             if not codex_token:
                 logger.warning("resolve_provider_client: openai-codex requested "
                                "but no Codex OAuth token found (run: hermes model)")
@@ -6508,7 +6538,7 @@ def call_llm(
                     if not (_is_auth_error(retry_err) or _is_payment_error(retry_err) or _is_rate_limit_error(retry_err)):
                         raise
                     recovery_err = retry_err
-            if _recover_provider_pool(pool_provider, recovery_err, failed_api_key=_client_api_key):
+            if _recover_provider_pool(pool_provider, recovery_err, failed_api_key=_client_api_key, model_id=final_model):
                 logger.info(
                     "Auxiliary %s: recovered %s via credential-pool rotation after %s",
                     task or "call", pool_provider, type(recovery_err).__name__,
@@ -6538,7 +6568,7 @@ def call_llm(
                     # alternative providers can still serve the request.
                     if (_is_payment_error(retry2_err) or _is_auth_error(retry2_err)
                             or _is_rate_limit_error(retry2_err)):
-                        _recover_provider_pool(pool_provider, retry2_err)
+                        _recover_provider_pool(pool_provider, retry2_err, model_id=final_model)
                         first_err = retry2_err
                     else:
                         raise
@@ -7031,7 +7061,7 @@ async def async_call_llm(
                     if not (_is_auth_error(retry_err) or _is_payment_error(retry_err) or _is_rate_limit_error(retry_err)):
                         raise
                     recovery_err = retry_err
-            if _recover_provider_pool(pool_provider, recovery_err, failed_api_key=_client_api_key):
+            if _recover_provider_pool(pool_provider, recovery_err, failed_api_key=_client_api_key, model_id=final_model):
                 logger.info(
                     "Auxiliary %s (async): recovered %s via credential-pool rotation after %s",
                     task or "call", pool_provider, type(recovery_err).__name__,
@@ -7055,7 +7085,7 @@ async def async_call_llm(
                 except Exception as retry2_err:
                     if (_is_payment_error(retry2_err) or _is_auth_error(retry2_err)
                             or _is_rate_limit_error(retry2_err)):
-                        _recover_provider_pool(pool_provider, retry2_err)
+                        _recover_provider_pool(pool_provider, retry2_err, model_id=final_model)
                         first_err = retry2_err
                     else:
                         raise
