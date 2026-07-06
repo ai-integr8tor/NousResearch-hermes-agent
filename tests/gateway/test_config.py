@@ -1240,6 +1240,12 @@ class TestHomeChannelEnvOverrides:
                 {"SMS_HOME_CHANNEL": "+15559876543", "SMS_HOME_CHANNEL_NAME": "My Phone"},
                 ("+15559876543", "My Phone"),
             ),
+            (
+                Platform.QQBOT,
+                PlatformConfig(enabled=True, extra={"app_id": "from-config"}),
+                {"QQBOT_HOME_CHANNEL": "direct:owner", "QQBOT_HOME_CHANNEL_NAME": "Owner QQ"},
+                ("direct:owner", "Owner QQ"),
+            ),
         ]
 
         for platform, platform_config, env, expected in cases:
@@ -1250,3 +1256,33 @@ class TestHomeChannelEnvOverrides:
             home = config.platforms[platform].home_channel
             assert home is not None, f"{platform.value}: home_channel should not be None"
             assert (home.chat_id, home.name) == expected, platform.value
+
+    def test_qqbot_home_channel_env_applies_to_configured_platform(
+        self, tmp_path, monkeypatch
+    ):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        (hermes_home / "config.yaml").write_text(
+            "platforms:\n"
+            "  qqbot:\n"
+            "    enabled: true\n"
+            "    extra:\n"
+            "      app_id: from-config\n"
+            "      client_secret: from-config-secret\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.delenv("QQ_APP_ID", raising=False)
+        monkeypatch.delenv("QQ_CLIENT_SECRET", raising=False)
+        monkeypatch.setenv("QQBOT_HOME_CHANNEL", "direct:owner")
+        monkeypatch.setenv("QQBOT_HOME_CHANNEL_NAME", "Owner QQ")
+
+        config = load_gateway_config()
+
+        home = config.platforms[Platform.QQBOT].home_channel
+        assert home == HomeChannel(
+            platform=Platform.QQBOT,
+            chat_id="direct:owner",
+            name="Owner QQ",
+        )
