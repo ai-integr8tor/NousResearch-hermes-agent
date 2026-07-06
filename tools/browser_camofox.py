@@ -646,8 +646,12 @@ def camofox_snapshot(full: bool = False, task_id: Optional[str] = None,
         return tool_error(str(e), success=False)
 
 
-def camofox_click(ref: str, task_id: Optional[str] = None) -> str:
-    """Click an element by ref via Camofox."""
+def camofox_click(
+    ref: Optional[str] = None,
+    selector: Optional[str] = None,
+    task_id: Optional[str] = None,
+) -> str:
+    """Click an element by ref or selector via Camofox."""
     try:
         session = _get_session(task_id)
         if not session["tab_id"]:
@@ -657,24 +661,38 @@ def camofox_click(ref: str, task_id: Optional[str] = None) -> str:
         if blocked:
             return blocked
 
-        # Strip @ prefix if present (our tool convention)
-        clean_ref = ref.lstrip("@")
+        body = {"userId": session["user_id"]}
+
+        if ref:
+            clean_ref = ref.lstrip("@")
+            body["ref"] = clean_ref
+            clicked_val = clean_ref
+        elif selector:
+            body["selector"] = selector
+            clicked_val = selector
+        else:
+            return tool_error("Either 'ref' or 'selector' must be provided.", success=False)
 
         data = _post(
             f"/tabs/{session['tab_id']}/click",
-            {"userId": session["user_id"], "ref": clean_ref},
+            body,
         )
         return json.dumps({
             "success": True,
-            "clicked": clean_ref,
+            "clicked": clicked_val,
             "url": data.get("url", ""),
         })
     except Exception as e:
         return tool_error(str(e), success=False)
 
 
-def camofox_type(ref: str, text: str, task_id: Optional[str] = None) -> str:
-    """Type text into an element by ref via Camofox."""
+def camofox_type(
+    ref: Optional[str] = None,
+    text: str = "",
+    selector: Optional[str] = None,
+    task_id: Optional[str] = None,
+) -> str:
+    """Type text into an element by ref or selector via Camofox."""
     try:
         session = _get_session(task_id)
         if not session["tab_id"]:
@@ -684,11 +702,21 @@ def camofox_type(ref: str, text: str, task_id: Optional[str] = None) -> str:
         if blocked:
             return blocked
 
-        clean_ref = ref.lstrip("@")
+        body = {"userId": session["user_id"], "text": text}
+
+        if ref:
+            clean_ref = ref.lstrip("@")
+            body["ref"] = clean_ref
+            element_val = clean_ref
+        elif selector:
+            body["selector"] = selector
+            element_val = selector
+        else:
+            return tool_error("Either 'ref' or 'selector' must be provided.", success=False)
 
         _post(
             f"/tabs/{session['tab_id']}/type",
-            {"userId": session["user_id"], "ref": clean_ref, "text": text},
+            body,
         )
         from agent.display import (
             redact_browser_typed_text_for_display,
@@ -699,13 +727,10 @@ def camofox_type(ref: str, text: str, task_id: Optional[str] = None) -> str:
 
         response = {
             "success": True,
-            # Match browser_tool.browser_type: run typed text through the
-            # secret-pattern redactor so API keys / tokens don't leak into
-            # tool progress or chat history.  The raw text is still typed into
-            # the page; only the returned display value is redacted.
             "typed": display_text,
-            "element": clean_ref,
+            "element": element_val,
         }
+
         response = redact_browser_typed_text_for_display(response, text)
         return json.dumps(response)
     except Exception as e:
