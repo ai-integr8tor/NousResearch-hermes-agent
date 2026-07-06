@@ -28,6 +28,9 @@ What this module does on Windows:
   - Reconfigures ``sys.stdout`` / ``sys.stderr`` to UTF-8 in the current
     process, using the ``reconfigure()`` API (Python 3.7+).  This fixes
     ``print("café")`` in the parent without a re-exec.
+  - Enables Windows virtual-terminal processing for stdout/stderr console
+    handles so ANSI color/style escapes render instead of printing literally
+    in Windows 10 CMD / PowerShell hosts.
 
 What this module does NOT do:
 
@@ -51,9 +54,45 @@ from __future__ import annotations
 
 import os
 import sys
+import ctypes
 
 _IS_WINDOWS = sys.platform == "win32"
 _bootstrap_applied = False
+
+_STD_OUTPUT_HANDLE = -11
+_STD_ERROR_HANDLE = -12
+_INVALID_HANDLE_VALUE = -1
+_ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+
+
+def _enable_windows_virtual_terminal_processing() -> bool:
+    """Enable ANSI escape rendering for Windows console stdout/stderr."""
+    if not _IS_WINDOWS:
+        return False
+
+    try:
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    except Exception:
+        return False
+
+    enabled = False
+    for std_handle in (_STD_OUTPUT_HANDLE, _STD_ERROR_HANDLE):
+        try:
+            handle = kernel32.GetStdHandle(std_handle)
+            if handle in (0, _INVALID_HANDLE_VALUE):
+                continue
+
+            mode = ctypes.c_uint()
+            if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+                continue
+
+            new_mode = mode.value | _ENABLE_VIRTUAL_TERMINAL_PROCESSING
+            if kernel32.SetConsoleMode(handle, new_mode):
+                enabled = True
+        except Exception:
+            continue
+
+    return enabled
 
 
 def apply_windows_utf8_bootstrap() -> bool:
@@ -117,6 +156,8 @@ def apply_windows_utf8_bootstrap() -> bool:
                 reconfigure(encoding="utf-8", errors="replace")
             except (OSError, ValueError):
                 pass
+
+    _enable_windows_virtual_terminal_processing()
 
     _bootstrap_applied = True
     return True
