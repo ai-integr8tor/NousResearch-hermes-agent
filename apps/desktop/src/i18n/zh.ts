@@ -71,6 +71,8 @@ export const zh: Translations = {
       startingDesktopConnection: '正在启动桌面连接',
       startingHermesDesktop: '正在启动 Hermes 桌面版…'
     },
+    connectingPrefix: 'CONN',
+    connectingTail: 'ECTING',
     errors: {
       backgroundExited: 'Hermes 后台进程已退出。',
       backgroundExitedDuringStartup: 'Hermes 后台进程在启动期间退出。',
@@ -2592,6 +2594,37 @@ export const zh: Translations = {
       systemNote: platform => `↻ 已移交到 ${platform} — 随时可在此处恢复。`,
       failed: error => `移交失败：${error}`,
       timedOut: '等待网关超时。`hermes gateway` 是否正在运行？'
+    }
+  },
+
+  uninstall: {
+    dangerZone: '危险区域',
+    checking: '正在检查已安装内容…',
+    confirmTitle: '确认卸载',
+    confirmBody: consequence => `这将删除${consequence}。此操作不可撤销。`,
+    uninstalling: '正在卸载…',
+    yesUninstall: '是，卸载',
+    couldNotStart: '无法启动卸载。',
+    cancel: '取消',
+    uninstallHermes: '卸载 Hermes',
+    uninstallDescription:
+      '选择您要删除的内容。应用程序将关闭以完成操作；随时重新打开安装程序即可恢复。',
+    options: {
+      gui: {
+        title: '仅卸载界面',
+        description: '删除此桌面应用程序。保留 Hermes 代理、您的配置和对话。',
+        consequence: '桌面应用程序'
+      },
+      lite: {
+        title: '卸载 Hermes',
+        description: '删除 Hermes 代理和此桌面应用程序。保留您的配置和对话。',
+        consequence: 'Hermes 代理和桌面应用程序'
+      },
+      full: {
+        title: '完全卸载',
+        description: '删除所有内容：代理、此应用程序、所有配置和所有对话。',
+        consequence: 'Hermes 代理、此应用程序、所有配置和所有对话'
+      }
     }
   },
 
