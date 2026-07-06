@@ -1824,6 +1824,8 @@ class PluginManager:
                 )
 
         except Exception as exc:
+            if getattr(exc, "hermes_fail_closed", False):
+                raise
             loaded.error = str(exc)
             logger.warning(
                 "Failed to load plugin '%s': %s",
@@ -1920,6 +1922,8 @@ class PluginManager:
                 if ret is not None:
                     results.append(ret)
             except Exception as exc:
+                if getattr(exc, "hermes_fail_closed", False):
+                    raise
                 logger.warning(
                     "Hook '%s' callback %s raised: %s",
                     hook_name,
