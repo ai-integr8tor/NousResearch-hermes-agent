@@ -679,3 +679,114 @@ def test_main_console_subcommand_smoke(_isolate_hermes_home):
 
     assert result.returncode == 0
     assert "Hermes Console" in result.stdout
+
+
+def test_hosted_mcp_add_rejects_duplicate_url_scheme_bypass():
+    """A second --url with a non-http(s) scheme must not slip past the hosted
+    `mcp add` policy just because the first --url is allowed.
+
+    The guard used to validate only the first --url (`_flag_value`, first-wins)
+    while argparse executes the command with the LAST --url (store, last-wins),
+    so `--url https://ok --url ftp://evil` bypassed the http/https restriction.
+    """
+    from hermes_cli.console_engine import (
+        ConsoleCommandError,
+        _enforce_hosted_line_policy,
+    )
+
+    # Duplicated --url smuggling a non-http(s) scheme past the first-value
+    # check must now raise.
+    with pytest.raises(ConsoleCommandError):
+        _enforce_hosted_line_policy(
+            ("mcp", "add"),
+            ["myserver", "--url", "https://ok.example", "--url", "ftp://evil"],
+        )
+
+    # Same bypass via the --url=VALUE equals form must also raise.
+    with pytest.raises(ConsoleCommandError):
+        _enforce_hosted_line_policy(
+            ("mcp", "add"),
+            ["myserver", "--url=https://ok.example", "--url=ftp://evil"],
+        )
+
+    # No regression: a single valid https URL is still accepted.
+    _enforce_hosted_line_policy(
+        ("mcp", "add"),
+        ["myserver", "--url", "https://ok.example"],
+    )
+
+    # No regression: two URLs that are both http/https are still accepted.
+    _enforce_hosted_line_policy(
+        ("mcp", "add"),
+        ["myserver", "--url", "https://ok.example", "--url", "http://also-ok.example"],
+    )
+
+
+def test_hosted_mcp_add_rejects_url_abbreviation_scheme_bypass():
+    """An argparse long-option abbreviation of ``--url`` (``--ur`` / ``--u``)
+    smuggling a non-http(s) scheme must not slip past the hosted ``mcp add``
+    policy.
+
+    ``hermes mcp add`` registered ``--url`` without disabling argparse's
+    prefix-abbreviation, so ``mcp add demo --url https://ok --ur ftp://evil``
+    bound ``url=ftp://evil`` (last-wins) while the hosted guard inspected only
+    the literal ``--url`` token and approved the https URL — a second escalation
+    path at the same site as the duplicate-``--url`` bypass. The guard now
+    covers every abbreviation argparse can bind to ``--url``.
+    """
+    from hermes_cli.console_engine import (
+        ConsoleCommandError,
+        _enforce_hosted_line_policy,
+    )
+
+    # `--ur` abbreviation smuggling a non-http(s) scheme must raise.
+    with pytest.raises(ConsoleCommandError):
+        _enforce_hosted_line_policy(
+            ("mcp", "add"),
+            ["myserver", "--url", "https://ok.example", "--ur", "ftp://evil"],
+        )
+
+    # A shorter unambiguous abbreviation (`--u`) must also raise.
+    with pytest.raises(ConsoleCommandError):
+        _enforce_hosted_line_policy(
+            ("mcp", "add"),
+            ["myserver", "--url", "https://ok.example", "--u", "ftp://evil"],
+        )
+
+    # The `--ur=VALUE` equals form of the abbreviation must raise too.
+    with pytest.raises(ConsoleCommandError):
+        _enforce_hosted_line_policy(
+            ("mcp", "add"),
+            ["myserver", "--url=https://ok.example", "--ur=ftp://evil"],
+        )
+
+    # No regression: a single valid https URL is still accepted.
+    _enforce_hosted_line_policy(
+        ("mcp", "add"),
+        ["myserver", "--url", "https://ok.example"],
+    )
+
+
+def test_hosted_console_mcp_add_url_abbreviation_bypass_end_to_end():
+    """End-to-end through the console: a `--url` abbreviation with a non-http(s)
+    scheme is blocked before confirmation, while a legit single `--url` is
+    still allowed to reach the confirmation step.
+
+    This exercises the full resolve/parse flow (not just the guard helper), so
+    it also guards the `allow_abbrev=False` half of the fix: even when the
+    command is confirmed and executed, argparse can no longer bind an
+    abbreviated `--url` to a smuggled value.
+    """
+    engine = HermesConsoleEngine(context="hosted")
+
+    blocked = engine.execute("mcp add demo --url https://ok.example --ur ftp://evil")
+    assert blocked.status == "error"
+    assert blocked.output
+
+    blocked_short = engine.execute("mcp add demo --url https://ok.example --u ftp://evil")
+    assert blocked_short.status == "error"
+    assert blocked_short.output
+
+    # A legit single https URL still reaches the confirmation gate.
+    allowed = engine.execute("mcp add demo --url https://ok.example")
+    assert allowed.status == "confirm_required"
