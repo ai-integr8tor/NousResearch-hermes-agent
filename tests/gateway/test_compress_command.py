@@ -297,11 +297,97 @@ async def test_compress_command_passes_session_db_and_persists_rotated_session()
     mock_agent_cls.assert_called_once()
     assert mock_agent_cls.call_args.kwargs["session_db"] is runner._session_db
     runner.session_store._save.assert_called_once()
-    runner.session_store.rewrite_transcript.assert_called_once_with(
+    getattr(runner.session_store, "rewrite_transcript").assert_called_once_with(
         "sess-2", compressed
     )
     runner.session_store.update_session.assert_called_once_with(
         build_session_key(_make_source()), last_prompt_tokens=0
+    )
+    agent_instance.shutdown_memory_provider.assert_called_once()
+    agent_instance.close.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_compress_child_flag_forces_legacy_rotation_override():
+    """Gateway /compress --child passes in_place=False for this compression call."""
+    history = _make_history()
+    compressed = [
+        history[0],
+        {"role": "assistant", "content": "compressed summary"},
+        history[-1],
+    ]
+    runner = _make_runner(history)
+    runner._session_db = object()
+    agent_instance = MagicMock()
+    agent_instance.shutdown_memory_provider = MagicMock()
+    agent_instance.close = MagicMock()
+    agent_instance._cached_system_prompt = ""
+    agent_instance.tools = None
+    agent_instance.context_compressor.has_content_to_compress.return_value = True
+    agent_instance.session_id = "sess-1"
+
+    def _compress(_messages, *_args, **kwargs):
+        assert kwargs["force_in_place"] is False
+        agent_instance.session_id = "sess-2"
+        return compressed, ""
+
+    agent_instance._compress_context.side_effect = _compress
+
+    with (
+        patch("gateway.run._resolve_runtime_agent_kwargs", return_value={"api_key": "***"}),
+        patch("gateway.run._resolve_gateway_model", return_value="test-model"),
+        patch("run_agent.AIAgent", return_value=agent_instance),
+        patch("agent.model_metadata.estimate_request_tokens_rough", return_value=100),
+    ):
+        result = await runner._handle_compress_command(_make_event("/compress --child"))
+
+    assert "Compressed:" in result
+    getattr(runner.session_store, "rewrite_transcript").assert_called_once_with(
+        "sess-2", compressed
+    )
+    agent_instance.shutdown_memory_provider.assert_called_once()
+    agent_instance.close.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_childcompress_command_forces_legacy_rotation_override():
+    """Gateway /childcompress reuses /compress with the child-rotation override."""
+    history = _make_history()
+    compressed = [
+        history[0],
+        {"role": "assistant", "content": "compressed summary"},
+        history[-1],
+    ]
+    runner = _make_runner(history)
+    runner._session_db = object()
+    agent_instance = MagicMock()
+    agent_instance.shutdown_memory_provider = MagicMock()
+    agent_instance.close = MagicMock()
+    agent_instance._cached_system_prompt = ""
+    agent_instance.tools = None
+    agent_instance.context_compressor.has_content_to_compress.return_value = True
+    agent_instance.session_id = "sess-1"
+
+    def _compress(_messages, *_args, **kwargs):
+        assert kwargs["force_in_place"] is False
+        agent_instance.session_id = "sess-2"
+        return compressed, ""
+
+    agent_instance._compress_context.side_effect = _compress
+
+    with (
+        patch("gateway.run._resolve_runtime_agent_kwargs", return_value={"api_key": "***"}),
+        patch("gateway.run._resolve_gateway_model", return_value="test-model"),
+        patch("run_agent.AIAgent", return_value=agent_instance),
+        patch("agent.model_metadata.estimate_request_tokens_rough", return_value=100),
+    ):
+        result = await runner._handle_compress_command(
+            _make_event("/childcompress"), force_in_place=False
+        )
+
+    assert "Compressed:" in result
+    getattr(runner.session_store, "rewrite_transcript").assert_called_once_with(
+        "sess-2", compressed
     )
     agent_instance.shutdown_memory_provider.assert_called_once()
     agent_instance.close.assert_called_once()

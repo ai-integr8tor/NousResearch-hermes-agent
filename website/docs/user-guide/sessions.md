@@ -239,9 +239,11 @@ hermes sessions rename 20250305_091523_a1b2c3d4 "refactoring auth module"
 - **Sanitized** — control characters, zero-width chars, and RTL overrides are stripped automatically
 - **Normal Unicode is fine** — emoji, CJK, accented characters all work
 
-### Auto-Lineage on Compression
+### Compression Lineage
 
-When a session's context is compressed (manually via `/compress` or automatically), Hermes creates a new continuation session. If the original had a title, the new session automatically gets a numbered title:
+By default, manual `/compress` and automatic compression follow `compression.in_place`: Hermes rewrites the active context inside the same session ID while preserving the pre-compaction turns as archived/searchable rows. This keeps `/resume` and the visible conversation anchored to one durable session.
+
+If you explicitly ask for a child continuation — for example with `/compress --child`, `/childcompress`, or by setting `compression.in_place: false` — Hermes creates a new continuation session. If the original had a title, the new session automatically gets a numbered title:
 
 ```
 "my project" → "my project #2" → "my project #3"

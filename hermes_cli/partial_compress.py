@@ -30,9 +30,10 @@ Design notes / invariants honored:
   backwards to the nearest ``user`` turn so the rejoin is always legal.
 
 * **No silent context mutation.** This is a manual, user-invoked
-  action. It rotates the session exactly like ``/compress`` does (via
-  the caller), so the prompt-cache reset is explicit and expected, not
-  silent.
+  action. Normal ``/compress`` follows ``compression.in_place``;
+  ``/compress --child`` and ``/childcompress`` can deliberately force
+  the legacy child continuation path when the user wants a hard session
+  boundary.
 
 * **Conservative defaults.** ``keep_last`` counts *exchanges* (a user
   turn plus its following assistant/tool turns), defaulting to 2. The
@@ -108,15 +109,15 @@ def parse_partial_compress_args(
     return False, DEFAULT_KEEP_LAST, text or None
 
 
-def extract_compress_flags(raw_args: str) -> Tuple[str, bool, bool]:
-    """Strip ``--preview``/``--dry-run``/``--aggressive`` flags from the
+def extract_compress_flags(raw_args: str) -> Tuple[str, bool, bool, bool]:
+    """Strip ``--preview``/``--dry-run``/``--aggressive``/``--child`` flags from the
     argument string after ``/compress`` (or its ``/compact`` alias).
 
     Flags may appear anywhere and coexist with the positional forms
     (``here [N]``, ``--keep N``, or a focus topic); the returned
     remainder is what :func:`parse_partial_compress_args` should see.
 
-    Returns ``(remaining_args, preview, aggressive_requested)``:
+    Returns ``(remaining_args, preview, aggressive_requested, child_requested)``:
 
     * ``preview`` — True when ``--preview`` or ``--dry-run`` was given.
       The caller must report what WOULD be compressed (message counts,
@@ -127,9 +128,14 @@ def extract_compress_flags(raw_args: str) -> Tuple[str, bool, bool]:
       the guarded ``_compress_context`` rotation machinery), so callers
       surface a "not supported" note instead of silently treating the
       flag as a focus topic.
+    * ``child_requested`` — True when ``--child`` was given. The caller
+      should force legacy child-session rotation for this compression
+      call without changing the user's global ``compression.in_place``
+      setting.
     """
     preview = False
     aggressive = False
+    child = False
     kept: List[str] = []
     for tok in (raw_args or "").split():
         low = tok.lower()
@@ -137,9 +143,11 @@ def extract_compress_flags(raw_args: str) -> Tuple[str, bool, bool]:
             preview = True
         elif low == "--aggressive":
             aggressive = True
+        elif low == "--child":
+            child = True
         else:
             kept.append(tok)
-    return " ".join(kept), preview, aggressive
+    return " ".join(kept), preview, aggressive, child
 
 
 def summarize_compress_preview(
