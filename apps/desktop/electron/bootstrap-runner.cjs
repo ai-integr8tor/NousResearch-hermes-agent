@@ -50,6 +50,8 @@ function hiddenWindowsChildOptions(options = {}) {
 }
 
 const STAMP_COMMIT_RE = /^[0-9a-f]{7,40}$/i
+const STAMP_REF_RE = /^[0-9A-Za-z._/\-]{1,200}$/
+const DEFAULT_GITHUB_REPOSITORY = 'NousResearch/hermes-agent'
 
 // Stages flagged needs_user_input=true in the manifest are skipped by the
 // runner (passed -NonInteractive to install.ps1, which the install script
@@ -101,34 +103,80 @@ function installedAgentInstallScript(hermesHome) {
 }
 
 function cachedScriptPath(hermesHome, commit) {
-  return path.join(bootstrapCacheDir(hermesHome), `install-${commit}.${process.platform === 'win32' ? 'ps1' : 'sh'}`)
+  return path.join(
+    bootstrapCacheDir(hermesHome),
+    `install-${sanitizeRefForCache(commit)}.${process.platform === 'win32' ? 'ps1' : 'sh'}`
+  )
 }
 
-function downloadInstallScript(commit, destPath) {
-  // Fetch from GitHub raw at the pinned commit. The raw URL with a SHA
-  // is immutable (unlike a branch ref), so we don't need integrity
-  // verification beyond "did the file we wrote pass a syntax probe."
-  const scriptName = installScriptName()
-  const url = `https://raw.githubusercontent.com/NousResearch/hermes-agent/${commit}/scripts/${scriptName}`
+function sanitizeRefForCache(ref) {
+  return String(ref || '').replace(/[^0-9A-Za-z._-]/g, '_')
+}
+
+function normalizeGitHubRepository(value) {
+  if (!value || typeof value !== 'string') return null
+  const trimmed = value.trim()
+  const sshMatch = trimmed.match(/^git@github\.com:([^/\s]+)\/([^/\s]+?)(?:\.git)?$/i)
+  if (sshMatch) return `${sshMatch[1]}/${sshMatch[2]}`
+  const httpsMatch = trimmed.match(/^https:\/\/github\.com\/([^/\s]+)\/([^/\s]+?)(?:\.git)?(?:\/)?$/i)
+  if (httpsMatch) return `${httpsMatch[1]}/${httpsMatch[2]}`
+  const slugMatch = trimmed.match(/^([^/\s]+)\/([^/\s]+)$/)
+  if (slugMatch) return `${slugMatch[1]}/${slugMatch[2].replace(/\.git$/i, '')}`
+  return null
+}
+
+function installerRepository(installStamp) {
+  return normalizeGitHubRepository(installStamp && installStamp.repository) || DEFAULT_GITHUB_REPOSITORY
+}
+
+function installScriptRef(installStamp) {
+  if (installStamp && typeof installStamp.bootstrapRef === 'string' && STAMP_REF_RE.test(installStamp.bootstrapRef)) {
+    return installStamp.bootstrapRef
+  }
+  return installStamp && installStamp.commit
+}
+
+function installScriptRepositories(installStamp) {
+  const repos = [installerRepository(installStamp), DEFAULT_GITHUB_REPOSITORY]
+  return [...new Set(repos.filter(Boolean))]
+}
+
+function installerRepoEnv(installStamp) {
+  const repo = installerRepository(installStamp)
+  const env = {}
+  if (repo) {
+    env.HERMES_INSTALL_REPO_URL_HTTPS =
+      (installStamp && typeof installStamp.repoUrlHttps === 'string' && installStamp.repoUrlHttps) ||
+      `https://github.com/${repo}.git`
+    env.HERMES_INSTALL_REPO_URL_SSH =
+      (installStamp && typeof installStamp.repoUrlSsh === 'string' && installStamp.repoUrlSsh) ||
+      `git@github.com:${repo}.git`
+    env.HERMES_INSTALL_REPO_ARCHIVE_BASE = env.HERMES_INSTALL_REPO_URL_HTTPS.replace(/\.git$/i, '')
+  }
+  return env
+}
+
+function shouldPinCommit(installStamp) {
+  return Boolean(installStamp && installStamp.commit && installStamp.commitPinned !== false)
+}
+
+function rawInstallScriptUrl(repository, ref, scriptName) {
+  return `https://raw.githubusercontent.com/${repository}/${ref}/scripts/${scriptName}`
+}
+
+function downloadFromUrl(url, scriptName, destPath) {
   return new Promise((resolve, reject) => {
-    fs.mkdirSync(path.dirname(destPath), { recursive: true })
     const tmpPath = destPath + '.tmp'
     const out = fs.createWriteStream(tmpPath)
     https
       .get(url, res => {
         if (res.statusCode === 301 || res.statusCode === 302) {
-          // GitHub raw shouldn't redirect for a SHA URL, but follow once
-          // defensively.
           out.close()
           fs.unlinkSync(tmpPath)
           https
             .get(res.headers.location, res2 => {
               if (res2.statusCode !== 200) {
-                reject(
-                  new Error(
-                    `Failed to download ${scriptName}: HTTP ${res2.statusCode} from redirect ${res.headers.location}`
-                  )
-                )
+                reject(new Error(`HTTP ${res2.statusCode} from redirect ${res.headers.location}`))
                 return
               }
               const out2 = fs.createWriteStream(tmpPath)
@@ -150,7 +198,7 @@ function downloadInstallScript(commit, destPath) {
           } catch {
             void 0
           }
-          reject(new Error(`Failed to download ${scriptName}: HTTP ${res.statusCode} from ${url}`))
+          reject(new Error(`HTTP ${res.statusCode} from ${url}`))
           return
         }
         res.pipe(out)
@@ -179,6 +227,36 @@ function downloadInstallScript(commit, destPath) {
   })
 }
 
+async function downloadInstallScript(installStamp, destPath) {
+  // Fetch from GitHub raw at the build stamp's bootstrap ref. Official/CI
+  // stamps use an immutable SHA; local unpublished builds may fall back to a
+  // reachable branch ref so the packaged app does not brick itself.
+  const scriptName = installScriptName()
+  const ref = installScriptRef(installStamp)
+  const errors = []
+
+  fs.mkdirSync(path.dirname(destPath), { recursive: true })
+  for (const repository of installScriptRepositories(installStamp)) {
+    const url = rawInstallScriptUrl(repository, ref, scriptName)
+    try {
+      return await downloadFromUrl(url, scriptName, destPath)
+    } catch (error) {
+      errors.push(error.message || String(error))
+    }
+  }
+
+  throw new Error(`Failed to download ${scriptName}: ${errors.join('; ')}`)
+}
+
+/**
+ * Resolve the installer script used by first-launch bootstrap.
+ *
+ * Fallback order:
+ * 1. local source checkout for dev builds;
+ * 2. cached script for the stamped ref;
+ * 3. GitHub raw script from the stamp repository, then the default repo;
+ * 4. installed agent checkout when the stamped ref is unreachable.
+ */
 async function resolveInstallScript({
   installStamp,
   sourceRepoRoot,
@@ -196,33 +274,34 @@ async function resolveInstallScript({
   }
 
   // 2. Packaged path: download from GitHub at the pinned commit (1B's stamp).
-  if (!installStamp || !installStamp.commit || !STAMP_COMMIT_RE.test(installStamp.commit)) {
+  const scriptRef = installScriptRef(installStamp)
+  if (!installStamp || !installStamp.commit || !STAMP_COMMIT_RE.test(installStamp.commit) || !STAMP_REF_RE.test(scriptRef)) {
     throw new Error(
       `Cannot resolve ${installScriptName()}: no SOURCE_REPO_ROOT and no install stamp. ` +
         'This packaged build was produced without a valid build-time stamp.'
     )
   }
 
-  const cached = cachedScriptPath(hermesHome, installStamp.commit)
+  const cached = cachedScriptPath(hermesHome, scriptRef)
   try {
     await fsp.access(cached, fs.constants.R_OK)
     emit({
       type: 'log',
-      line: `[bootstrap] using cached ${installScriptName()} for ${installStamp.commit.slice(0, 12)}`
+      line: `[bootstrap] using cached ${installScriptName()} for ${scriptRef.slice(0, 12)}`
     })
-    return { path: cached, source: 'cache', commit: installStamp.commit, kind: installScriptKind() }
+    return { path: cached, source: 'cache', ref: scriptRef, kind: installScriptKind() }
   } catch {
     // not cached; download
   }
 
   emit({
     type: 'log',
-    line: `[bootstrap] fetching ${installScriptName()} for ${installStamp.commit.slice(0, 12)} from GitHub`
+    line: `[bootstrap] fetching ${installScriptName()} for ${scriptRef.slice(0, 12)} from ${installerRepository(installStamp)}`
   })
   try {
-    await _download(installStamp.commit, cached)
+    await _download(installStamp, cached)
     emit({ type: 'log', line: `[bootstrap] saved to ${cached}` })
-    return { path: cached, source: 'download', commit: installStamp.commit, kind: installScriptKind() }
+    return { path: cached, source: 'download', ref: scriptRef, kind: installScriptKind() }
   } catch (err) {
     // The pinned commit may not be fetchable from GitHub -- most commonly a
     // locally-built desktop app stamped to an unpushed HEAD (see
@@ -240,10 +319,10 @@ async function resolveInstallScript({
       try {
         fs.mkdirSync(path.dirname(cached), { recursive: true })
         fs.copyFileSync(installed, cached)
-        return { path: cached, source: 'installed-agent', commit: installStamp.commit, kind: installScriptKind() }
+        return { path: cached, source: 'installed-agent', ref: scriptRef, kind: installScriptKind() }
       } catch {
         // Cache copy failed (read-only FS, etc.) -- use the source path directly.
-        return { path: installed, source: 'installed-agent', commit: installStamp.commit, kind: installScriptKind() }
+        return { path: installed, source: 'installed-agent', ref: scriptRef, kind: installScriptKind() }
       }
     }
     throw err
@@ -294,7 +373,7 @@ function resolveWindowsPowerShell() {
   return 'powershell.exe'
 }
 
-function spawnPowerShell(scriptPath, args, { emit, stageName, abortSignal, hermesHome } = {}) {
+function spawnPowerShell(scriptPath, args, { emit, stageName, abortSignal, hermesHome, installerEnv } = {}) {
   return new Promise((resolve, reject) => {
     const ps = process.platform === 'win32' ? resolveWindowsPowerShell() : 'pwsh'
     const fullArgs = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath, ...args]
@@ -306,6 +385,7 @@ function spawnPowerShell(scriptPath, args, { emit, stageName, abortSignal, herme
         stdio: ['ignore', 'pipe', 'pipe'],
         env: {
           ...process.env,
+          ...(installerEnv || {}),
           // Pass HERMES_HOME through so install.ps1 respects the caller's
           // choice rather than re-computing the default.
           HERMES_HOME: hermesHome || process.env.HERMES_HOME || ''
@@ -376,12 +456,13 @@ function spawnPowerShell(scriptPath, args, { emit, stageName, abortSignal, herme
   })
 }
 
-function spawnBash(scriptPath, args, { emit, stageName, abortSignal, hermesHome } = {}) {
+function spawnBash(scriptPath, args, { emit, stageName, abortSignal, hermesHome, installerEnv } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn('bash', [scriptPath, ...args], {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: {
         ...process.env,
+        ...(installerEnv || {}),
         HERMES_HOME: hermesHome || process.env.HERMES_HOME || ''
       }
     })
@@ -451,12 +532,12 @@ function spawnBash(scriptPath, args, { emit, stageName, abortSignal, hermesHome 
 // Manifest + stage dispatch
 // ---------------------------------------------------------------------------
 
-// Build the install.ps1 pin args (-Commit / -Branch) from the install-stamp
-// so the repository stage clones the exact SHA the .exe was tested with
-// instead of falling back to install.ps1's default ($Branch = "main").
+// Build installer pin args from the install-stamp. CI/reachable commits get
+// exact SHA pins; local unpublished builds intentionally omit -Commit so the
+// installer can use a reachable branch instead of failing on a private SHA.
 function buildPinArgs(installStamp) {
   const args = []
-  if (installStamp && installStamp.commit) {
+  if (shouldPinCommit(installStamp)) {
     args.push('-Commit', installStamp.commit)
   }
   if (installStamp && installStamp.branch) {
@@ -470,7 +551,7 @@ function buildPosixPinArgs({ installStamp, activeRoot, hermesHome }) {
   if (installStamp && installStamp.branch) {
     args.push('--branch', installStamp.branch)
   }
-  if (installStamp && installStamp.commit) {
+  if (shouldPinCommit(installStamp)) {
     args.push('--commit', installStamp.commit)
   }
   return args
@@ -478,13 +559,15 @@ function buildPosixPinArgs({ installStamp, activeRoot, hermesHome }) {
 
 async function fetchManifest({ scriptPath, installerKind, emit, hermesHome, activeRoot, installStamp }) {
   const isPosix = installerKind === 'posix'
+  const installerEnv = installerRepoEnv(installStamp)
   const args = isPosix
     ? ['--manifest', ...buildPosixPinArgs({ installStamp, activeRoot, hermesHome })]
     : ['-Manifest', ...buildPinArgs(installStamp)]
   const result = await (isPosix ? spawnBash : spawnPowerShell)(scriptPath, args, {
     emit,
     stageName: '__manifest__',
-    hermesHome
+    hermesHome,
+    installerEnv
   })
   if (result.code !== 0) {
     throw new Error(
@@ -533,6 +616,7 @@ async function runStage({ scriptPath, installerKind, stage, emit, hermesHome, ac
   emit({ type: 'stage', name: stage.name, state: 'running' })
 
   const isPosix = installerKind === 'posix'
+  const installerEnv = installerRepoEnv(installStamp)
   const args = isPosix
     ? [
         '--stage',
@@ -542,12 +626,11 @@ async function runStage({ scriptPath, installerKind, stage, emit, hermesHome, ac
         ...buildPosixPinArgs({ installStamp, activeRoot, hermesHome })
       ]
     : ['-Stage', stage.name, '-NonInteractive', '-Json', ...buildPinArgs(installStamp)]
-  const result = await (isPosix ? spawnBash : spawnPowerShell)(scriptPath, args, {
-    emit,
-    stageName: stage.name,
-    abortSignal,
-    hermesHome
-  })
+  const result = await (isPosix ? spawnBash : spawnPowerShell)(
+    scriptPath,
+    args,
+    { emit, stageName: stage.name, abortSignal, hermesHome, installerEnv }
+  )
 
   const durationMs = Date.now() - startedAt
 
@@ -735,5 +818,10 @@ module.exports = {
   resolveLocalInstallScript,
   resolveInstallScript,
   installedAgentInstallScript,
-  cachedScriptPath
+  cachedScriptPath,
+  installScriptRef,
+  installScriptRepositories,
+  installerRepoEnv,
+  normalizeGitHubRepository,
+  shouldPinCommit
 }
