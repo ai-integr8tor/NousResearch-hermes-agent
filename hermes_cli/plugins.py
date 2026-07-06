@@ -2051,9 +2051,22 @@ def discover_plugins(force: bool = False) -> None:
 def invoke_hook(hook_name: str, **kwargs: Any) -> List[Any]:
     """Invoke a lifecycle hook on all loaded plugins.
 
+    Ensures plugins are discovered on first invocation so callers in
+    processes that never explicitly call ``discover_plugins()`` (e.g. the
+    gateway, which uses its own ``HookRegistry`` for platform events)
+    still fire callbacks registered by user plugins.
+
     Returns a list of non-``None`` return values from plugin callbacks.
     """
-    return get_plugin_manager().invoke_hook(hook_name, **kwargs)
+    pm = get_plugin_manager()
+    # Lazy-discover: user plugins (e.g. kanban-model-tracking) are discovered
+    # on first hook invocation so processes that never call
+    # discover_plugins() explicitly (e.g. the gateway) still fire
+    # user-registered hooks.  Use getattr so test mocks that replace
+    # get_plugin_manager() with a SimpleNamespace don't break.
+    if not getattr(pm, '_discovered', True):
+        pm.discover_and_load()
+    return pm.invoke_hook(hook_name, **kwargs)
 
 
 def invoke_middleware(kind: str, **kwargs: Any) -> List[Any]:
@@ -2061,7 +2074,10 @@ def invoke_middleware(kind: str, **kwargs: Any) -> List[Any]:
 
     Returns a list of non-``None`` return values from middleware callbacks.
     """
-    return get_plugin_manager().invoke_middleware(kind, **kwargs)
+    pm = get_plugin_manager()
+    if not getattr(pm, '_discovered', True):
+        pm.discover_and_load()
+    return pm.invoke_middleware(kind, **kwargs)
 
 
 def has_middleware(kind: str) -> bool:
