@@ -86,6 +86,16 @@ from agent.skill_utils import (
 
 logger = logging.getLogger(__name__)
 
+# Per-turn skill load deduplication: track (name, file_path) pairs loaded
+# during the current turn so the same skill (or linked file) is never
+# re-read, re-parsed, or re-processed within a single turn.
+_loaded_skill_keys: set = set()
+
+
+def reset_skill_load_cache() -> None:
+    """Clear the per-turn skill-load dedup set (called at turn start)."""
+    _loaded_skill_keys.clear()
+
 
 # All skills live in ~/.hermes/skills/ (seeded from bundled skills/ on install).
 # This is the single source of truth -- agent edits, hub installs, and bundled
@@ -897,6 +907,22 @@ def skill_view(
                 },
                 ensure_ascii=False,
             )
+
+        # Per-turn dedup: if this exact (name, file_path) was already loaded
+        # during the current turn, skip re-reading and re-processing the file.
+        _dedup_key = (name, file_path)
+        if _dedup_key in _loaded_skill_keys:
+            return json.dumps(
+                {
+                    "success": True,
+                    "name": name,
+                    "content": None,
+                    "already_loaded": True,
+                    "note": "This skill was already loaded during the current turn.",
+                },
+                ensure_ascii=False,
+            )
+        _loaded_skill_keys.add(_dedup_key)
 
         local_category_name: str | None = None
         # ── Qualified name dispatch (plugin skills) ──────────────────
