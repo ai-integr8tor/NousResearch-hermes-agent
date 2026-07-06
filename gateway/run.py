@@ -17840,6 +17840,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 voice_ack_callback if _voice_ack_guild[0] is not None else None
             )
             agent.step_callback = _step_callback_sync if _hooks_ref.loaded_hooks else None
+
+            def _reasoning_delta_cb(text: str) -> None:
+                if not _run_still_current():
+                    return
+                if progress_queue is not None:
+                    progress_queue.put(("reasoning.available", "_thinking", text, None))
+
+            agent.reasoning_callback = _reasoning_delta_cb if needs_progress_queue else None
             agent.stream_delta_callback = _stream_delta_cb
             agent.interim_assistant_callback = _interim_assistant_cb if _want_interim_messages else None
             agent.status_callback = _status_callback_sync
