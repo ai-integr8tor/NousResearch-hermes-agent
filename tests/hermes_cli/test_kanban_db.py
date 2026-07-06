@@ -4766,3 +4766,32 @@ def test_bare_connect_does_not_close_on_context_exit(tmp_path):
     # Still usable after with-block exit (the leak).
     conn.execute("SELECT 1").fetchone()
     conn.close()  # explicit close to avoid leaking THIS test
+
+
+def test_task_labels_create_filter_and_update(kanban_home):
+    with kb.connect() as conn:
+        qa = kb.create_task(conn, title="qa task", labels=["QA", "frontend", "qa"])
+        kb.create_task(conn, title="backend task", labels=["backend"])
+
+        task = kb.get_task(conn, qa)
+        assert task.labels == ["frontend", "qa"]
+        assert [t.id for t in kb.list_tasks(conn, label="qa")] == [qa]
+        assert [t.id for t in kb.list_tasks(conn, labels=["qa", "frontend"])] == [qa]
+
+        assert kb.add_task_labels(conn, qa, ["review"], created_by="tester") == [
+            "frontend",
+            "qa",
+            "review",
+        ]
+        assert kb.remove_task_labels(conn, qa, ["frontend"]) == ["qa", "review"]
+        assert kb.set_task_labels(conn, qa, ["decision"], created_by="tester") == ["decision"]
+        assert kb.get_task(conn, qa).labels == ["decision"]
+
+
+def test_task_labels_reject_invalid_values(kanban_home):
+    with kb.connect() as conn:
+        with pytest.raises(ValueError):
+            kb.create_task(conn, title="bad", labels=["not ok!"])
+        tid = kb.create_task(conn, title="good")
+        with pytest.raises(ValueError):
+            kb.add_task_labels(conn, tid, ["bad,label"])
