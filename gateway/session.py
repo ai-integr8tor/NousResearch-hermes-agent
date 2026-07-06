@@ -1638,6 +1638,15 @@ class SessionStore:
         db_end_session_id = None
         db_create_kwargs = None
         existing_session_id = None
+        # Set when the #54878 self-heal below drops a routing entry whose
+        # session was already ended in state.db under a reason the recovery
+        # finder doesn't consider resumable (e.g. "tui_shutdown" — anything
+        # other than "agent_close" / still-open). Used after the recovery
+        # attempt to decide whether the user needs to be told their old
+        # thread is gone, since that path otherwise falls through to
+        # "Create new session" in total silence (#59580).
+        stale_routing_dropped_session_id = None
+        stale_routing_had_activity = False
 
         if not force_new:
             with self._lock:
@@ -1692,6 +1701,8 @@ class SessionStore:
                     was_auto_reset = False
                     auto_reset_reason = None
                     reset_had_activity = False
+                    stale_routing_dropped_session_id = entry.session_id
+                    stale_routing_had_activity = entry.last_prompt_tokens > 0
                     # Fall through to the recovery/create path below; the
                     # stale entry is gone so we must NOT consult its
                     # suspended/resume/reset state.
@@ -1761,6 +1772,21 @@ class SessionStore:
                     self._save()
                     return recovered_entry
 
+            # If the #54878 self-heal dropped a stale routing entry above and
+            # recovery just failed to reopen it (end_reason was outside the
+            # ended_at IS NULL / 'agent_close' whitelist — e.g. 'tui_shutdown'),
+            # the user is about to receive a brand-new, empty session in place
+            # of a thread they may believe is still live. That's the same
+            # "your previous session was silently replaced" situation as any
+            # other auto-reset, so surface it the same way instead of staying
+            # silent. NOTE: db_end_session_id is intentionally left unset here
+            # — the old session was already ended (with its real reason) by
+            # whatever finalized it, and we must not overwrite that reason.
+            if stale_routing_dropped_session_id is not None:
+                was_auto_reset = True
+                auto_reset_reason = "stale_routing_recovered"
+                reset_had_activity = stale_routing_had_activity
+
             # Create new session
             session_id = f"{now.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
 
@@ -1792,8 +1818,12 @@ class SessionStore:
 
         # SQLite operations outside the lock
         if self._db and db_end_session_id:
+            # Use the specific reset reason so state.db is auditable (e.g.
+            # "resume_pending_expired" is distinguishable from a normal
+            # "session_reset" caused by idle/daily expiry).
+            _db_end_reason = auto_reset_reason if auto_reset_reason else "session_reset"
             try:
-                self._db.end_session(db_end_session_id, "session_reset")
+                self._db.end_session(db_end_session_id, _db_end_reason)
             except Exception as e:
                 logger.debug("Session DB operation failed: %s", e)
 
