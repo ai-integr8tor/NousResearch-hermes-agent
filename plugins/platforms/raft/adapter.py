@@ -535,7 +535,37 @@ class RaftAdapter(BasePlatformAdapter):
         if not profile:
             logger.warning("[raft] RAFT_PROFILE not set; bridge not spawned")
             return
-
+        # Check for and remove stale lock file
+        try:
+            from hermes_agent.hermes_state import state_manager
+            agent_id = state_manager.agent_id
+        except Exception:
+            agent_id = None
+        if agent_id:
+            hermes_home = os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
+            lock_dir = os.path.join(hermes_home, "agent-comms-core", agent_id, "default")
+            lock_file = os.path.join(lock_dir, "bridge.lock")
+            if os.path.exists(lock_file):
+                try:
+                    with open(lock_file, "r") as f:
+                        pid_str = f.read().strip()
+                    if pid_str.isdigit():
+                        pid = int(pid_str)
+                        try:
+                            os.kill(pid, 0)
+                            # Process exists, we will not remove the lock file
+                            logger.warning(f"[raft] Lock file {lock_file} exists with PID {pid}, which is still alive. Not removing.")
+                        except OSError:
+                            # Process does not exist, remove the lock file
+                            os.remove(lock_file)
+                            logger.warning(f"[raft] Removed stale lock file {lock_file} (PID {pid})")
+                    else:
+                        # Invalid PID in lock file, remove it
+                        os.remove(lock_file)
+                        logger.warning(f"[raft] Removed lock file {lock_file} with invalid PID {pid_str}")
+                except Exception as e:
+                    logger.warning(f"[raft] Failed to check lock file {lock_file}: {e}")
+        endpoint = f"http://{self._host}:{port}{self._path}"
         endpoint = f"http://{self._host}:{port}{self._path}"
         cmd: List[str] = [
             raft_bin, "--profile", profile,
