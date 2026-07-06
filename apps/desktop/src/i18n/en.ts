@@ -1956,6 +1956,7 @@ export const en: Translations = {
     unknown: '(unknown)',
     search: 'Filter providers and models...',
     noModels: 'No models found.',
+    refreshModels: 'Refresh models',
     addProvider: 'Add provider',
     loadFailed: 'Could not load models',
     noAuthenticatedProviders: 'No authenticated providers.',
