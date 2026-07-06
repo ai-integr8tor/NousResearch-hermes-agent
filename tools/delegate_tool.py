@@ -1741,6 +1741,15 @@ def _run_single_child(
     )
 
     child_pool = getattr(child, "_credential_pool", None)
+    if child_pool is not None and not _credential_pool_matches_provider(
+        child_pool, getattr(child, "provider", None)
+    ):
+        logger.debug(
+            "Skipping child credential pool for provider mismatch: child=%r pool=%r",
+            getattr(child, "provider", None),
+            getattr(child_pool, "provider", None),
+        )
+        child_pool = None
     leased_cred_id = None
     if child_pool is not None:
         leased_cred_id = child_pool.acquire_lease()
@@ -2911,11 +2920,14 @@ def _resolve_child_credential_pool(
     ``custom:<name>`` pool key derived from the base_url) and only share the
     parent's pool when both resolve to the *same* custom endpoint.
     """
-    if not effective_provider:
-        return getattr(parent_agent, "_credential_pool", None)
-
     parent_provider = getattr(parent_agent, "provider", None) or ""
     parent_pool = getattr(parent_agent, "_credential_pool", None)
+    if not effective_provider:
+        return (
+            parent_pool
+            if _credential_pool_matches_provider(parent_pool, parent_provider)
+            else None
+        )
 
     # Custom endpoints: distinguish by endpoint identity, not the bare "custom"
     # provider string. Two custom runtimes are only interchangeable when they
@@ -2941,6 +2953,7 @@ def _resolve_child_credential_pool(
                 and parent_provider == "custom"
                 and parent_key is not None
                 and parent_key == child_key
+                and _credential_pool_matches_provider(parent_pool, effective_provider)
             ):
                 return parent_pool
 
@@ -2955,7 +2968,11 @@ def _resolve_child_credential_pool(
             )
         return None
 
-    if parent_pool is not None and effective_provider == parent_provider:
+    if (
+        parent_pool is not None
+        and effective_provider == parent_provider
+        and _credential_pool_matches_provider(parent_pool, effective_provider)
+    ):
         return parent_pool
 
     try:
@@ -2971,6 +2988,27 @@ def _resolve_child_credential_pool(
             exc,
         )
     return None
+
+
+def _credential_pool_matches_provider(pool, provider: Optional[str]) -> bool:
+    """Return whether a credential pool can safely bind a child provider.
+
+    Real CredentialPool instances expose a string ``provider``. Plain mocks and
+    older test doubles often do not; keep those permissive so this guard only
+    rejects concrete mismatches observed at runtime.
+    """
+    if pool is None:
+        return True
+    pool_provider = getattr(pool, "provider", None)
+    if not isinstance(pool_provider, str) or not pool_provider.strip():
+        return True
+    if not isinstance(provider, str) or not provider.strip():
+        return True
+    pool_provider = pool_provider.strip().lower()
+    provider = provider.strip().lower()
+    if pool_provider == provider:
+        return True
+    return provider == "custom" and pool_provider.startswith("custom:")
 
 
 def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:

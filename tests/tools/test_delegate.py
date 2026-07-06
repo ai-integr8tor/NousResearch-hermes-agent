@@ -1699,10 +1699,23 @@ class TestChildCredentialPoolResolution(unittest.TestCase):
     def test_same_provider_shares_parent_pool(self):
         parent = _make_mock_parent()
         mock_pool = MagicMock()
+        mock_pool.provider = "openrouter"
         parent._credential_pool = mock_pool
 
         result = _resolve_child_credential_pool("openrouter", parent)
         self.assertIs(result, mock_pool)
+
+    def test_same_provider_rejects_mismatched_parent_pool(self):
+        parent = _make_mock_parent()
+        parent.provider = "deepseek"
+        parent._credential_pool = MagicMock()
+        parent._credential_pool.provider = "zai"
+
+        with patch("agent.credential_pool.load_pool", return_value=None) as load_mock:
+            result = _resolve_child_credential_pool("deepseek", parent)
+
+        self.assertIsNone(result)
+        load_mock.assert_called_once_with("deepseek")
 
     def test_no_provider_inherits_parent_pool(self):
         parent = _make_mock_parent()
@@ -1916,6 +1929,34 @@ class TestChildCredentialLeasing(unittest.TestCase):
         child._credential_pool.acquire_lease.assert_called_once_with()
         child._swap_credential.assert_called_once_with(leased_entry)
         child._credential_pool.release_lease.assert_called_once_with("cred-b")
+
+    def test_run_single_child_skips_mismatched_credential_pool(self):
+        from tools.delegate_tool import _run_single_child
+
+        child = MagicMock()
+        child.provider = "deepseek"
+        child._credential_pool = MagicMock()
+        child._credential_pool.provider = "zai"
+        child._credential_pool.acquire_lease.return_value = "zai-cred"
+        child.run_conversation.return_value = {
+            "final_response": "done",
+            "completed": True,
+            "interrupted": False,
+            "api_calls": 1,
+            "messages": [],
+        }
+
+        result = _run_single_child(
+            task_index=0,
+            goal="Use delegated model",
+            child=child,
+            parent_agent=_make_mock_parent(),
+        )
+
+        self.assertEqual(result["status"], "completed")
+        child._credential_pool.acquire_lease.assert_not_called()
+        child._swap_credential.assert_not_called()
+        child._credential_pool.release_lease.assert_not_called()
 
     def test_run_single_child_releases_lease_after_failure(self):
         from tools.delegate_tool import _run_single_child
