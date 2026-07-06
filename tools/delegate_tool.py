@@ -2765,7 +2765,10 @@ def delegate_task(
     # keep chatting, get the combined summaries back together at the end.
     if background:
         from tools.async_delegation import dispatch_async_delegation_batch
-        from tools.approval import get_current_session_key
+        from tools.approval import (
+            get_current_session_key,
+            get_current_session_message_id,
+        )
 
         # Stateless request/response sessions (the API server / WebUI path)
         # cannot route a detached subagent result back to the agent after the
@@ -2796,6 +2799,12 @@ def delegate_task(
             return json.dumps(_sync_result, ensure_ascii=False)
 
         _session_key = get_current_session_key(default="")
+        # Capture the triggering message id BEFORE detaching onto the daemon
+        # worker thread (the contextvar won't be carried there). This anchors
+        # the completion re-entry message so it routes into the original
+        # topic/thread via the platform reply API — Feishu in particular has
+        # no create-by-thread-id path and would otherwise reject the send.
+        _message_id = get_current_session_message_id(default="")
         _child_agents = [c for (_, _, c) in children]
 
         # Detach every child from the parent's interrupt-propagation list — the
@@ -2836,6 +2845,7 @@ def delegate_task(
             role=top_role,
             model=creds["model"],
             session_key=_session_key,
+            message_id=_message_id,
             runner=_batch_runner,
             interrupt_fn=_batch_interrupt,
             max_async_children=_get_max_async_children(),
