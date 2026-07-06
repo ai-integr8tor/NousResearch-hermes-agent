@@ -1,3 +1,4 @@
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -13,29 +14,39 @@ beforeAll(() => {
 const getGlobalModelInfo = vi.fn()
 const getGlobalModelOptions = vi.fn()
 const getAuxiliaryModels = vi.fn()
+const getMoaModels = vi.fn()
 const setModelAssignment = vi.fn()
 const getRecommendedDefaultModel = vi.fn()
 const setEnvVar = vi.fn()
 const getHermesConfigRecord = vi.fn()
 const saveHermesConfig = vi.fn()
+const saveMoaModels = vi.fn()
+const setApiRequestProfile = vi.fn()
+const startManualLocalEndpoint = vi.fn()
 const startManualProviderOAuth = vi.fn()
+let queryClient: QueryClient
 
 vi.mock('@/hermes', () => ({
   getGlobalModelInfo: () => getGlobalModelInfo(),
   getGlobalModelOptions: () => getGlobalModelOptions(),
   getAuxiliaryModels: () => getAuxiliaryModels(),
+  getMoaModels: () => getMoaModels(),
   setModelAssignment: (body: unknown) => setModelAssignment(body),
   getRecommendedDefaultModel: (slug: string) => getRecommendedDefaultModel(slug),
   setEnvVar: (key: string, value: string) => setEnvVar(key, value),
   getHermesConfigRecord: () => getHermesConfigRecord(),
-  saveHermesConfig: (config: unknown) => saveHermesConfig(config)
+  saveHermesConfig: (config: unknown) => saveHermesConfig(config),
+  saveMoaModels: (config: unknown) => saveMoaModels(config),
+  setApiRequestProfile: (profile: string) => setApiRequestProfile(profile)
 }))
 
 vi.mock('@/store/onboarding', () => ({
+  startManualLocalEndpoint: (slug: string) => startManualLocalEndpoint(slug),
   startManualProviderOAuth: (slug: string) => startManualProviderOAuth(slug)
 }))
 
 beforeEach(() => {
+  queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   getGlobalModelInfo.mockResolvedValue({ provider: 'nous', model: 'hermes-4' })
   getGlobalModelOptions.mockResolvedValue({
     providers: [
@@ -66,17 +77,24 @@ beforeEach(() => {
   setEnvVar.mockResolvedValue({ ok: true })
   getHermesConfigRecord.mockResolvedValue({ agent: { reasoning_effort: 'medium', service_tier: 'normal' } })
   saveHermesConfig.mockResolvedValue({ ok: true })
+  getMoaModels.mockResolvedValue(null)
+  saveMoaModels.mockResolvedValue({})
 })
 
 afterEach(() => {
   cleanup()
+  queryClient.clear()
   vi.clearAllMocks()
 })
 
 async function renderModelSettings() {
   const { ModelSettings } = await import('./model-settings')
 
-  return render(<ModelSettings />)
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <ModelSettings />
+    </QueryClientProvider>
+  )
 }
 
 describe('ModelSettings', () => {
@@ -92,10 +110,9 @@ describe('ModelSettings', () => {
     fireEvent.click(triggers[0])
 
     // "Nous" shows in both the trigger and the open list; the unconfigured
-    // provider + its setup hint are the unique signal of the full universe.
+    // provider is the unique signal of the full universe.
     expect((await screen.findAllByText('Nous')).length).toBeGreaterThan(0)
     expect(await screen.findByText(/DeepSeek/)).toBeTruthy()
-    expect(await screen.findByText(/set up/)).toBeTruthy()
   })
 
   it('activates an unconfigured api_key provider inline by saving its key', async () => {
