@@ -3881,6 +3881,155 @@ def test_session_compress_uses_compress_helper(monkeypatch):
     emit.assert_any_call("status.update", "sid", {"kind": "status", "text": "ready"})
 
 
+def test_slash_exec_compress_does_not_run_the_throwaway_worker(monkeypatch):
+    """Regression: desktop/TUI /compress is routed through slash.exec, which used
+    to run it BOTH in the throwaway slash worker (empty conversation_history, so
+    cli._manual_compress emits a bogus "(._.) Not enough conversation to compress")
+    AND on the live agent via _mirror_slash_side_effects. The two were returned as
+    {output, warning} and the client stitched them into one self-contradictory
+    reply. /compress must run ONLY the live-agent path and return a single coherent
+    output — never touching the worker.
+    """
+
+    class _BogusWorker:
+        def __init__(self):
+            self.called = False
+
+        def run(self, cmd):
+            self.called = True
+            return (
+                "(._.) Not enough conversation to compress "
+                "(need at least 4 messages)."
+            )
+
+    def _fake_compress(session, focus_topic=None, **_kw):
+        # Simulate a real compression on the live history: drop the head. Returns
+        # (removed, usage) like the real _compress_session_history; the "4 → 2"
+        # output derives from the before/after history length.
+        with session["history_lock"]:
+            session["history"] = session["history"][-2:]
+        return 2, {}
+
+    monkeypatch.setattr(server, "_compress_session_history", _fake_compress)
+    monkeypatch.setattr(server, "_session_info", lambda _agent, *a: {"model": "x"})
+    monkeypatch.setattr(server, "_emit", lambda *a, **kw: None)
+    monkeypatch.setattr(server, "_status_update", lambda *a, **kw: None)
+    monkeypatch.setattr(server, "_sync_session_key_after_compress", lambda *a, **kw: None)
+
+    worker = _BogusWorker()
+    agent = types.SimpleNamespace()
+    server._sessions["sid"] = _session(
+        agent=agent,
+        history=[
+            {"role": "user", "content": "one"},
+            {"role": "assistant", "content": "two"},
+            {"role": "user", "content": "three"},
+            {"role": "assistant", "content": "four"},
+        ],
+        slash_worker=worker,
+    )
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "slash.exec",
+                "params": {"command": "compress", "session_id": "sid"},
+            }
+        )
+    finally:
+        server._sessions.pop("sid", None)
+
+    out = resp["result"]["output"]
+    # The throwaway worker must never run /compress (empty-history guard is bogus).
+    assert worker.called is False
+    # No empty-history guard leak, and no split output/warning contradiction.
+    assert "Not enough conversation" not in out
+    assert "warning" not in resp["result"]
+    # The live-agent compression summary is the single, primary output.
+    assert "Compressed: 4 → 2 messages" in out
+
+
+def test_command_dispatch_compress_runs_live_compression(monkeypatch):
+    """Regression: the desktop/web clients call slash.exec for /compress and fall
+    back to command.dispatch when slash.exec throws (e.g. a slow compression trips
+    the client RPC timeout). command.dispatch had no compress branch, so the
+    fallback dead-ended in a bogus "not a quick/plugin/skill command: compress".
+    command.dispatch must run the same live-agent compression and return it as an
+    exec directive — never a 4018.
+    """
+
+    def _fake_compress(session, focus_topic=None, **_kw):
+        with session["history_lock"]:
+            session["history"] = session["history"][-2:]
+        return 2, {}
+
+    monkeypatch.setattr(server, "_load_cfg", lambda: {"quick_commands": {}})
+    monkeypatch.setattr(server, "_compress_session_history", _fake_compress)
+    monkeypatch.setattr(server, "_session_info", lambda _agent, *a: {"model": "x"})
+    monkeypatch.setattr(server, "_emit", lambda *a, **kw: None)
+    monkeypatch.setattr(server, "_status_update", lambda *a, **kw: None)
+    monkeypatch.setattr(server, "_sync_session_key_after_compress", lambda *a, **kw: None)
+
+    server._sessions["sid"] = _session(
+        agent=types.SimpleNamespace(),
+        history=[
+            {"role": "user", "content": "one"},
+            {"role": "assistant", "content": "two"},
+            {"role": "user", "content": "three"},
+            {"role": "assistant", "content": "four"},
+        ],
+    )
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "command.dispatch",
+                "params": {"name": "compress", "session_id": "sid"},
+            }
+        )
+    finally:
+        server._sessions.pop("sid", None)
+
+    # No 4018 dead-end; a coherent exec directive carrying the compression summary.
+    assert "error" not in resp
+    assert resp["result"]["type"] == "exec"
+    out = resp["result"]["output"]
+    assert "not a quick/plugin/skill command" not in out
+    assert "Compressed: 4 → 2 messages" in out
+
+
+def test_compress_session_history_forces_manual_compress(monkeypatch):
+    """A user-initiated /compress must call _compress_context with force=True,
+    matching the CLI's _manual_compress (cli.py). Without it, a manual compress
+    silently no-ops for the summary-failure cooldown window left by a prior
+    auto-compaction abort. Auto-compaction is a separate path and stays
+    force=False.
+    """
+    captured = {}
+
+    class _Agent:
+        def _compress_context(
+            self, history, system_message, approx_tokens=None, focus_topic=None, force=False
+        ):
+            captured["force"] = force
+            return history[-2:], None
+
+    monkeypatch.setattr(server, "_get_usage", lambda _agent: {})
+    session = _session(
+        agent=_Agent(),
+        history=[
+            {"role": "user", "content": "one"},
+            {"role": "assistant", "content": "two"},
+            {"role": "user", "content": "three"},
+            {"role": "assistant", "content": "four"},
+        ],
+    )
+
+    server._compress_session_history(session, None, approx_tokens=1000)
+
+    assert captured["force"] is True
+
+
 def test_session_compress_syncs_session_key_after_rotation(monkeypatch):
     """When AIAgent._compress_context rotates session_id (compression split),
     the gateway session_key must follow so subsequent approval routing,
