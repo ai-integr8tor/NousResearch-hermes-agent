@@ -527,7 +527,11 @@ async def _plugin_api_runtime_gate(request: Request, call_next):
                         disabled_set = set()
                     # Determine plugin source.  Check the cached plugin list;
                     # if not found, assume user plugin (safe default — blocks).
-                    plugins = _get_dashboard_plugins()
+                    plugins = (
+                        []
+                        if _effective_dashboard_mode() == "lightweight"
+                        else _get_dashboard_plugins()
+                    )
                     plugin = next(
                         (p for p in plugins if p.get("name") == plugin_name),
                         None,
@@ -653,6 +657,11 @@ _SCHEMA_OVERRIDES: Dict[str, Dict[str, Any]] = {
         "description": "Web dashboard visual theme",
         "options": ["default", "midnight", "ember", "mono", "cyberpunk", "rose"],
     },
+    "dashboard.mode": {
+        "type": "select",
+        "description": "Dashboard feature surface",
+        "options": ["full", "lightweight"],
+    },
     "display.resume_display": {
         "type": "select",
         "description": "How resumed sessions display history",
@@ -753,6 +762,32 @@ _CATEGORY_ORDER = [
     "memory", "compression", "security", "browser", "voice",
     "tts", "stt", "logging", "discord", "auxiliary",
 ]
+
+_DASHBOARD_MODE_OVERRIDE: Optional[str] = None
+
+
+def _normalize_dashboard_mode(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    if raw in {"light", "legacy", "minimal", "lite", "lightweight"}:
+        return "lightweight"
+    return "full"
+
+
+def set_dashboard_mode_override(mode: Optional[str]) -> None:
+    """Set a process-local dashboard mode override used by CLI flags."""
+    global _DASHBOARD_MODE_OVERRIDE
+    _DASHBOARD_MODE_OVERRIDE = _normalize_dashboard_mode(mode) if mode else None
+
+
+def _effective_dashboard_mode(config: Optional[Dict[str, Any]] = None) -> str:
+    if _DASHBOARD_MODE_OVERRIDE:
+        return _DASHBOARD_MODE_OVERRIDE
+    if config is None:
+        try:
+            config = load_config()
+        except Exception:
+            config = {}
+    return _normalize_dashboard_mode(cfg_get(config, "dashboard", "mode", default="full"))
 
 
 def _infer_type(value: Any) -> str:
@@ -4138,6 +4173,7 @@ async def update_memory_provider_config(name: str, body: MemoryProviderConfigUpd
 async def get_config(profile: Optional[str] = None):
     with _profile_scope(profile):
         config = _normalize_config_for_web(load_config())
+    config.setdefault("dashboard", {})["mode"] = _effective_dashboard_mode(config)
     # Strip internal keys that the frontend shouldn't see or send back
     return {k: v for k, v in config.items() if not k.startswith("_")}
 
@@ -14454,6 +14490,8 @@ def _get_dashboard_plugins(force_rescan: bool = False) -> list:
 @app.get("/api/dashboard/plugins")
 async def get_dashboard_plugins():
     """Return discovered dashboard plugins (excludes user-hidden and non-enabled ones)."""
+    if _effective_dashboard_mode() == "lightweight":
+        return []
     plugins = _get_dashboard_plugins()
     # Read user's hidden plugins list from config.
     config = load_config()
@@ -14494,6 +14532,8 @@ async def get_dashboard_plugins():
 @app.get("/api/dashboard/plugins/rescan")
 async def rescan_dashboard_plugins():
     """Force re-scan of dashboard plugins."""
+    if _effective_dashboard_mode() == "lightweight":
+        return {"ok": True, "count": 0}
     plugins = _get_dashboard_plugins(force_rescan=True)
     return {"ok": True, "count": len(plugins)}
 

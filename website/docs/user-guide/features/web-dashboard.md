@@ -27,6 +27,7 @@ This starts a local web server and opens `http://127.0.0.1:9119` in your browser
 | `--port` | `9119` | Port to run the web server on |
 | `--host` | `127.0.0.1` | Bind address |
 | `--no-open` | — | Don't auto-open the browser |
+| `--light` | off | Start a lightweight dashboard with sessions, logs, files, chat, config, keys, docs, and sidebar status only |
 | `--insecure` | off | Allow binding to non-localhost hosts (**DANGEROUS** — exposes API keys on the network; pair with a firewall and strong auth) |
 | `--isolated` | off | When launched from a named profile (`worker dashboard`), run a dedicated per-profile server instead of routing to the machine dashboard |
 
@@ -39,7 +40,33 @@ hermes dashboard --host 0.0.0.0
 
 # Start without opening browser
 hermes dashboard --no-open
+
+# Lightweight mode for small self-hosted servers
+hermes dashboard --light --port 9119
 ```
+
+### Lightweight mode
+
+Use lightweight mode when the dashboard shares a small host with memory-hungry
+workloads and you only need basic monitoring/configuration. It hides admin-heavy
+surfaces such as MCP, Channels, Webhooks, Plugins, Cron, Models, Analytics,
+Profiles, and System, disables dashboard plugin loading, and skips the
+dashboard's background MCP discovery.
+
+You can enable it for one launch:
+
+```bash
+hermes dashboard --light
+```
+
+Or persist it in `~/.hermes/config.yaml`:
+
+```yaml
+dashboard:
+  mode: lightweight
+```
+
+Set `dashboard.mode: full` or omit the field for the complete admin dashboard.
 
 ## Managing multiple profiles
 

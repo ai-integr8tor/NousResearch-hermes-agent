@@ -1864,6 +1864,9 @@ DEFAULT_CONFIG = {
 
     # Web dashboard settings
     "dashboard": {
+        # full: complete admin dashboard. lightweight: minimal session/status
+        # surface for small self-hosted boxes that need lower idle memory.
+        "mode": "full",
         "theme": "default",  # Dashboard visual theme: "default", "midnight", "ember", "mono", "cyberpunk", "rose"
         # Hide the token/cost analytics surfaces (Analytics page, token bars and
         # cost figures on the Models page) by default.  The numbers shown there

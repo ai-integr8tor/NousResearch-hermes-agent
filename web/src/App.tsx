@@ -99,6 +99,12 @@ import { PluginPage, PluginSlot, usePlugins } from "@/plugins";
 import type { PluginManifest } from "@/plugins";
 import { useTheme } from "@/themes";
 import { isDashboardEmbeddedChatEnabled } from "@/lib/dashboard-flags";
+import {
+  filterDashboardItemsForMode,
+  filterDashboardRecordForMode,
+  normalizeDashboardMode,
+  type DashboardMode,
+} from "@/lib/dashboard-mode";
 import { api } from "@/lib/api";
 import type { StatusResponse, UpdateCheckResponse } from "@/lib/api";
 
@@ -120,6 +126,8 @@ const CHAT_NAV_ITEM: NavItem = {
   label: "Chat",
   icon: Terminal,
 };
+
+const EMPTY_PLUGIN_MANIFESTS: PluginManifest[] = [];
 
 /**
  * Built-in routes except /chat.  Chat is rendered persistently (outside
@@ -384,17 +392,31 @@ export default function App() {
   // the flag is off — see AnalyticsPage), but hiding the nav entry avoids
   // surfacing misleading token/cost numbers in the sidebar.  Default off.
   const [showTokenAnalytics, setShowTokenAnalytics] = useState(false);
+  const [dashboardMode, setDashboardMode] = useState<DashboardMode>("full");
+  const lightweightDashboard = dashboardMode === "lightweight";
+  const renderPluginSlots = !lightweightDashboard;
   useEffect(() => {
     api
       .getConfig()
       .then((cfg) => {
         const dash = (cfg?.dashboard ?? {}) as {
           show_token_analytics?: unknown;
+          mode?: unknown;
         };
         setShowTokenAnalytics(dash.show_token_analytics === true);
+        setDashboardMode(normalizeDashboardMode(dash.mode));
       })
-      .catch(() => setShowTokenAnalytics(false));
+      .catch(() => {
+        setShowTokenAnalytics(false);
+        setDashboardMode("full");
+      });
   }, []);
+
+  const activeManifests = useMemo(
+    () => (lightweightDashboard ? EMPTY_PLUGIN_MANIFESTS : manifests),
+    [lightweightDashboard, manifests],
+  );
+  const activePluginsLoading = lightweightDashboard ? false : pluginsLoading;
 
   // A plugin can replace the built-in /chat page via `tab.override: "/chat"`
   // in its manifest.  When one does, `buildRoutes` already swaps the route
@@ -414,44 +436,49 @@ export default function App() {
   // plugin-load window (typically <50ms, worst case 2s safety timeout)
   // is the cheaper trade-off.
   const chatOverriddenByPlugin = useMemo(
-    () => manifests.some((m) => m.tab.override === "/chat"),
-    [manifests],
+    () => activeManifests.some((m) => m.tab.override === "/chat"),
+    [activeManifests],
   );
 
   const builtinRoutes = useMemo(
-    () => ({
-      ...BUILTIN_ROUTES_CORE,
-      ...(embeddedChat ? { "/chat": ChatRouteSink } : {}),
-    }),
-    [embeddedChat],
+    () =>
+      filterDashboardRecordForMode(
+        {
+          ...BUILTIN_ROUTES_CORE,
+          ...(embeddedChat ? { "/chat": ChatRouteSink } : {}),
+        },
+        dashboardMode,
+      ),
+    [dashboardMode, embeddedChat],
   );
 
   const builtinNav = useMemo(() => {
     const base = embeddedChat
       ? [CHAT_NAV_ITEM, ...BUILTIN_NAV_REST]
       : BUILTIN_NAV_REST;
-    return showTokenAnalytics
+    const analyticsFiltered = showTokenAnalytics
       ? base
       : base.filter((n) => n.path !== "/analytics");
-  }, [embeddedChat, showTokenAnalytics]);
+    return filterDashboardItemsForMode(analyticsFiltered, dashboardMode);
+  }, [dashboardMode, embeddedChat, showTokenAnalytics]);
 
   const sidebarNav = useMemo(
-    () => partitionSidebarNav(builtinNav, manifests),
-    [builtinNav, manifests],
+    () => partitionSidebarNav(builtinNav, activeManifests),
+    [activeManifests, builtinNav],
   );
   const routes = useMemo(
-    () => buildRoutes(builtinRoutes, manifests),
-    [builtinRoutes, manifests],
+    () => buildRoutes(builtinRoutes, activeManifests),
+    [activeManifests, builtinRoutes],
   );
   const pluginTabMeta = useMemo(
     () =>
-      manifests
+      activeManifests
         .filter((m) => !m.tab.hidden)
         .map((m) => ({
           path: m.tab.override ?? m.tab.path,
           label: m.label,
         })),
-    [manifests],
+    [activeManifests],
   );
 
   const layoutVariant = theme.layoutVariant ?? "standard";
@@ -491,7 +518,7 @@ export default function App() {
         aria-hidden
         className="pointer-events-none fixed inset-0 z-0"
       >
-        <PluginSlot name="backdrop" />
+        {renderPluginSlots && <PluginSlot name="backdrop" />}
       </div>
 
       <header
@@ -536,7 +563,7 @@ export default function App() {
         />
       )}
 
-      <PluginSlot name="header-banner" />
+      {renderPluginSlots && <PluginSlot name="header-banner" />}
       <ProfileScopeBanner />
 
       <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden pt-14 lg:pt-0">
@@ -573,7 +600,7 @@ export default function App() {
                   collapsed && "lg:hidden",
                 )}
               >
-                <PluginSlot name="header-left" />
+                {renderPluginSlots && <PluginSlot name="header-left" />}
 
                 <Typography className="font-bold text-[1.125rem] leading-[0.95] tracking-[0.0525rem] text-midground uppercase">
                   Hermes
@@ -684,7 +711,7 @@ export default function App() {
                   isDesktopCollapsed && "lg:flex-col lg:items-start",
                 )}
               >
-                <PluginSlot name="header-right" />
+                {renderPluginSlots && <PluginSlot name="header-right" />}
 
                 <SidebarIconWithTooltip
                   collapsed={isDesktopCollapsed}
@@ -726,7 +753,7 @@ export default function App() {
                 isDocsRoute && "min-h-0 flex-1",
               )}
             >
-              <PluginSlot name="pre-main" />
+              {renderPluginSlots && <PluginSlot name="pre-main" />}
               <div
                 className={cn(
                   "w-full min-w-0",
@@ -744,7 +771,7 @@ export default function App() {
                     <Route
                       path="*"
                       element={
-                        <UnknownRouteFallback pluginsLoading={pluginsLoading} />
+                        <UnknownRouteFallback pluginsLoading={activePluginsLoading} />
                       }
                     />
                   </Routes>
@@ -778,13 +805,13 @@ export default function App() {
                     </div>
                   ))}
               </div>
-              <PluginSlot name="post-main" />
+              {renderPluginSlots && <PluginSlot name="post-main" />}
             </div>
           </PageHeaderProvider>
         </div>
       </div>
 
-      <PluginSlot name="overlay" />
+      {renderPluginSlots && <PluginSlot name="overlay" />}
     </div>
     </ProfileProvider>
   );
