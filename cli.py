@@ -12642,15 +12642,16 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                     except queue.Empty:
                         break
                 combined = "\n".join(all_parts)
-                n = len(all_parts)
                 preview = combined[:50] + ("..." if len(combined) > 50 else "")
-                if n > 1:
-                    print(f"\n⚡ Sending {n} messages after interrupt: '{preview}'")
-                else:
-                    print(f"\n⚡ Sending after interrupt: '{preview}'")
+                n = len(all_parts)
+                # Skip the duplicate post-interrupt status banner when this turn
+                # already surfaced the interrupt indicator.
+                if not _interrupted_this_turn:
+                    if n > 1:
+                        print(f"\n⚡ Sending {n} messages after interrupt: '{preview}'")
+                    else:
+                        print(f"\n⚡ Sending after interrupt: '{preview}'")
                 self._pending_input.put(combined)
-
-            # If a /steer was left over (agent finished before another tool
             # batch could absorb it), deliver it as the next user turn.
             _leftover_steer = result.get("pending_steer") if result else None
             if _leftover_steer and hasattr(self, '_pending_input'):
