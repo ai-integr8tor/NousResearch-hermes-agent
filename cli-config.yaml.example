@@ -1427,3 +1427,16 @@ updates:
 #     binary_path: ""                               # "" = resolve op via PATH; else absolute path
 #     cache_ttl_seconds: 300                        # 0 disables BOTH cache layers
 #     override_existing: true                       # resolved values win over existing env
+#
+#   # ---- Proton Pass (pass-cli) ---------------------------------------------
+#   protonpass:
+#     enabled: false
+#     service_token_env: PROTON_PASS_PERSONAL_ACCESS_TOKEN  # bootstrap token
+#     vault: ""                                            # MODE A bulk vault list
+#     # MODE B: map env-var names to pass://SHARE/ITEM/FIELD references.
+#     env:
+#       OPENROUTER_API_KEY: "pass://SHARE_ID/ITEM_ID/api_key"
+#       ANTHROPIC_API_KEY: "pass://SHARE_ID/ITEM_ID/api_key"
+#     cache_ttl_seconds: 300                               # 0 disables BOTH cache layers
+#     override_existing: false                             # .env/shell wins by default
+#     auto_install: true                                   # lazy-download verified pass-cli

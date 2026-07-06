@@ -3113,6 +3113,26 @@ DEFAULT_CONFIG = {
             # `hermes secrets bitwarden setup`.
             "server_url": "",
         },
+        "protonpass": {
+            # Master switch.  When false, pass-cli is never invoked.
+            "enabled": False,
+            # Name of the env var holding the Proton Pass service token.
+            # Prefer a scoped agent token over a full personal-access token.
+            "service_token_env": "PROTON_PASS_PERSONAL_ACCESS_TOKEN",
+            # MODE A: optional vault name to bulk-list.  MODE B env refs below
+            # are preferred and work with scoped agent tokens.
+            "vault": "",
+            # MODE B: map env-var names to pass://SHARE/ITEM/FIELD references.
+            "env": {},
+            # Seconds to cache resolved values in-process and on disk.  0
+            # disables both cache layers.
+            "cache_ttl_seconds": 300,
+            # Default false so existing .env / shell values keep winning unless
+            # the user explicitly makes Proton Pass the source of truth.
+            "override_existing": False,
+            # Auto-download the pinned, SHA-256-verified pass-cli binary.
+            "auto_install": True,
+        },
         "onepassword": {
             # Master switch.  When false, the op CLI is never invoked —
             # same as not having this section at all.
@@ -3815,6 +3835,18 @@ OPTIONAL_ENV_VARS = {
         "url": "https://github.com/settings/tokens",
         "password": True,
         "category": "tool",
+    },
+
+    # ── Secret sources (bootstrap tokens for the secrets.* providers) ──
+    # These are surfaced in `hermes setup`/`config` like other provider keys,
+    # but the canonical setup path is `hermes secrets <provider> setup`.
+    "PROTON_PASS_PERSONAL_ACCESS_TOKEN": {
+        "description": "Proton Pass personal access token (bootstrap token for the secrets.protonpass source)",
+        "prompt": "Proton Pass personal access token",
+        "url": "https://proton.me/support/pass-cli",
+        "password": True,
+        "category": "tool",
+        "advanced": True,
     },
 
     # ── Bundled skills (opt-in: only needed if the user uses that skill) ──

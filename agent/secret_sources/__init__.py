@@ -21,13 +21,15 @@ Currently bundled:
   - ``onepassword`` — 1Password ``op://`` secret references (`op` CLI).
     See ``agent.secret_sources.onepassword`` for the integration and
     ``hermes_cli.onepassword_secrets_cli`` for the user-facing commands.
+  - ``protonpass`` — Proton Pass ``pass://`` references (`pass-cli`).
+    See ``agent.secret_sources.protonpass`` for the integration and
+    ``hermes_cli.protonpass_secrets_cli`` for the user-facing commands.
 
-The bundled set is deliberately closed (policy mirrors memory
-providers): new third-party secret managers ship as standalone plugin
-repos that subclass ``SecretSource`` and register through
-``PluginContext.register_secret_source()`` — they are NOT added to this
-package.  A generic ``command`` source is a possible future exception;
-OS keystores (Keychain/DPAPI/libsecret) are under discussion.
+The bundled set is deliberately small (policy mirrors memory providers):
+new third-party secret managers should ship as standalone plugin repos
+that subclass ``SecretSource`` and register through
+``PluginContext.register_secret_source()`` unless maintainers explicitly
+accept them as core sources.
 """
 
 from agent.secret_sources.base import (  # noqa: F401

@@ -12787,15 +12787,15 @@ def main():
     fallback_parser.set_defaults(func=cmd_fallback)
 
     # =========================================================================
-    # secrets command — external secret managers (Bitwarden, 1Password)
+    # secrets command — external secret managers (Bitwarden, 1Password, Proton Pass)
     # =========================================================================
     secrets_parser = subparsers.add_parser(
         "secrets",
-        help="Manage external secret sources (Bitwarden, 1Password)",
+        help="Manage external secret sources (Bitwarden, 1Password, Proton Pass)",
         description=(
             "Pull API keys from an external secret manager at process startup "
             "instead of storing them in ~/.hermes/.env.  Supports Bitwarden "
-            "Secrets Manager and 1Password.  See: "
+            "Secrets Manager, 1Password, and Proton Pass.  See: "
             "https://hermes-agent.nousresearch.com/docs/user-guide/secrets/"
         ),
     )
@@ -12813,20 +12813,31 @@ def main():
         help="1Password (op:// references) integration",
     )
 
+    secrets_pp = secrets_subparsers.add_parser(
+        "protonpass",
+        aliases=["pp"],
+        help="Proton Pass (pass:// references) integration",
+    )
+
     # Lazy import — only pays for itself when this subcommand is actually used.
+    from hermes_cli import protonpass_secrets_cli as _protonpass_cli
     from hermes_cli import secrets_cli as _secrets_cli
     from hermes_cli import onepassword_secrets_cli as _op_secrets_cli
 
     _secrets_cli.register_cli(secrets_bw)
     _op_secrets_cli.register_cli(secrets_op)
+    _protonpass_cli.register_protonpass_cli(secrets_pp)
 
     def _dispatch_secrets(args):  # noqa: ANN001
         sub = getattr(args, "secrets_command", None)
         bw_sub = getattr(args, "secrets_bw_command", None)
         op_sub = getattr(args, "secrets_op_command", None)
+        pp_sub = getattr(args, "secrets_pp_command", None)
         if sub in ("bitwarden", "bw") and bw_sub is not None:
             return args.func(args)
         if sub in ("onepassword", "op", "1password") and op_sub is not None:
+            return args.func(args)
+        if sub in ("protonpass", "pp") and pp_sub is not None:
             return args.func(args)
         secrets_parser.print_help()
         return 0

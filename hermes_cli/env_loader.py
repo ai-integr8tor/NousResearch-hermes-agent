@@ -308,7 +308,13 @@ def _apply_external_secret_sources(home_path: Path) -> None:
     Runs AFTER dotenv loads so .env values are visible (sources use them
     to locate bootstrap tokens) but BEFORE the rest of Hermes reads
     ``os.environ`` for credentials.  Any failure here is logged and
-    swallowed — external secret sources must never block startup.
+    swallowed — external secret sources must NEVER block startup.
+
+    The registry processes every enabled source in one fail-open pass:
+    config coercion, ``fetch()`` invocation, result recording, precedence,
+    and environment application all happen behind its public ``apply_all``
+    contract.  A bad source config or backend failure yields a warning and
+    continues to the next source instead of crashing startup.
 
     The heavy lifting (source ordering, mapped-beats-bulk precedence,
     first-claim-wins conflict handling, override semantics, provenance)
@@ -393,4 +399,12 @@ def _load_secrets_config(home_path: Path) -> dict:
             data = fast_safe_load(f) or {}
     except Exception:  # noqa: BLE001
         return {}
-    return data.get("secrets") or {}
+    secrets = data.get("secrets")
+    # Normalize ONCE at the config boundary: a non-Mapping `secrets:` value (e.g.
+    # `secrets: true`) would otherwise reach the provider loop, where every
+    # ``secrets.get(cfg_key)`` raises ``'bool' object has no attribute 'get'``
+    # and prints a per-source "skipped" warning ONCE PER SOURCE.  Coercing to
+    # ``{}`` here simply disables all sources (nothing to read) with ZERO noise.
+    if not isinstance(secrets, dict):
+        return {}
+    return secrets

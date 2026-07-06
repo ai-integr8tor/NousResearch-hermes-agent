@@ -3,8 +3,7 @@
 Covers: registration gating (API version, name/scheme uniqueness, shape),
 apply_all precedence (mapped beats bulk, first-wins, override_existing,
 protected vars), conflict surfacing, timeout enforcement, provenance,
-and Bitwarden's SecretSource adapter — plus the conformance kit run
-against the bundled Bitwarden source.
+and the bundled SecretSource adapters.
 """
 
 from __future__ import annotations
@@ -30,6 +29,7 @@ from agent.secret_sources.base import (  # noqa: E402
 )
 from agent.secret_sources import registry as reg  # noqa: E402
 from agent.secret_sources.bitwarden import BitwardenSource  # noqa: E402
+from agent.secret_sources.protonpass import ProtonPassSource  # noqa: E402
 from tests.secret_sources.conformance import SecretSourceConformance  # noqa: E402
 
 
@@ -598,3 +598,145 @@ class TestOnePasswordConformance(SecretSourceConformance):
         monkeypatch.setattr(op, "find_op", lambda *_a, **_kw: None)
         monkeypatch.delenv("OP_SERVICE_ACCOUNT_TOKEN", raising=False)
         return op.OnePasswordSource()
+
+
+# ---------------------------------------------------------------------------
+# Proton Pass adapter
+# ---------------------------------------------------------------------------
+
+
+class TestProtonPassSource:
+    def test_identity(self):
+        src = ProtonPassSource()
+        assert src.name == "protonpass"
+        assert src.shape == "mapped"
+        assert src.scheme == "pass"
+
+    def test_override_existing_defaults_false(self):
+        src = ProtonPassSource()
+        assert src.override_existing({}) is False
+        assert src.override_existing({"override_existing": True}) is True
+
+    def test_protected_vars_include_default_and_custom_token_env(self):
+        src = ProtonPassSource()
+        assert src.protected_env_vars({}) == frozenset(
+            {"PROTON_PASS_PERSONAL_ACCESS_TOKEN"}
+        )
+        assert src.protected_env_vars(
+            {"service_token_env": "MY_PROTON_TOKEN"}
+        ) == frozenset({"PROTON_PASS_PERSONAL_ACCESS_TOKEN", "MY_PROTON_TOKEN"})
+
+    def test_fetch_missing_token_not_configured(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("PROTON_PASS_PERSONAL_ACCESS_TOKEN", raising=False)
+        result = ProtonPassSource().fetch(
+            {"enabled": True, "env": {"K": "pass://S/I/F"}},
+            tmp_path,
+        )
+        assert result.error_kind is ErrorKind.NOT_CONFIGURED
+        assert "PROTON_PASS_PERSONAL_ACCESS_TOKEN" in result.error
+
+    def test_fetch_missing_target_not_configured(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("PROTON_PASS_PERSONAL_ACCESS_TOKEN", "pst_test-token")
+        result = ProtonPassSource().fetch({"enabled": True}, tmp_path)
+        assert result.error_kind is ErrorKind.NOT_CONFIGURED
+        assert "neither a vault" in result.error
+
+    def test_fetch_missing_binary(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("PROTON_PASS_PERSONAL_ACCESS_TOKEN", "pst_test-token")
+        import agent.secret_sources.protonpass as pp
+
+        monkeypatch.setattr(pp, "find_pass_cli", lambda **_kw: None)
+        result = ProtonPassSource().fetch(
+            {"enabled": True, "env": {"K": "pass://S/I/F"}},
+            tmp_path,
+        )
+        assert result.error_kind is ErrorKind.BINARY_MISSING
+
+    def test_fetch_delegates_and_passes_config(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("PROTON_PASS_PERSONAL_ACCESS_TOKEN", "pst_test-token")
+        import agent.secret_sources.protonpass as pp
+
+        monkeypatch.setattr(pp, "find_pass_cli", lambda **_kw: Path("/fake/pass-cli"))
+        captured = {}
+
+        def _fake_fetch(**kwargs):
+            captured.update(kwargs)
+            return {"K": "v"}, ["warn"]
+
+        monkeypatch.setattr(pp, "fetch_protonpass_secrets", _fake_fetch)
+        result = ProtonPassSource().fetch(
+            {
+                "enabled": True,
+                "vault": "Main",
+                "env": {"K": "pass://S/I/F"},
+                "cache_ttl_seconds": "not-a-number",
+            },
+            tmp_path,
+        )
+        assert result.ok and result.secrets == {"K": "v"}
+        assert result.warnings == ["warn"]
+        assert captured["vault"] == "Main"
+        assert captured["env_refs"] == {"K": "pass://S/I/F"}
+        assert captured["cache_ttl_seconds"] == 300.0
+        assert captured["bootstrap_env"] == "PROTON_PASS_PERSONAL_ACCESS_TOKEN"
+        assert captured["home_path"] == tmp_path
+
+    def test_runtime_error_is_redacted_and_classified(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("PROTON_PASS_PERSONAL_ACCESS_TOKEN", "pst_secret-token")
+        import agent.secret_sources.protonpass as pp
+
+        monkeypatch.setattr(pp, "find_pass_cli", lambda **_kw: Path("/fake/pass-cli"))
+
+        def _fail(**_kwargs):
+            raise RuntimeError("login failed for pst_secret-token")
+
+        monkeypatch.setattr(pp, "fetch_protonpass_secrets", _fail)
+        result = ProtonPassSource().fetch(
+            {"enabled": True, "env": {"K": "pass://S/I/F"}},
+            tmp_path,
+        )
+        assert result.error_kind is ErrorKind.AUTH_FAILED
+        assert "pst_secret-token" not in result.error
+        assert "***REDACTED***" in result.error
+
+    def test_orchestrator_protects_bootstrap_token(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("PROTON_PASS_PERSONAL_ACCESS_TOKEN", "pst_real-token")
+        import agent.secret_sources.protonpass as pp
+
+        monkeypatch.setattr(pp, "find_pass_cli", lambda **_kw: Path("/fake/pass-cli"))
+        monkeypatch.setattr(
+            pp,
+            "fetch_protonpass_secrets",
+            lambda **_kw: (
+                {
+                    "ANTHROPIC_API_KEY": "sk-ant",
+                    "PROTON_PASS_PERSONAL_ACCESS_TOKEN": "pst_from-vault",
+                },
+                [],
+            ),
+        )
+        reg.register_source(ProtonPassSource())
+        env = {"PROTON_PASS_PERSONAL_ACCESS_TOKEN": "pst_real-token"}
+        report = reg.apply_all(
+            {
+                "protonpass": {
+                    "enabled": True,
+                    "env": {"ANTHROPIC_API_KEY": "pass://S/I/F"},
+                }
+            },
+            tmp_path,
+            environ=env,
+        )
+        assert env["ANTHROPIC_API_KEY"] == "sk-ant"
+        assert env["PROTON_PASS_PERSONAL_ACCESS_TOKEN"] == "pst_real-token"
+        assert report.provenance["ANTHROPIC_API_KEY"].source == "protonpass"
+
+
+class TestProtonPassConformance(SecretSourceConformance):
+    @pytest.fixture
+    def source(self, monkeypatch):
+        import agent.secret_sources.protonpass as pp
+
+        monkeypatch.setattr(pp, "find_pass_cli", lambda **_kw: None)
+        monkeypatch.delenv("PROTON_PASS_PERSONAL_ACCESS_TOKEN", raising=False)
+        return ProtonPassSource()
