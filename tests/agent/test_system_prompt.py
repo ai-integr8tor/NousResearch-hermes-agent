@@ -99,3 +99,47 @@ class TestCodingContextBlock:
         monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
         agent = _make_agent(valid_tool_names=[], platform="cli")
         assert "coding agent" not in _stable_prompt(agent)
+
+
+class TestBlockedSoulFallback:
+    def test_blocked_soul_still_falls_back_to_default_identity(self):
+        agent = _make_agent(load_soul_identity=True, skip_context_files=True)
+
+        with (
+            patch(
+                "run_agent.load_soul_md",
+                return_value=(
+                    "[BLOCKED: SOUL.md contained potential prompt injection "
+                    "(role-hijack). Content not loaded.]"
+                ),
+            ),
+            patch("run_agent.build_nous_subscription_prompt", return_value=""),
+            patch("run_agent.build_environment_hints", return_value=""),
+            patch("run_agent.build_context_files_prompt", return_value=""),
+        ):
+            stable = build_system_prompt_parts(agent)["stable"]
+
+        from agent.prompt_builder import DEFAULT_AGENT_IDENTITY
+
+        assert DEFAULT_AGENT_IDENTITY in stable
+
+    def test_blocked_soul_notice_is_not_duplicated_in_normal_path(self):
+        agent = _make_agent(load_soul_identity=True, skip_context_files=False)
+        blocked = (
+            "[BLOCKED: SOUL.md contained potential prompt injection "
+            "(role-hijack). Content not loaded.]"
+        )
+
+        with (
+            patch("run_agent.load_soul_md", return_value=blocked),
+            patch("run_agent.build_nous_subscription_prompt", return_value=""),
+            patch("run_agent.build_environment_hints", return_value=""),
+        ):
+            parts = build_system_prompt_parts(agent)
+
+        from agent.prompt_builder import DEFAULT_AGENT_IDENTITY
+
+        stable = parts["stable"]
+        context = parts["context"]
+        assert DEFAULT_AGENT_IDENTITY in stable
+        assert stable.count("[BLOCKED:") + context.count("[BLOCKED:") == 1
