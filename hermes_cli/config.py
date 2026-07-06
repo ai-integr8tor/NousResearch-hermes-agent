@@ -3577,6 +3577,22 @@ OPTIONAL_ENV_VARS = {
         "category": "provider",
         "advanced": True,
     },
+    "VENICE_API_KEY": {
+        "description": "Venice AI API key (OpenAI-compatible inference — privacy-first, optional E2EE models)",
+        "prompt": "Venice AI API key",
+        "url": "https://venice.ai/",
+        "password": True,
+        "category": "provider",
+        "advanced": True,
+    },
+    "VENICE_BASE_URL": {
+        "description": "Venice AI base URL override (default: https://api.venice.ai/api/v1)",
+        "prompt": "Venice base URL (leave empty for default)",
+        "url": None,
+        "password": False,
+        "category": "provider",
+        "advanced": True,
+    },
     "XIAOMI_API_KEY": {
         "description": "Xiaomi MiMo API key for MiMo models (mimo-v2.5-pro, mimo-v2.5, mimo-v2-pro, mimo-v2-omni, mimo-v2-flash)",
         "prompt": "Xiaomi MiMo API Key",
