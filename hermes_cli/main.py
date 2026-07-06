@@ -3133,6 +3133,7 @@ def select_provider_and_model(args=None):
         "xiaomi",
         "arcee",
         "gmi",
+        "neuralwatt",
         "nvidia",
         "ollama-cloud",
         "tencent-tokenhub",
