@@ -1406,6 +1406,7 @@ def dump_api_request_debug(
             "request": {
                 "method": "POST",
                 "url": f"{agent.base_url.rstrip('/')}{'/responses' if agent.api_mode == 'codex_responses' else '/chat/completions'}",
+                "body_format": "openai_sdk_create_kwargs",
                 "headers": {
                     "Authorization": f"Bearer {agent._mask_api_key_for_logs(api_key)}",
                     "Content-Type": "application/json",
