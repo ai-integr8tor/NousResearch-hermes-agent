@@ -167,6 +167,23 @@ function profileRemoteOverride(config, profile) {
 }
 
 /**
+ * True when the desktop's primary backend is resolved to a remote gateway.
+ * In that mode the Electron shell is a client of another Hermes lifecycle
+ * manager, so local desktop self-update checks must not git-fetch/pull/rebuild.
+ */
+function isRemoteBackendConnection(config, profile = null, env = process.env) {
+  if (profileRemoteOverride(config, profile)) {
+    return true
+  }
+
+  if (String(env?.HERMES_DESKTOP_REMOTE_URL || '').trim()) {
+    return true
+  }
+
+  return config?.mode === 'remote'
+}
+
+/**
  * In global-remote mode one backend serves every Desktop profile, so REST calls
  * that are scoped by renderer-side `request.profile` must carry that scope as a
  * query parameter. Local pooled backends and per-profile remote overrides do not
@@ -273,6 +290,7 @@ module.exports = {
   connectionScopeKey,
   cookiesHaveSession,
   cookiesHaveLiveSession,
+  isRemoteBackendConnection,
   normAuthMode,
   normalizeRemoteBaseUrl,
   pathWithGlobalRemoteProfile,
