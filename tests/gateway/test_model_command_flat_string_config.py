@@ -102,7 +102,7 @@ async def test_model_global_persists_when_config_has_flat_string_model(tmp_path,
     )
     assert written["model"]["default"] == "gpt-5.5"
     assert written["model"]["provider"] == "openrouter"
-    assert "base_url" not in written["model"]
+    assert written["model"]["base_url"] == "https://openrouter.ai/api/v1"
 
 
 @pytest.mark.asyncio
@@ -199,3 +199,47 @@ async def test_model_session_flag_does_not_persist(tmp_path, monkeypatch):
     written = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     # Config untouched — the session override is in-memory only.
     assert written["model"]["default"] == "old-model"
+
+
+def test_gateway_model_switch_targeted_write_preserves_sibling_keys_and_clears_base_url(tmp_path):
+    """Gateway global /model persistence must not rewrite a stale full config.
+
+    Desktop/backend model settings and advanced model siblings live under the
+    same ``model:`` block. The gateway should only update the selected model
+    fields and clear a stale endpoint when the switch result has no base_url.
+    """
+    from types import SimpleNamespace
+
+    from gateway.slash_commands import _persist_global_model_switch
+
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(
+        "model:\n"
+        "  default: local-old\n"
+        "  provider: custom\n"
+        "  base_url: http://localhost:18080/v1\n"
+        "  model_slots:\n"
+        "    fast: old-fast\n"
+        "  model_fallback:\n"
+        "    - old-fallback\n"
+        "display:\n"
+        "  skin: noir\n",
+        encoding="utf-8",
+    )
+
+    _persist_global_model_switch(
+        cfg_path,
+        SimpleNamespace(
+            new_model="qwen-max",
+            target_provider="dashscope",
+            base_url="",
+        ),
+    )
+
+    written = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    assert written["model"]["default"] == "qwen-max"
+    assert written["model"]["provider"] == "dashscope"
+    assert not written["model"].get("base_url")
+    assert written["model"]["model_slots"] == {"fast": "old-fast"}
+    assert written["model"]["model_fallback"] == ["old-fallback"]
+    assert written["display"]["skin"] == "noir"

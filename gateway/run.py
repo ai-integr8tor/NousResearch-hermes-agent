@@ -2366,11 +2366,9 @@ def _resolve_gateway_model(config: dict | None = None) -> str:
     """
     cfg = config if config is not None else _load_gateway_config()
     model_cfg = cfg.get("model", {})
-    if isinstance(model_cfg, str):
-        return model_cfg
-    elif isinstance(model_cfg, dict):
-        return model_cfg.get("default") or model_cfg.get("model") or ""
-    return ""
+    from hermes_cli.config import resolve_model_name_from_config
+
+    return resolve_model_name_from_config(model_cfg)
 
 
 def _channel_override_lookup_keys(
