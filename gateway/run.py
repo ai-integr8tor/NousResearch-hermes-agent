@@ -16154,20 +16154,30 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         try:
             from aiohttp import ClientSession as _AioClientSession, ClientTimeout
         except ImportError:
+            error = "Proxy mode requires aiohttp. Install with: pip install aiohttp"
             return {
-                "final_response": "⚠️ Proxy mode requires aiohttp. Install with: pip install aiohttp",
+                "final_response": f"⚠️ {error}",
                 "messages": [],
                 "api_calls": 0,
                 "tools": [],
+                "failed": True,
+                "completed": False,
+                "error": error,
+                "agent_persisted": False,
             }
 
         proxy_url = self._get_proxy_url()
         if not proxy_url:
+            error = "Proxy URL not configured (GATEWAY_PROXY_URL or gateway.proxy_url)"
             return {
-                "final_response": "⚠️ Proxy URL not configured (GATEWAY_PROXY_URL or gateway.proxy_url)",
+                "final_response": f"⚠️ {error}",
                 "messages": [],
                 "api_calls": 0,
                 "tools": [],
+                "failed": True,
+                "completed": False,
+                "error": error,
+                "agent_persisted": False,
             }
 
         proxy_key = os.getenv("GATEWAY_PROXY_KEY", "").strip()
@@ -16310,15 +16320,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 ) as resp:
                     if resp.status != 200:
                         error_text = await resp.text()
+                        error = f"Proxy error ({resp.status}): {error_text[:300]}"
                         logger.warning(
                             "Proxy error (%d) from %s: %s",
                             resp.status, proxy_url, error_text[:500],
                         )
                         return {
-                            "final_response": f"⚠️ Proxy error ({resp.status}): {error_text[:300]}",
+                            "final_response": f"⚠️ {error}",
                             "messages": [],
                             "api_calls": 0,
                             "tools": [],
+                            "failed": True,
+                            "completed": False,
+                            "error": error,
+                            "agent_persisted": False,
                         }
 
                     # Parse SSE stream
@@ -16374,11 +16389,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         except Exception as e:
             logger.error("Proxy connection error to %s: %s", proxy_url, e)
             if not full_response:
+                error = f"Proxy connection error: {e}"
                 return {
-                    "final_response": f"⚠️ Proxy connection error: {e}",
+                    "final_response": f"⚠️ {error}",
                     "messages": [],
                     "api_calls": 0,
                     "tools": [],
+                    "failed": True,
+                    "completed": False,
+                    "error": error,
+                    "agent_persisted": False,
                 }
             # Partial response — return what we got
         finally:
@@ -16512,6 +16532,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
           - "messages": list (full conversation including tool calls)
           - "api_calls": int
           - "completed": bool
+          - "failed": bool (retryable/failed turn, not delivered as model output)
+          - "error": str (machine-readable failure detail when available)
+          - "agent_persisted": bool (whether the runtime already wrote transcript rows)
         
         This is run in a thread pool to not block the event loop.
         Supports interruption via new messages.
@@ -17521,11 +17544,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     model, runtime_kwargs.get("provider"), session_key or "",
                 )
             except Exception as exc:
+                error = f"Provider authentication failed: {str(exc)[:300]}"
                 return {
-                    "final_response": f"⚠️ Provider authentication failed: {exc}",
+                    "final_response": f"⚠️ {error}",
                     "messages": [],
                     "api_calls": 0,
                     "tools": [],
+                    "failed": True,
+                    "completed": False,
+                    "error": error,
+                    "agent_persisted": False,
                 }
 
             pr = self._provider_routing
@@ -18634,8 +18662,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "messages": result_holder[0].get("messages", []) if result_holder[0] else [],
                 "api_calls": result_holder[0].get("api_calls", 0) if result_holder[0] else 0,
                 "completed": result_holder[0].get("completed") if result_holder[0] else None,
+                "failed": result_holder[0].get("failed", False) if result_holder[0] else False,
                 "interrupted": result_holder[0].get("interrupted", False) if result_holder[0] else False,
                 "partial": result_holder[0].get("partial", False) if result_holder[0] else False,
+                "compression_exhausted": result_holder[0].get("compression_exhausted", False) if result_holder[0] else False,
                 "error": result_holder[0].get("error") if result_holder[0] else None,
                 "interrupt_message": result_holder[0].get("interrupt_message") if result_holder[0] else None,
                 "tools": tools_holder[0] or [],
