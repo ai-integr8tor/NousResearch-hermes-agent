@@ -231,6 +231,61 @@ def test_user_provider_live_model_probe_uses_extra_headers(monkeypatch):
     assert user_prov["models"] == ["live-model"]
 
 
+def test_switch_model_validation_uses_user_provider_extra_headers(monkeypatch):
+    """A model shown by the picker must be validated with the same headers."""
+    captured = {}
+
+    def fake_validate(*args, **kwargs):
+        captured.update(kwargs)
+        return {"accepted": True, "persist": True, "recognized": True, "message": None}
+
+    monkeypatch.setattr("hermes_cli.models.validate_requested_model", fake_validate)
+    monkeypatch.setattr("hermes_cli.models.detect_provider_for_model", lambda *a, **k: None)
+    monkeypatch.setattr("hermes_cli.model_switch.get_model_info", lambda *a, **k: None)
+    monkeypatch.setattr("hermes_cli.model_switch.get_model_capabilities", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "hermes_cli.runtime_provider.resolve_runtime_provider",
+        lambda *a, **k: {
+            "api_key": "sk-proxy",
+            "base_url": "https://proxy.example.com/v1",
+            "api_mode": "openai_chat",
+        },
+    )
+
+    result = switch_model(
+        raw_input="tenant-model",
+        current_provider="tenant-proxy",
+        current_model="old-model",
+        current_base_url="https://proxy.example.com/v1",
+        user_providers={
+            "tenant-proxy": {
+                "name": "Tenant proxy",
+                "api": "https://proxy.example.com/v1",
+                "models": {"tenant-model": {}},
+                "extra_headers": {"X-Tenant": "alpha"},
+            }
+        },
+        custom_providers=[],
+    )
+
+    assert result.success is True
+    assert captured["request_headers"] == {"X-Tenant": "alpha"}
+
+
+def test_provider_extra_headers_use_resolved_provider_only():
+    from hermes_cli.model_switch import _provider_extra_headers
+
+    headers = _provider_extra_headers(
+        "tenant-proxy",
+        user_providers={
+            "alias-proxy": {"extra_headers": {"X-Tenant": "wrong"}},
+            "tenant-proxy": {"extra_headers": {"X-Tenant": "right"}},
+        },
+    )
+
+    assert headers == {"X-Tenant": "right"}
+
+
 def test_list_authenticated_providers_dict_models_without_default_model(monkeypatch):
     """Dict-format ``models:`` without a ``default_model`` must still expose
     every dict key, not collapse to an empty list."""
