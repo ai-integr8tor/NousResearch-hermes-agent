@@ -432,6 +432,27 @@ def _ensure_compressed_has_user_turn(original_messages: list, compressed: list) 
     })
 
 
+_GATEWAY_ORIGIN_SESSION_FIELDS = (
+    "user_id",
+    "session_key",
+    "chat_id",
+    "chat_type",
+    "thread_id",
+    "cwd",
+)
+
+
+def _session_origin_kwargs(row: Optional[dict]) -> dict:
+    """Return parent session metadata that must survive session rotation."""
+    if not row:
+        return {}
+    return {
+        field: row.get(field)
+        for field in _GATEWAY_ORIGIN_SESSION_FIELDS
+        if row.get(field) is not None
+    }
+
+
 def compress_context(
     agent: Any,
     messages: list,
@@ -743,6 +764,11 @@ def compress_context(
                         pass  # best-effort — don't block compression on a flush error
                     # Propagate title to the new session with auto-numbering
                     old_title = agent._session_db.get_session_title(agent.session_id)
+                    old_session_row = None
+                    try:
+                        old_session_row = agent._session_db.get_session(agent.session_id)
+                    except Exception:
+                        pass
                     agent._session_db.end_session(agent.session_id, "compression")
                     old_session_id = agent.session_id
                     agent.session_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
@@ -773,10 +799,15 @@ def compress_context(
                     try:
                         agent._session_db.create_session(
                             session_id=agent.session_id,
-                            source=agent.platform or os.environ.get("HERMES_SESSION_SOURCE", "cli"),
+                            source=(
+                                (old_session_row or {}).get("source")
+                                or agent.platform
+                                or os.environ.get("HERMES_SESSION_SOURCE", "cli")
+                            ),
                             model=agent.model,
                             model_config=agent._session_init_model_config,
                             parent_session_id=old_session_id,
+                            **_session_origin_kwargs(old_session_row),
                         )
                     except Exception as _cs_err:
                         # The child row could not be created (e.g. FK constraint,

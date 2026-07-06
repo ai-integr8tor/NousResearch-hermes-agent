@@ -130,3 +130,33 @@ class TestPlatformForwardedAtBoundary:
         kwargs = calls[-1].kwargs
         assert kwargs.get("platform") == "telegram"
         assert kwargs.get("boundary_reason") == "compression"
+
+
+class TestGatewayOriginMigratesOnRotation:
+    def test_gateway_origin_metadata_follows_compression_rotation(self, tmp_path: Path):
+        db = SessionDB(db_path=tmp_path / "state.db")
+        parent = "PARENT_GATEWAY_ORIGIN_ROT"
+        db.create_session(
+            parent,
+            source="telegram",
+            user_id="U_TELEGRAM",
+            session_key="agent:main:telegram:dm:C_TELEGRAM:U_TELEGRAM",
+            chat_id="C_TELEGRAM",
+            chat_type="dm",
+            thread_id="T_THREAD",
+            cwd="/workspace",
+        )
+        agent = _build_agent_with_db(db, parent, platform="telegram")
+
+        agent._compress_context(_msgs(), "sys", approx_tokens=120_000)
+        child = db.get_session(agent.session_id)
+
+        assert child is not None
+        assert child["parent_session_id"] == parent
+        assert child["source"] == "telegram"
+        assert child["user_id"] == "U_TELEGRAM"
+        assert child["session_key"] == "agent:main:telegram:dm:C_TELEGRAM:U_TELEGRAM"
+        assert child["chat_id"] == "C_TELEGRAM"
+        assert child["chat_type"] == "dm"
+        assert child["thread_id"] == "T_THREAD"
+        assert child["cwd"] == "/workspace"
