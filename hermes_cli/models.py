@@ -1749,6 +1749,39 @@ def _get_model_config_dict() -> dict[str, Any]:
     return {}
 
 
+def _effective_model_base_url() -> str:
+    """Return the base_url from the model config if set, else empty string.
+
+    The model config can override the provider's default base_url (e.g. to
+    point at a proxy like Nous Portal, LiteLLM, or a self-hosted gateway).
+    This helper is the single source of truth for "what base_url is the
+    current model config actually using" — it normalizes whitespace, strips
+    a trailing ``/v1`` suffix, and lowercases the host so equivalent URLs
+    (e.g. ``https://API.Anthropic.com/v1`` vs ``https://api.anthropic.com``)
+    produce the same cache key. Empty string when no override is configured.
+
+    Lives next to ``_get_model_config_dict`` so both stay in sync — adding
+    a new model config field there should be reflected here.
+    """
+    cfg = _get_model_config_dict()
+    raw = str(cfg.get("base_url", "") or "").strip()
+    if not raw:
+        return ""
+    try:
+        parsed = urllib.parse.urlparse(raw)
+    except Exception:
+        return raw.lower().rstrip("/")
+    host = (parsed.netloc or "").lower()
+    path = (parsed.path or "").rstrip("/")
+    if path.endswith("/v1"):
+        path = path[: -len("/v1")].rstrip("/")
+    if host and path:
+        return f"{parsed.scheme.lower()}://{host}{path}"
+    if host:
+        return f"{parsed.scheme.lower()}://{host}"
+    return raw.lower().rstrip("/")
+
+
 def _base_url_looks_like_anthropic_messages(base_url: str) -> bool:
     normalized = str(base_url or "").strip().lower().rstrip("/")
     if not normalized:
@@ -2584,6 +2617,21 @@ def _credential_fingerprint(provider: str) -> str:
         except Exception:
             pass
 
+    # Effective model-config base_url. When a user runs Claude via a proxy
+    # (Nous Portal, LiteLLM, self-hosted gateway) the live ``/v1/models``
+    # response comes from that proxy, not from api.anthropic.com — the
+    # catalog is the proxy's whole multi-vendor list. The env-var-driven
+    # ``base_url`` vars in PROVIDER_REGISTRY don't capture this because
+    # the override is in ``config.yaml``'s ``model.base_url``, so without
+    # this entry a proxy-fetched catalog and a native-Anthropic catalog
+    # hash to the same fingerprint and collide in the cache slot.
+    try:
+        eff = _effective_model_base_url()
+        if eff:
+            parts.append(f"effective_base_url={eff}")
+    except Exception:
+        pass
+
     blob = "|".join(parts).encode("utf-8", errors="replace")
     # blake2b for cache-key fingerprinting only — not for credential storage.
     # We never reverse this hash; collisions are harmless (worst case: cache
@@ -2619,6 +2667,31 @@ def _save_provider_models_cache(data: dict) -> None:
         pass
 
 
+def _cache_slot_key(provider: str) -> str:
+    """Return the on-disk cache slot key for ``provider``.
+
+    Default behavior: the bare provider slug, preserving the existing cache
+    layout (e.g. ``cache["anthropic"]`` for the native-Anthropic catalog).
+    When the model config overrides ``base_url`` (proxy through Nous Portal,
+    LiteLLM, a self-hosted gateway, etc.), the slot key is suffixed with a
+    short hash of the effective base_url so a proxy-fetched catalog never
+    collides with the native catalog in the same cache file. The fingerprint
+    (in ``_credential_fingerprint``) also folds in the base_url, so this
+    suffix is a belt-and-suspenders guarantee that switching back to native
+    after a proxy fetch doesn't return the proxy's stale catalog.
+
+    Empty-string base_url (the default for every non-anthropic provider and
+    for anthropic without a config override) means the base slug is used
+    unchanged, so no existing user cache is invalidated.
+    """
+    import hashlib as _h
+    base = _effective_model_base_url()
+    if not base:
+        return provider
+    digest = _h.blake2b(base.encode("utf-8"), digest_size=4).hexdigest()
+    return f"{provider}+base_url={digest}"
+
+
 def cached_provider_model_ids(
     provider: Optional[str],
     *,
@@ -2636,7 +2709,8 @@ def cached_provider_model_ids(
 
     cache = _load_provider_models_cache()
     fp = _credential_fingerprint(normalized)
-    entry = cache.get(normalized)
+    slot = _cache_slot_key(normalized)
+    entry = cache.get(slot)
     now = time.time()
 
     if (
@@ -2652,7 +2726,7 @@ def cached_provider_model_ids(
     # Cache miss / stale / forced refresh — call the live path.
     live = provider_model_ids(normalized, force_refresh=force_refresh)
     if live:
-        cache[normalized] = {
+        cache[slot] = {
             "fp": fp,
             "at": now,
             "models": list(live),
@@ -2679,6 +2753,14 @@ def clear_provider_models_cache(provider: Optional[str] = None) -> None:
     ``provider=None`` wipes everything; otherwise only that provider's
     entry is removed. Used by ``/model --refresh`` and
     ``hermes model --refresh``.
+
+    When the model config overrides ``base_url``, the on-disk slot is
+    ``{provider}+base_url={digest}`` (see ``_cache_slot_key``); a refresh
+    must clear that slot, not the bare ``{provider}`` slot, or stale data
+    from a different base_url will linger. We always pass the current
+    model config's effective base_url through ``_cache_slot_key`` so the
+    right entry is targeted — for the no-base_url case this resolves back
+    to the bare provider slug and the legacy behavior is preserved.
     """
     try:
         if provider is None:
@@ -2688,8 +2770,11 @@ def clear_provider_models_cache(provider: Optional[str] = None) -> None:
             return
         cache = _load_provider_models_cache()
         normalized = normalize_provider(provider) or provider or ""
-        if normalized in cache:
-            del cache[normalized]
+        if not normalized:
+            return
+        slot = _cache_slot_key(normalized)
+        if slot in cache:
+            del cache[slot]
             _save_provider_models_cache(cache)
     except Exception:
         pass
