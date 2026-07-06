@@ -7374,7 +7374,7 @@ def test_config_show_displays_nested_max_turns(monkeypatch):
 
 
 def test_notification_poller_delivers_completion(monkeypatch):
-    """Poller picks up completion events and triggers agent turns."""
+    """Poller picks up completion events as status-only notifications."""
     import queue as _queue_mod
 
     from tools.process_registry import process_registry
@@ -7436,9 +7436,8 @@ def test_notification_poller_delivers_completion(monkeypatch):
         assert len(status_calls) >= 1
         assert status_calls[0][2]["kind"] == "process"
 
-        # Should have triggered an agent turn
-        assert len(turns) == 1
-        assert "[IMPORTANT: Background process proc_poller_test completed normally" in turns[0]
+        # Process completions must not trigger an agent turn; they are UI-only.
+        assert turns == []
     finally:
         server._sessions.pop("sid_poll", None)
         while not process_registry.completion_queue.empty():
@@ -7501,7 +7500,7 @@ def test_notification_poller_skips_consumed(monkeypatch):
 
 
 def test_notification_poller_requeues_when_busy(monkeypatch):
-    """When the agent is busy, the poller requeues the event."""
+    """When busy, chainable async delegation events are requeued."""
     import queue as _queue_mod
 
     from tools.process_registry import process_registry
@@ -7522,11 +7521,11 @@ def test_notification_poller_requeues_when_busy(monkeypatch):
     process_registry._completion_consumed.discard("proc_busy_test")
 
     evt = {
-        "type": "completion",
-        "session_id": "proc_busy_test",
-        "command": "make build",
-        "exit_code": 0,
-        "output": "ok",
+        "type": "async_delegation",
+        "delegation_id": "deleg_busy_test",
+        "summary": "ok",
+        "status": "completed",
+        "dispatch_turn_seq": 0,
     }
     isolated_queue.put(evt)
 
@@ -7543,7 +7542,7 @@ def test_notification_poller_requeues_when_busy(monkeypatch):
         # Event was requeued (agent was busy, no turn triggered)
         assert not isolated_queue.empty()
         requeued = isolated_queue.get_nowait()
-        assert requeued["session_id"] == "proc_busy_test"
+        assert requeued["delegation_id"] == "deleg_busy_test"
     finally:
         server._sessions.pop("sid_busy", None)
         while not process_registry.completion_queue.empty():
@@ -7674,7 +7673,7 @@ def test_notification_poller_emits_distinct_watch_matches_once(monkeypatch):
         status_text = "\n".join(call[2]["text"] for call in status_calls)
         assert "READY on port 8000" in status_text
         assert "READY on port 9000" in status_text
-        assert len(turns) == 3
+        assert turns == []
     finally:
         server._sessions.pop("sid_watch_dedup", None)
         while not process_registry.completion_queue.empty():
@@ -8605,3 +8604,161 @@ def test_get_usage_clamps_post_compression_sentinel():
     usage = server._get_usage(agent)
     assert "context_used" not in usage
     assert "context_percent" not in usage
+
+
+def test_notification_poller_keeps_process_completion_status_only(monkeypatch):
+    """Process notifications must not become synthetic user turns.
+
+    They are UI status events only; otherwise a background job finishing later
+    can hijack whichever topic the user is discussing now.
+    """
+    import queue
+
+    from tools.process_registry import process_registry
+
+    q = queue.Queue()
+    monkeypatch.setattr(process_registry, "completion_queue", q)
+    monkeypatch.setattr(process_registry, "is_completion_consumed", lambda _sid: False)
+
+    stop = threading.Event()
+    emitted = []
+    calls = []
+
+    def fake_emit(kind, sid, payload=None):
+        emitted.append((kind, sid, payload))
+        stop.set()
+
+    monkeypatch.setattr(server, "_emit", fake_emit)
+    monkeypatch.setattr(
+        server,
+        "_run_prompt_submit",
+        lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+
+    session = {
+        "session_key": "session-key",
+        "history_lock": threading.Lock(),
+        "running": False,
+    }
+    q.put(
+        {
+            "type": "completion",
+            "session_id": "proc_status_only",
+            "session_key": "session-key",
+            "command": "pytest",
+            "exit_code": 0,
+            "completion_reason": "exited",
+            "output": "33 passed",
+        }
+    )
+
+    server._notification_poller_loop(stop, "sid", session)
+
+    assert calls == []
+    assert session["running"] is False
+    assert emitted
+    assert emitted[0][0] == "status.update"
+    assert "Background process proc_status_only" in emitted[0][2]["text"]
+
+
+def test_notification_poller_chains_async_delegation(monkeypatch):
+    """delegate_task completions still re-enter as follow-up turns."""
+    import queue
+
+    from tools.process_registry import process_registry
+
+    q = queue.Queue()
+    monkeypatch.setattr(process_registry, "completion_queue", q)
+    monkeypatch.setattr(process_registry, "is_completion_consumed", lambda _sid: False)
+
+    stop = threading.Event()
+    emitted = []
+    calls = []
+
+    def fake_emit(kind, sid, payload=None):
+        emitted.append((kind, sid, payload))
+
+    def fake_run_prompt_submit(rid, sid, session, text):
+        calls.append((rid, sid, text))
+        stop.set()
+
+    monkeypatch.setattr(server, "_emit", fake_emit)
+    monkeypatch.setattr(server, "_run_prompt_submit", fake_run_prompt_submit)
+
+    session = {
+        "session_key": "session-key",
+        "history_lock": threading.Lock(),
+        "running": False,
+    }
+    q.put(
+        {
+            "type": "async_delegation",
+            "delegation_id": "deleg_1",
+            "session_key": "session-key",
+            "goal": "check docs",
+            "summary": "done",
+            "status": "completed",
+            "dispatch_turn_seq": 0,
+        }
+    )
+
+    server._notification_poller_loop(stop, "sid", session)
+
+    assert emitted and emitted[0][0] == "status.update"
+    assert len(calls) == 1
+    assert calls[0][1] == "sid"
+    assert "ASYNC DELEGATION COMPLETE" in calls[0][2]
+    assert session["running"] is True
+
+
+def test_notification_poller_keeps_stale_async_delegation_status_only(monkeypatch):
+    """If the user has advanced the conversation, old delegation results do not hijack it."""
+    import queue
+
+    from tools.process_registry import process_registry
+
+    q = queue.Queue()
+    monkeypatch.setattr(process_registry, "completion_queue", q)
+    monkeypatch.setattr(process_registry, "is_completion_consumed", lambda _sid: False)
+
+    stop = threading.Event()
+    emitted = []
+    calls = []
+
+    def fake_emit(kind, sid, payload=None):
+        emitted.append((kind, sid, payload))
+        stop.set()
+
+    monkeypatch.setattr(server, "_emit", fake_emit)
+    monkeypatch.setattr(
+        server,
+        "_run_prompt_submit",
+        lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+
+    session = {
+        "session_key": "session-key",
+        "history_lock": threading.Lock(),
+        "running": False,
+        # dispatch_turn_seq=0 belongs to the parent turn; current seq 2 means
+        # the user already submitted another turn after the parent finished.
+        "history_version": 2,
+    }
+    q.put(
+        {
+            "type": "async_delegation",
+            "delegation_id": "deleg_old",
+            "session_key": "session-key",
+            "goal": "old topic",
+            "summary": "stale result",
+            "status": "completed",
+            "dispatch_turn_seq": 0,
+        }
+    )
+
+    server._notification_poller_loop(stop, "sid", session)
+
+    assert calls == []
+    assert session["running"] is False
+    assert emitted and emitted[0][0] == "status.update"
+    assert "ASYNC DELEGATION COMPLETE" in emitted[0][2]["text"]

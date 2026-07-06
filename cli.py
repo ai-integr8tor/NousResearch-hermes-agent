@@ -2575,6 +2575,21 @@ def _replay_output_history() -> None:
         _OUTPUT_HISTORY_REPLAYING = False
 
 
+def _queue_or_display_async_notification(pending_input, evt: dict, text: str) -> None:
+    """Route async notifications without turning process status into prompts.
+
+    ``delegate_task`` completions are contractual conversation follow-ups, so
+    they still enter the pending-input queue. Background process completion and
+    watch notifications are observability only: display them in the terminal UI
+    and keep them out of the agent transcript, otherwise stale process output
+    becomes a synthetic user request and hijacks the active conversation.
+    """
+    if evt.get("type") == "async_delegation":
+        pending_input.put(text)
+        return
+    _cprint(f"\n{_DIM}⚙️  {text}{_RST}")
+
+
 def _cprint(text: str):
     """Print ANSI-colored text through prompt_toolkit's native renderer.
 
@@ -15080,7 +15095,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                             try:
                                 from tools.process_registry import process_registry
                                 for _evt, _synth in process_registry.drain_notifications():
-                                    self._pending_input.put(_synth)
+                                    _queue_or_display_async_notification(
+                                        self._pending_input, _evt, _synth
+                                    )
                             except Exception:
                                 pass
                         continue
@@ -15242,7 +15259,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                         try:
                             from tools.process_registry import process_registry
                             for _evt, _synth in process_registry.drain_notifications():
-                                self._pending_input.put(_synth)
+                                _queue_or_display_async_notification(
+                                    self._pending_input, _evt, _synth
+                                )
                         except Exception:
                             pass  # Non-fatal — don't break the main loop
 

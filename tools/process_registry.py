@@ -165,10 +165,11 @@ class ProcessRegistry:
         # Side-channel for check_interval watchers (gateway reads after agent run)
         self.pending_watchers: List[Dict[str, Any]] = []
 
-        # Notification queue — unified queue for all background process events.
+        # Notification queue — unified queue for async background events.
         # Completion notifications (notify_on_complete) and watch pattern matches
-        # both land here, distinguished by "type" field.  CLI process_loop and
-        # gateway drain this after each agent turn to auto-trigger new turns.
+        # both land here, distinguished by "type" field. UI surfaces process
+        # events as status only; async delegation events may still trigger a
+        # follow-up agent turn.
         import queue as _queue_mod
         self.completion_queue: _queue_mod.Queue = _queue_mod.Queue()
 
@@ -1945,8 +1946,9 @@ def _format_async_delegation(evt: dict) -> str:
             f"[ASYNC DELEGATION BATCH COMPLETE — {deleg_id}]",
             f"A background fan-out of {n} subagent(s) you dispatched earlier "
             "has finished. All ran in parallel and waited on each other; their "
-            "consolidated results are below. You may have moved on since "
-            "dispatching — act on these or re-dispatch if things have changed.",
+            "consolidated results are below. Review them if they are still "
+            "relevant to the current topic; otherwise leave them as a background "
+            "result and wait for an explicit user request.",
             "",
         ]
         if isinstance(dispatched_at, (int, float)):
@@ -2001,9 +2003,9 @@ def _format_async_delegation(evt: dict) -> str:
 
     lines = [
         f"[ASYNC DELEGATION COMPLETE — {deleg_id}]",
-        "A background subagent you dispatched earlier has finished. You may "
-        "have moved on since dispatching it; the full task source is below so "
-        "you can act on the result or re-dispatch if things have changed.",
+        "A background subagent you dispatched earlier has finished. The full "
+        "task source is below so the result can be reviewed if it is still "
+        "relevant; if the user has moved on, leave it as a background result.",
         "",
     ]
     if isinstance(dispatched_at, (int, float)):

@@ -92,15 +92,21 @@ def test_async_executor_workers_are_daemon_threads():
 
 
 def test_completion_event_lands_on_shared_queue_with_session_key():
+    from gateway.session_context import clear_session_vars, set_session_vars
+
     def runner():
         return {"status": "completed", "summary": "the result",
                 "api_calls": 3, "duration_seconds": 2.0, "model": "test-model"}
 
-    res = ad.dispatch_async_delegation(
-        goal="compute X", context="some context", toolsets=["web", "file"],
-        role="leaf", model="test-model", session_key="agent:main:cli:dm:local",
-        runner=runner, max_async_children=3,
-    )
+    tokens = set_session_vars(turn_seq="7")
+    try:
+        res = ad.dispatch_async_delegation(
+            goal="compute X", context="some context", toolsets=["web", "file"],
+            role="leaf", model="test-model", session_key="agent:main:cli:dm:local",
+            runner=runner, max_async_children=3,
+        )
+    finally:
+        clear_session_vars(tokens)
     assert res["status"] == "dispatched"
 
     evt = _drain_one()
@@ -109,6 +115,7 @@ def test_completion_event_lands_on_shared_queue_with_session_key():
     assert evt["summary"] == "the result"
     assert evt["session_key"] == "agent:main:cli:dm:local"
     assert evt["delegation_id"] == res["delegation_id"]
+    assert evt["dispatch_turn_seq"] == "7"
 
 
 def test_rich_reinjection_block_is_self_contained():
