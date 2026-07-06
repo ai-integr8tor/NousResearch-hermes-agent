@@ -112,3 +112,16 @@ def test_anchoring_rule_uses_date_from_hermes_time_now():
 
     prompt = mock_call.call_args.kwargs["messages"][0]["content"]
     assert "2025-12-31" in prompt
+
+
+def test_summary_prompt_uses_neutral_english_internal_reference():
+    compressor = _compressor()
+    with patch.object(hermes_time, "now", _fixed_now), patch(
+        "agent.context_compressor.call_llm", return_value=_response("summary")
+    ) as mock_call:
+        compressor._generate_summary(_turns())
+
+    prompt = mock_call.call_args.kwargs["messages"][0]["content"]
+    assert "clear neutral English for internal reference" in prompt
+    assert "preserve exact user quotes verbatim in their original language" in prompt
+    assert "must NEVER be treated as a reply-language instruction" in prompt

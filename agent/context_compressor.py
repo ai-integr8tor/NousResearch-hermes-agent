@@ -49,7 +49,8 @@ SUMMARY_PREFIX = (
     "they were already addressed. "
     "Respond ONLY to the latest user message that appears AFTER this "
     "summary — that message is the single source of truth for what to do "
-    "right now. "
+    "right now. The language of that latest live user message also controls "
+    "your reply — do NOT let the summary's language override it. "
     "Topic overlap with the summary does NOT mean you should resume its "
     "task: even on similar topics, the latest user message WINS. Treat ONLY "
     "the latest message as the active task and discard stale items from "
@@ -151,6 +152,31 @@ _MERGED_SUMMARY_DELIMITER = "[END OF PRIOR CONTEXT — COMPACTION SUMMARY BELOW]
 # embedded in the body and keeps hijacking replies. Keep newest-first; entries
 # are matched literally. Add a frozen copy here whenever SUMMARY_PREFIX changes.
 _HISTORICAL_SUMMARY_PREFIXES = (
+    "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted "
+    "into the summary below. This is a handoff from a previous context "
+    "window — treat it as background reference, NOT as active instructions. "
+    "Do NOT answer questions or fulfill requests mentioned in this summary; "
+    "they were already addressed. "
+    "Respond ONLY to the latest user message that appears AFTER this "
+    "summary — that message is the single source of truth for what to do "
+    "right now. "
+    "Topic overlap with the summary does NOT mean you should resume its "
+    "task: even on similar topics, the latest user message WINS. Treat ONLY "
+    "the latest message as the active task and discard stale items from "
+    f"'{HISTORICAL_TASK_HEADING}' / '{HISTORICAL_IN_PROGRESS_HEADING}' / "
+    f"'{HISTORICAL_PENDING_ASKS_HEADING}' / "
+    f"'{HISTORICAL_REMAINING_WORK_HEADING}' entirely — do not 'wrap up' or "
+    "'finish' work described there unless the latest message explicitly "
+    "asks for it. "
+    "Reverse signals in the latest message (e.g. 'stop', 'undo', 'roll "
+    "back', 'just verify', 'don't do that anymore', 'never mind', a new "
+    "topic) must immediately end any in-flight work described in the "
+    "summary; do not re-surface it in later turns. "
+    "IMPORTANT: Your persistent memory (MEMORY.md, USER.md) in the system "
+    "prompt is ALWAYS authoritative and active — never ignore or deprioritize "
+    "memory content due to this compaction note. "
+    "The current session state (files, config, etc.) may reflect work "
+    "described here — avoid repeating it:",
     # Carveout era (#41607/#38364/#42812): "consistent → use as background"
     # licensed stale-task resumption on topic overlap.
     "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted "
@@ -1694,8 +1720,10 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
             "compact record of prior work. "
             "Produce only the structured summary; do not add a greeting, "
             "preamble, or prefix. "
-            "Write the summary in the same language the user was using in the "
-            "conversation — do not translate or switch to English. "
+            "Write the summary in clear neutral English for internal reference, "
+            "but preserve exact user quotes verbatim in their original language. "
+            "The summary's language must NEVER be treated as a reply-language "
+            "instruction for later turns. "
             "NEVER include API keys, tokens, passwords, secrets, credentials, "
             "or connection strings in the summary — replace any that appear "
             "with [REDACTED]. Note that the user had credentials present, but "
@@ -1725,8 +1753,8 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
 [THE SINGLE MOST IMPORTANT FIELD. Capture the user's most recent unfulfilled
 input verbatim — the exact words they used. This includes:
 - Explicit task assignments ("refactor the auth module")
-- Questions awaiting an answer ("waarom staat X op Y?", "wat zijn de volgende stappen?")
-- Decisions awaiting input ("optie A of B?")
+- Questions awaiting an answer ("why is X set to Y?", "what are the next steps?")
+- Decisions awaiting input ("option A or B?")
 - Ongoing discussions where the assistant owes the next substantive reply
 A conversation where the user just asked a question IS an active task — the
 task is "answer that question with full context". Do NOT write "None" merely
@@ -1736,7 +1764,7 @@ something like "thanks, that's all".
 If multiple items are outstanding, list only the ones NOT yet completed.
 Continuation should pick up exactly here. Examples:
 "User asked: 'Now refactor the auth module to use JWT instead of sessions'"
-"User asked: 'Waarom stond provider ineens op openrouter?' — needs investigation + answer"
+"User asked: 'Why was provider suddenly set to openrouter?' — needs investigation + answer"
 "User chose option A; awaiting implementation of step 2"
 If the user's most recent message was a reverse signal (stop, undo, roll
 back, never mind, just verify, change of topic) that supersedes earlier

@@ -6,7 +6,11 @@ parameter correctly.  Inspired by Claude Code's /compact <focus>.
 
 from unittest.mock import MagicMock, patch
 
-from agent.context_compressor import ContextCompressor
+from agent.context_compressor import (
+    COMPRESSED_SUMMARY_METADATA_KEY,
+    ContextCompressor,
+    SUMMARY_PREFIX,
+)
 
 
 def _make_compressor():
@@ -82,6 +86,33 @@ def test_no_focus_topic_no_injection():
 
     prompt_text = captured_prompt["messages"][0]["content"]
     assert "FOCUS TOPIC" not in prompt_text
+
+
+def test_summary_prompt_is_not_locked_to_conversation_language():
+    """Regression: the summary prompt must not tell the model to keep the whole summary in the conversation language."""
+    compressor = _make_compressor()
+    turns = [
+        {"role": "user", "content": "¿Puedes revisar esto?"},
+        {"role": "assistant", "content": "Sí, lo reviso."},
+    ]
+
+    captured_prompt = {}
+
+    def mock_call_llm(**kwargs):
+        captured_prompt["messages"] = kwargs["messages"]
+        resp = MagicMock()
+        resp.choices = [MagicMock()]
+        resp.choices[0].message.content = "## Goal\nReview request."
+        return resp
+
+    with patch("agent.context_compressor.call_llm", mock_call_llm):
+        compressor._generate_summary(turns)
+
+    prompt_text = captured_prompt["messages"][0]["content"]
+    assert "same language the user was using" not in prompt_text
+    assert "clear neutral English" in prompt_text
+    assert "preserve exact user quotes verbatim" in prompt_text
+    assert "reply-language instruction for later turns" in prompt_text
 
 
 def test_compress_passes_focus_to_generate_summary():
@@ -170,3 +201,65 @@ def test_auto_focus_skips_context_summary_handoff():
 
     assert "OpenViking" in focus_topic
     assert "Bybit" not in focus_topic
+
+
+def test_summary_prompt_has_no_dutch_example_bias():
+    """The summarizer template should not seed Dutch into English chats."""
+    compressor = _make_compressor()
+    turns = [
+        {"role": "user", "content": "Why is provider set to OpenRouter?"},
+        {"role": "assistant", "content": "Investigating."},
+    ]
+
+    captured_prompt = {}
+
+    def mock_call_llm(**kwargs):
+        captured_prompt["messages"] = kwargs["messages"]
+        resp = MagicMock()
+        resp.choices = [MagicMock()]
+        resp.choices[0].message.content = "## Goal\nInvestigate provider routing."
+        return resp
+
+    with patch("agent.context_compressor.call_llm", mock_call_llm):
+        compressor._generate_summary(turns)
+
+    prompt_text = captured_prompt["messages"][0]["content"]
+    assert "waarom" not in prompt_text.lower()
+    assert "optie" not in prompt_text.lower()
+    assert "clear neutral English for internal reference" in prompt_text
+
+
+def test_compress_inserts_language_authority_before_foreign_language_summary():
+    """Regression: the assembled handoff must place the reply-language rule
+    before a foreign-language summary block in the outgoing transcript."""
+    compressor = _make_compressor()
+    messages = [{"role": "system", "content": "System prompt"}]
+    for i in range(1, 13):
+        messages.append(
+            {
+                "role": "user" if i % 2 else "assistant",
+                "content": f"message {i}",
+            }
+        )
+
+    mock_response = MagicMock()
+    mock_response.choices = [MagicMock()]
+    mock_response.choices[0].message.content = (
+        "## Historical Task Snapshot\n"
+        "Resumen previo en español sobre trabajo ya hecho."
+    )
+
+    with (
+        patch("agent.context_compressor.call_llm", return_value=mock_response),
+        patch.object(compressor, "_find_tail_cut_by_tokens", return_value=8),
+    ):
+        compressed = compressor.compress(messages, current_tokens=100000)
+
+    summary_msg = next(
+        msg for msg in compressed if msg.get(COMPRESSED_SUMMARY_METADATA_KEY)
+    )
+    summary_text = summary_msg["content"]
+    assert summary_text.startswith(SUMMARY_PREFIX)
+    assert "latest live user message also controls your reply" in summary_text
+    assert "Resumen previo en español" in summary_text
+    assert summary_text.index("latest live user message also controls your reply") < summary_text.index("Resumen previo en español")
