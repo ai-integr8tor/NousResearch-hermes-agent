@@ -286,6 +286,53 @@ def sanitize_tool_call_arguments(
             continue
 
         insert_at = message_index + 1
+
+        def _replace_with_empty_object(tool_call: dict, function: dict, arguments: str) -> None:
+            nonlocal insert_at
+
+            # Use the canonical ``call_id || id`` precedence so both the scan
+            # for an existing tool result and any inserted stub key on the same
+            # id the rest of the pipeline uses. Keying on bare ``id`` here
+            # would fail to find a result built with ``call_id`` (Codex
+            # Responses format) and insert a duplicate orphaned stub (#58168).
+            tool_call_id = _ra().AIAgent._get_tool_call_id_static(tool_call) or None
+            function_name = function.get("name", "?")
+            preview = arguments[:80]
+            log.warning(
+                "Corrupted tool_call arguments repaired before request "
+                "(session=%s, message_index=%s, tool_call_id=%s, function=%s, preview=%r)",
+                session_id or "-",
+                message_index,
+                tool_call_id or "-",
+                function_name,
+                preview,
+            )
+            function["arguments"] = "{}"
+
+            existing_tool_msg = None
+            scan_index = message_index + 1
+            while scan_index < len(messages):
+                candidate = messages[scan_index]
+                if not isinstance(candidate, dict) or candidate.get("role") != "tool":
+                    break
+                if candidate.get("tool_call_id") == tool_call_id:
+                    existing_tool_msg = candidate
+                    break
+                scan_index += 1
+
+            if existing_tool_msg is None:
+                messages.insert(
+                    insert_at,
+                    make_tool_result_message(
+                        function_name if function_name != "?" else "",
+                        marker,
+                        tool_call_id,
+                    ),
+                )
+                insert_at += 1
+            else:
+                _prepend_marker(existing_tool_msg)
+
         for tool_call in tool_calls:
             if not isinstance(tool_call, dict):
                 continue
@@ -304,53 +351,25 @@ def sanitize_tool_call_arguments(
                 continue
 
             try:
-                json.loads(arguments)
+                parsed_arguments = json.loads(arguments)
             except json.JSONDecodeError:
-                # Use the canonical ``call_id || id`` precedence so both the
-                # scan for an existing tool result and any inserted stub key
-                # on the same id the rest of the pipeline uses. Keying on bare
-                # ``id`` here would fail to find a result built with ``call_id``
-                # (Codex Responses format) and insert a duplicate stub that
-                # itself becomes an orphan (#58168).
-                tool_call_id = _ra().AIAgent._get_tool_call_id_static(tool_call) or None
-                function_name = function.get("name", "?")
-                preview = arguments[:80]
-                log.warning(
-                    "Corrupted tool_call arguments repaired before request "
-                    "(session=%s, message_index=%s, tool_call_id=%s, function=%s, preview=%r)",
-                    session_id or "-",
-                    message_index,
-                    tool_call_id or "-",
-                    function_name,
-                    preview,
-                )
-                function["arguments"] = "{}"
-
-                existing_tool_msg = None
-                scan_index = message_index + 1
-                while scan_index < len(messages):
-                    candidate = messages[scan_index]
-                    if not isinstance(candidate, dict) or candidate.get("role") != "tool":
-                        break
-                    if candidate.get("tool_call_id") == tool_call_id:
-                        existing_tool_msg = candidate
-                        break
-                    scan_index += 1
-
-                if existing_tool_msg is None:
-                    messages.insert(
-                        insert_at,
-                        make_tool_result_message(
-                            function_name if function_name != "?" else "",
-                            marker,
-                            tool_call_id,
-                        ),
-                    )
-                    insert_at += 1
-                else:
-                    _prepend_marker(existing_tool_msg)
-
+                _replace_with_empty_object(tool_call, function, arguments)
                 repaired += 1
+                continue
+
+            if isinstance(parsed_arguments, dict):
+                continue
+            if (
+                isinstance(parsed_arguments, list)
+                and len(parsed_arguments) == 1
+                and isinstance(parsed_arguments[0], dict)
+            ):
+                function["arguments"] = json.dumps(parsed_arguments[0], separators=(",", ":"))
+                repaired += 1
+                continue
+
+            _replace_with_empty_object(tool_call, function, arguments)
+            repaired += 1
 
         message_index += 1
 
