@@ -139,11 +139,14 @@ For anything past a couple of brokers, run this as **map → reduce → act**, n
 - **Phase 1 - DISCOVER (read-only, parallel, idempotent).** Crawl *every* broker first and record a
   verdict for each (`found` / `not_found` / `indirect_exposure` / `blocked`). Scanning has no side
   effects, so it is safe to parallelize and retry. Getting the full exposure map *before* acting is
-  what unlocks cluster dedup and prioritization below. **Default: the parent drives `web_extract`
-  probes directly** - most people-search sites render name/phone/address results as static HTML that
-  `web_extract` reads in seconds. Escalate to `browser_*` only for the few JS-only sites, and to
-  `delegate_task` subagents only for genuinely *reasoning*-heavy work (large-scale namesake/relative
-  disambiguation). **Do NOT hand a browser-toolset subagent a big list of brokers to crawl** - in the
+  what unlocks cluster dedup and prioritization below. **Default: the parent drives the cheap scan
+  ladder directly** - use `web_extract` only when Hermes is configured with a real page-extraction
+  backend for arbitrary URLs; if it is search-only (for example the default DuckDuckGo-backed path),
+  start with `web_search site:` probes and then escalate to browser/operator checks. Most accessible
+  people-search pages are static HTML and are cheap when a content extractor is available, but a
+  search-only backend will not fetch the page body for you. Escalate to `browser_*` only for the few
+  JS-only sites, and to `delegate_task` subagents only for genuinely *reasoning*-heavy work
+  (large-scale namesake/relative disambiguation). **Do NOT hand a browser-toolset subagent a big list of brokers to crawl** - in the
   field this timed out repeatedly (600s, ~5-6 brokers each, no summary) because browser navigation is
   heavy; the ledger writes that survived came at 10x the cost of parent `web_extract`. A `blocked`
   (DataDome/Cloudflare/`antibot`) site is *not* a subagent job either: record `blocked` and requeue it
