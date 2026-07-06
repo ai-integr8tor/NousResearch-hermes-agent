@@ -331,6 +331,84 @@ class LoadedPlugin:
 
 
 # ---------------------------------------------------------------------------
+# Old-signature hook compatibility shim (#59262)
+# ---------------------------------------------------------------------------
+
+# Hooks whose callbacks must accept **kwargs (new signature).
+# Callbacks registered without **kwargs get wrapped with a compat shim.
+_HOOKS_REQUIRE_KWARGS: frozenset[str] = frozenset({
+    "transform_terminal_output",
+    "transform_tool_result",
+    "transform_llm_output",
+})
+
+
+def _maybe_wrap_old_hook_signature(
+    hook_name: str,
+    callback: Callable,
+    plugin_name: str,
+) -> Callable:
+    """Detect old-signature callbacks and wrap with a compat shim.
+
+    Plugins built against the old hook signature (e.g.
+    ``(output: str) -> str`` for ``transform_terminal_output``) will
+    TypeError on every invocation because they don't accept the new
+    keyword arguments.  Rather than logging a warning per call, detect
+    the mismatch at registration time, wrap the callback, and warn
+    once.
+
+    Returns the original callback unchanged when it already accepts
+    ``**kwargs``.
+    """
+    if hook_name not in _HOOKS_REQUIRE_KWARGS:
+        return callback
+
+    try:
+        sig = inspect.signature(callback)
+    except (ValueError, TypeError):
+        # Can't introspect — let it through; invoke_hook's try/except
+        # will catch any runtime TypeError.
+        return callback
+
+    has_var_keyword = any(
+        p.kind == inspect.Parameter.VAR_KEYWORD
+        for p in sig.parameters.values()
+    )
+    if has_var_keyword:
+        return callback
+
+    # Old signature detected — wrap with a shim.
+    logger.warning(
+        "Plugin '%s' hook '%s' uses deprecated signature %s. "
+        "Wrapping for compatibility — update to accept **kwargs.",
+        plugin_name,
+        hook_name,
+        sig,
+    )
+
+    # Determine which positional params the old callback expects so the
+    # shim can extract the right kwargs.
+    positional_params = [
+        p.name for p in sig.parameters.values()
+        if p.kind in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        )
+    ]
+
+    def _compat_shim(**kwargs: Any) -> Any:
+        args = [kwargs[name] for name in positional_params if name in kwargs]
+        return callback(*args)
+
+    # Preserve the original name for logging / introspection.
+    _compat_shim.__name__ = getattr(callback, "__name__", "<old_sig>")
+    _compat_shim.__qualname__ = getattr(
+        callback, "__qualname__", "<old_sig>"
+    )
+    return _compat_shim
+
+
+# ---------------------------------------------------------------------------
 # PluginContext  – handed to each plugin's ``register()`` function
 # ---------------------------------------------------------------------------
 
@@ -1167,6 +1245,12 @@ class PluginContext:
                 hook_name,
                 ", ".join(sorted(VALID_HOOKS)),
             )
+        # Detect old-signature callbacks that lack **kwargs and would
+        # TypeError on every invocation.  Wrap them with a compat shim
+        # and warn once at load time instead of per-call (#59262).
+        callback = _maybe_wrap_old_hook_signature(
+            hook_name, callback, self.manifest.name,
+        )
         self._manager._hooks.setdefault(hook_name, []).append(callback)
         logger.debug("Plugin %s registered hook: %s", self.manifest.name, hook_name)
 
