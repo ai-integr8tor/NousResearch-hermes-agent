@@ -379,6 +379,8 @@ export const zh: Translations = {
       embedsAlways: '总是',
       embedsOff: '关闭',
       embedsReset: (count: number) => `重置 ${count} 个已允许的服务`,
+      menuBarCommandsTitle: '菜单栏命令',
+      menuBarCommandsDesc: '显示 macOS 菜单栏斜杠命令参考和复制助手。',
       product: '产品',
       productDesc: '易读的工具活动与简洁摘要。',
       technical: '技术',

@@ -5,6 +5,7 @@ import { useEffect, useState } from 'react'
 import { LanguageSwitcher } from '@/components/language-switcher'
 import { Button } from '@/components/ui/button'
 import { SegmentedControl } from '@/components/ui/segmented-control'
+import { Switch } from '@/components/ui/switch'
 import type { DesktopMarketplaceSearchItem } from '@/global'
 import { useI18n } from '@/i18n'
 import { triggerHaptic } from '@/lib/haptics'
@@ -240,6 +241,47 @@ export function AppearanceSettings() {
   const a = t.settings.appearance
 
   const [query, setQuery] = useState('')
+  const [menuBarCommandReferenceEnabled, setMenuBarCommandReferenceEnabled] = useState(true)
+
+  useEffect(() => {
+    let cancelled = false
+
+    window.hermesDesktop?.settings
+      ?.getMenuBarCommandReferenceEnabled?.()
+      .then(result => {
+        if (!cancelled) {
+          setMenuBarCommandReferenceEnabled(result.enabled)
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setMenuBarCommandReferenceEnabled(true)
+        }
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const toggleMenuBarCommandReference = (enabled: boolean) => {
+    setMenuBarCommandReferenceEnabled(enabled)
+    triggerHaptic('selection')
+
+    const save = window.hermesDesktop?.settings?.setMenuBarCommandReferenceEnabled
+
+    if (!save) {
+      return
+    }
+
+    void save(enabled)
+      .then(result => {
+        setMenuBarCommandReferenceEnabled(result.enabled)
+      })
+      .catch(() => {
+        setMenuBarCommandReferenceEnabled(!enabled)
+      })
+  }
 
   // One box does double duty: filter installed themes live (below), and run a
   // name search against the VS Code Marketplace (the Cmd-K "Install theme…"
@@ -460,6 +502,18 @@ export function AppearanceSettings() {
             }
             description={a.embedsDesc}
             title={a.embedsTitle}
+          />
+
+          <ListRow
+            action={
+              <Switch
+                aria-label={a.menuBarCommandsTitle}
+                checked={menuBarCommandReferenceEnabled}
+                onCheckedChange={toggleMenuBarCommandReference}
+              />
+            }
+            description={a.menuBarCommandsDesc}
+            title={a.menuBarCommandsTitle}
           />
         </div>
       </div>

@@ -75,7 +75,10 @@ contextBridge.exposeInMainWorld('hermesDesktop', {
   sanitizeWorkspaceCwd: cwd => ipcRenderer.invoke('hermes:workspace:sanitize', cwd),
   settings: {
     getDefaultProjectDir: () => ipcRenderer.invoke('hermes:setting:defaultProjectDir:get'),
+    getMenuBarCommandReferenceEnabled: () => ipcRenderer.invoke('hermes:setting:menuBarCommandReference:get'),
     setDefaultProjectDir: dir => ipcRenderer.invoke('hermes:setting:defaultProjectDir:set', dir),
+    setMenuBarCommandReferenceEnabled: enabled =>
+      ipcRenderer.invoke('hermes:setting:menuBarCommandReference:set', enabled),
     pickDefaultProjectDir: () => ipcRenderer.invoke('hermes:setting:defaultProjectDir:pick')
   },
   revealLogs: () => ipcRenderer.invoke('hermes:logs:reveal'),

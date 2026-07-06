@@ -15,7 +15,8 @@ const {
   screen,
   session,
   shell,
-  systemPreferences
+  systemPreferences,
+  Tray
 } = require('electron')
 const crypto = require('node:crypto')
 const fs = require('node:fs')
@@ -36,11 +37,7 @@ const {
   SESSION_WINDOW_MIN_WIDTH
 } = require('./session-windows.cjs')
 const { canImportHermesCli, verifyHermesCli } = require('./backend-probes.cjs')
-const {
-  createLinkTitleWindow,
-  guardLinkTitleSession,
-  readLinkTitleWindowTitle
-} = require('./link-title-window.cjs')
+const { createLinkTitleWindow, guardLinkTitleSession, readLinkTitleWindowTitle } = require('./link-title-window.cjs')
 const { probeGatewayWebSocket } = require('./gateway-ws-probe.cjs')
 const { adoptServedDashboardToken } = require('./dashboard-token.cjs')
 const { waitForDashboardPortAnnouncement } = require('./backend-ready.cjs')
@@ -50,6 +47,11 @@ const { fetchMarketplaceThemes, searchMarketplaceThemes } = require('./vscode-ma
 const { buildDesktopBackendEnv, normalizeHermesHomeRoot } = require('./backend-env.cjs')
 const { readWindowsUserEnvVar } = require('./windows-user-env.cjs')
 const { readWslWindowsClipboardImage } = require('./wsl-clipboard-image.cjs')
+const { buildSlashReferenceWindowUrl, positionSlashReferenceWindowBounds } = require('./slash-reference-window.cjs')
+const {
+  DEFAULT_MENU_BAR_COMMAND_REFERENCE_ENABLED,
+  menuBarCommandReferenceEnabledFromConfig
+} = require('./menu-bar-command-reference.cjs')
 const {
   nativeOverlayWidth: computeNativeOverlayWidth,
   macTitleBarOverlayHeight
@@ -366,6 +368,10 @@ const BOOTSTRAP_COMPLETE_MARKER = path.join(ACTIVE_HERMES_ROOT, '.hermes-bootstr
 const BOOTSTRAP_MARKER_SCHEMA_VERSION = 1
 
 const DESKTOP_CONNECTION_CONFIG_PATH = path.join(app.getPath('userData'), 'connection.json')
+const DESKTOP_MENU_BAR_COMMAND_REFERENCE_CONFIG_PATH = path.join(
+  app.getPath('userData'),
+  'menu-bar-command-reference.json'
+)
 const DESKTOP_UPDATE_CONFIG_PATH = path.join(app.getPath('userData'), 'updates.json')
 const DESKTOP_WINDOW_STATE_PATH = path.join(app.getPath('userData'), 'window-state.json')
 // active-profile.json records which Hermes profile the desktop launches its
@@ -428,6 +434,11 @@ const APP_ICON_PATHS = [
   path.join(APP_ROOT, 'public', 'apple-touch-icon.png'),
   path.join(APP_ROOT, 'dist', 'apple-touch-icon.png'),
   path.join(unpackedPathFor(APP_ROOT), 'dist', 'apple-touch-icon.png')
+]
+const MENU_BAR_ICON_PATHS = [
+  path.join(APP_ROOT, 'public', 'nous-girl-template.png'),
+  path.join(APP_ROOT, 'dist', 'nous-girl-template.png'),
+  path.join(unpackedPathFor(APP_ROOT), 'dist', 'nous-girl-template.png')
 ]
 
 let rendererTitleBarTheme = null
@@ -772,6 +783,8 @@ function registerMediaProtocol() {
 }
 
 let mainWindow = null
+let slashReferenceTray = null
+let slashReferenceWindow = null
 let hermesProcess = null
 let connectionPromise = null
 // Additional per-profile backends, keyed by profile name. The PRIMARY backend
@@ -1784,6 +1797,25 @@ function writeFileAtomic(targetPath, data, encoding) {
   fs.renameSync(tmp, targetPath)
 }
 
+function readMenuBarCommandReferenceEnabled() {
+  try {
+    return menuBarCommandReferenceEnabledFromConfig(
+      JSON.parse(fs.readFileSync(DESKTOP_MENU_BAR_COMMAND_REFERENCE_CONFIG_PATH, 'utf8'))
+    )
+  } catch {
+    return DEFAULT_MENU_BAR_COMMAND_REFERENCE_ENABLED
+  }
+}
+
+function writeMenuBarCommandReferenceEnabled(enabled) {
+  const next = enabled !== false
+
+  fs.mkdirSync(path.dirname(DESKTOP_MENU_BAR_COMMAND_REFERENCE_CONFIG_PATH), { recursive: true })
+  writeFileAtomic(DESKTOP_MENU_BAR_COMMAND_REFERENCE_CONFIG_PATH, JSON.stringify({ enabled: next }, null, 2))
+
+  return next
+}
+
 function writeDesktopUpdateConfig(config) {
   fs.mkdirSync(path.dirname(DESKTOP_UPDATE_CONFIG_PATH), { recursive: true })
   writeFileAtomic(DESKTOP_UPDATE_CONFIG_PATH, JSON.stringify(config, null, 2))
@@ -2205,7 +2237,9 @@ async function releaseBackendLock(updateRoot, tag) {
   // imports broken (the July 2026 brotlicffi/_sodium.pyd incidents). Failing
   // the update loudly and keeping the app running is strictly better than a
   // bricked install that needs manual venv surgery.
-  rememberLog(`[${tag}] venv shim still locked after 15s; aborting hand-off (something outside this app holds the venv)`)
+  rememberLog(
+    `[${tag}] venv shim still locked after 15s; aborting hand-off (something outside this app holds the venv)`
+  )
   return { unlocked: false }
 }
 
@@ -3996,6 +4030,10 @@ function getAppIconPath() {
   return APP_ICON_PATHS.find(fileExists)
 }
 
+function getMenuBarIconPath() {
+  return MENU_BAR_ICON_PATHS.find(fileExists) || getAppIconPath()
+}
+
 function sendOpenUpdatesRequested() {
   if (!mainWindow || mainWindow.isDestroyed()) return
   const { webContents } = mainWindow
@@ -4118,7 +4156,15 @@ function buildApplicationMenu() {
   template.push({
     label: 'Help',
     role: 'help',
-    submenu: [checkForUpdatesItem]
+    submenu: [
+      {
+        accelerator: 'CommandOrControl+/',
+        click: () => toggleSlashReferenceWindow(),
+        label: 'Slash Command Quick Reference'
+      },
+      { type: 'separator' },
+      checkForUpdatesItem
+    ]
   })
 
   return Menu.buildFromTemplate(template)
@@ -5829,6 +5875,158 @@ function createNewSessionWindow() {
   return spawnSecondaryWindow({ newSession: true })
 }
 
+const SLASH_REFERENCE_WINDOW_SIZE = { width: 380, height: 700 }
+
+function slashReferenceWindowUrl() {
+  return buildSlashReferenceWindowUrl({
+    devServer: DEV_SERVER,
+    rendererIndexPath: DEV_SERVER ? undefined : resolveRendererIndex()
+  })
+}
+
+function slashReferenceTrayImage() {
+  const iconPath = getMenuBarIconPath()
+  if (!iconPath) {
+    return nativeImage.createEmpty()
+  }
+
+  const image = nativeImage.createFromPath(iconPath).resize({ height: 18, width: 18 })
+  image.setTemplateImage(true)
+  return image
+}
+
+function positionSlashReferenceWindow() {
+  if (!slashReferenceTray || !slashReferenceWindow || slashReferenceWindow.isDestroyed()) return
+
+  const trayBounds = slashReferenceTray.getBounds()
+  const display = screen.getDisplayNearestPoint({
+    x: Math.round(trayBounds.x + trayBounds.width / 2),
+    y: Math.round(trayBounds.y + trayBounds.height / 2)
+  })
+
+  slashReferenceWindow.setBounds(
+    positionSlashReferenceWindowBounds({
+      displayBounds: display.bounds,
+      trayBounds,
+      windowSize: SLASH_REFERENCE_WINDOW_SIZE
+    })
+  )
+}
+
+function createSlashReferenceWindow() {
+  if (slashReferenceWindow && !slashReferenceWindow.isDestroyed()) return slashReferenceWindow
+
+  const win = new BrowserWindow({
+    ...SLASH_REFERENCE_WINDOW_SIZE,
+    alwaysOnTop: true,
+    backgroundColor: '#00000000',
+    frame: false,
+    fullscreenable: false,
+    hasShadow: true,
+    hiddenInMissionControl: IS_MAC,
+    maximizable: false,
+    minimizable: false,
+    movable: false,
+    resizable: false,
+    show: false,
+    skipTaskbar: true,
+    title: 'Hermes Slash Commands',
+    transparent: true,
+    type: IS_MAC ? 'panel' : undefined,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.cjs'),
+      contextIsolation: true,
+      sandbox: true,
+      nodeIntegration: false,
+      devTools: true,
+      backgroundThrottling: false
+    }
+  })
+
+  slashReferenceWindow = win
+
+  win.setAlwaysOnTop(true, IS_MAC ? 'pop-up-menu' : 'floating')
+  win.setHiddenInMissionControl?.(true)
+  try {
+    win.setVisibleOnAllWorkspaces(
+      true,
+      IS_MAC ? { visibleOnFullScreen: true, skipTransformProcessType: true } : undefined
+    )
+  } catch {
+    // Best effort only; unsupported on some platforms.
+  }
+
+  wireCommonWindowHandlers(win)
+
+  win.on('blur', () => {
+    if (!win.isDestroyed()) win.hide()
+  })
+  win.on('closed', () => {
+    if (slashReferenceWindow === win) slashReferenceWindow = null
+  })
+
+  win.loadURL(slashReferenceWindowUrl())
+
+  return win
+}
+
+function showSlashReferenceWindow() {
+  if (!IS_MAC) return
+
+  const win = createSlashReferenceWindow()
+  positionSlashReferenceWindow()
+  win.show()
+  win.focus()
+}
+
+function hideSlashReferenceWindow() {
+  if (slashReferenceWindow && !slashReferenceWindow.isDestroyed()) {
+    slashReferenceWindow.hide()
+  }
+}
+
+function toggleSlashReferenceWindow() {
+  if (!IS_MAC) return
+
+  if (slashReferenceWindow && !slashReferenceWindow.isDestroyed() && slashReferenceWindow.isVisible()) {
+    hideSlashReferenceWindow()
+  } else {
+    showSlashReferenceWindow()
+  }
+}
+
+function createSlashReferenceTray() {
+  if (!IS_MAC || slashReferenceTray) return
+  if (!readMenuBarCommandReferenceEnabled()) return
+
+  slashReferenceTray = new Tray(slashReferenceTrayImage())
+  slashReferenceTray.setToolTip('Hermes slash commands')
+  slashReferenceTray.on('click', toggleSlashReferenceWindow)
+  slashReferenceTray.on('right-click', toggleSlashReferenceWindow)
+}
+
+function destroySlashReferenceTray() {
+  if (slashReferenceWindow && !slashReferenceWindow.isDestroyed()) {
+    slashReferenceWindow.destroy()
+  }
+  slashReferenceWindow = null
+
+  if (slashReferenceTray) {
+    slashReferenceTray.destroy()
+  }
+  slashReferenceTray = null
+}
+
+function syncSlashReferenceTrayWithPreference() {
+  if (!IS_MAC) return
+
+  if (readMenuBarCommandReferenceEnabled()) {
+    createSlashReferenceTray()
+  } else {
+    destroySlashReferenceTray()
+  }
+}
+
 // The pet overlay: a single transparent, frameless, always-on-top window that
 // hosts ONLY the floating mascot. Shift-clicking the in-window pet "pops it out"
 // here so it can leave the app's bounds and stay visible while Hermes is
@@ -6778,6 +6976,18 @@ ipcMain.handle('hermes:setting:defaultProjectDir:get', async () => ({
 
 ipcMain.handle('hermes:workspace:sanitize', async (_event, cwd) => sanitizeWorkspaceCwd(cwd))
 
+ipcMain.handle('hermes:setting:menuBarCommandReference:get', async () => ({
+  enabled: readMenuBarCommandReferenceEnabled()
+}))
+
+ipcMain.handle('hermes:setting:menuBarCommandReference:set', async (_event, enabled) => {
+  const next = writeMenuBarCommandReferenceEnabled(enabled)
+
+  syncSlashReferenceTrayWithPreference()
+
+  return { enabled: next }
+})
+
 ipcMain.handle('hermes:setting:defaultProjectDir:set', async (_event, dir) => {
   const next = typeof dir === 'string' && dir.trim() ? dir.trim() : null
 
@@ -7621,6 +7831,7 @@ app.whenReady().then(() => {
   configureSpellChecker()
   registerPowerResumeListeners()
   createWindow()
+  syncSlashReferenceTrayWithPreference()
 
   // Win/Linux cold start: the launching hermes:// URL is in our own argv.
   const _coldStartLink = _extractDeepLink(process.argv)
@@ -7662,6 +7873,8 @@ function configureSpellChecker() {
 }
 
 app.on('before-quit', () => {
+  destroySlashReferenceTray()
+
   // The always-on-top overlay isn't a "real" app window; close it so a stray
   // pet can't keep the process alive or float over a quit app.
   closePetOverlay()

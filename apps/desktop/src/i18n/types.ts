@@ -310,6 +310,8 @@ export interface Translations {
       embedsAlways: string
       embedsOff: string
       embedsReset: (count: number) => string
+      menuBarCommandsTitle: string
+      menuBarCommandsDesc: string
       product: string
       productDesc: string
       technical: string

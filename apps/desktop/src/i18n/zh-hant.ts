@@ -288,6 +288,8 @@ export const zhHant = defineLocale({
       embedsAlways: '一律',
       embedsOff: '關閉',
       embedsReset: (count: number) => `重設 ${count} 個已允許的服務`,
+      menuBarCommandsTitle: '選單列指令',
+      menuBarCommandsDesc: '顯示 macOS 選單列斜線指令參考與複製輔助。',
       product: '產品',
       productDesc: '易讀的工具活動與精簡摘要。',
       technical: '技術',

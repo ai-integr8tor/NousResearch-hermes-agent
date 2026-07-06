@@ -390,6 +390,8 @@ export const en: Translations = {
       embedsAlways: 'Always',
       embedsOff: 'Off',
       embedsReset: (count: number) => `Reset ${count} allowed ${count === 1 ? 'service' : 'services'}`,
+      menuBarCommandsTitle: 'Menu Bar Commands',
+      menuBarCommandsDesc: 'Show the macOS menu-bar slash-command reference and copy helper.',
       product: 'Product',
       productDesc: 'Human-friendly tool activity with concise summaries.',
       technical: 'Technical',
