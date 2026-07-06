@@ -24,6 +24,7 @@ import { AttachmentList } from './attachments'
 import { COMPOSER_FADE_BACKGROUND, type QueueEditState, slashArgStage } from './composer-utils'
 import { ContextMenu } from './context-menu'
 import { ComposerControls } from './controls'
+import { DockBanner } from './dock-banner'
 import { COMPOSER_DROP_ACTIVE_CLASS, COMPOSER_DROP_FADE_CLASS } from './drop-affordance'
 import { markActiveComposer } from './focus'
 import { HelpHint } from './help-hint'
@@ -58,6 +59,7 @@ import { ComposerTriggerPopover } from './trigger-popover'
 import type { ChatBarProps } from './types'
 import { UrlDialog } from './url-dialog'
 import { VoiceActivity, VoicePlaybackActivity } from './voice-activity'
+import { WindowPreviews } from './window-preview'
 
 export function ChatBar({
   busy,
@@ -77,6 +79,7 @@ export function ChatBar({
   onPickFiles,
   onPickFolders,
   onPickImages,
+  onPickWindow,
   onRemoveAttachment,
   onSteer,
   onSubmit,
@@ -674,6 +677,7 @@ export function ChatBar({
       onPickFiles={onPickFiles}
       onPickFolders={onPickFolders}
       onPickImages={onPickImages}
+      onPickWindow={onPickWindow}
       state={state}
     />
   )
@@ -961,7 +965,9 @@ export function ChatBar({
                     </div>
                   </div>
                 )}
+                <DockBanner />
                 {attachments.length > 0 && <AttachmentList attachments={attachments} onRemove={onRemoveAttachment} />}
+                <WindowPreviews attachments={attachments} onRemove={onRemoveAttachment} />
                 <div
                   className={cn(
                     'grid w-full',
