@@ -61,7 +61,7 @@ export const liveSessionInflightMessages = (inflight?: null | SessionInflightTur
 export const hydrateLiveSessionInflight = (inflight?: null | SessionInflightTurn) => {
   const assistant = String(inflight?.assistant ?? '')
 
-  if (!assistant && !inflight?.streaming) {
+  if (!inflight?.streaming) {
     return
   }
 
