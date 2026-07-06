@@ -736,6 +736,14 @@ class TestHealthDetailedEndpoint:
             "gateway_state": "running",
             "platforms": {"telegram": {"state": "connected"}},
             "active_agents": 2,
+            "active_agent_details": [
+                {
+                    "session_key": "agent:main:feishu:dm:c1:u1",
+                    "platform": "feishu",
+                    "seconds_since_activity": 367.5,
+                    "last_activity_desc": "api_call",
+                }
+            ],
             "exit_reason": None,
             "updated_at": "2026-04-14T00:00:00Z",
         }):
@@ -748,6 +756,14 @@ class TestHealthDetailedEndpoint:
                 assert data["gateway_state"] == "running"
                 assert data["platforms"] == {"telegram": {"state": "connected"}}
                 assert data["active_agents"] == 2
+                assert data["active_agent_details"] == [
+                    {
+                        "session_key": "agent:main:feishu:dm:c1:u1",
+                        "platform": "feishu",
+                        "seconds_since_activity": 367.5,
+                        "last_activity_desc": "api_call",
+                    }
+                ]
                 # Derived busy/drainable: this endpoint is served BY the live
                 # gateway, so running + 2 agents ⇒ busy and drainable.
                 assert data["gateway_busy"] is True
