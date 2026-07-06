@@ -2121,6 +2121,74 @@ def test_notification_event_routing_by_session_key(monkeypatch):
     assert server._notification_event_belongs_elsewhere(mine, {"session_key": "ghost"}) is False
 
 
+def test_notification_event_routing_follows_compression_chain(monkeypatch):
+    """#57576: a completion dispatched under a pre-compression key still routes
+    to the launching session after it compresses (session_key rotates)."""
+    # Dispatcher launched a background job under key "orig", then compressed:
+    # its current key is now "cont" but "orig" is preserved in the chain.
+    dispatcher = _session(session_key="cont", session_key_chain=["orig"])
+    # An unrelated session that never owned "orig" must NOT claim the event.
+    bystander = _session(session_key="other")
+    monkeypatch.setattr(server, "_sessions", {"a": dispatcher, "b": bystander})
+
+    # The dispatcher owns the event via its chain → it must handle it,
+    # not treat it as belonging elsewhere.
+    assert server._notification_event_belongs_elsewhere(
+        dispatcher, {"session_key": "orig"}
+    ) is False
+    # The bystander must defer: the event belongs to the live dispatcher.
+    assert server._notification_event_belongs_elsewhere(
+        bystander, {"session_key": "orig"}
+    ) is True
+
+
+def test_async_delegation_orphan_not_delivered_to_arbitrary_session(monkeypatch):
+    """#57576 follow-up: an async_delegation result with an explicit owner that
+    no live session owns must be treated as orphaned (dropped), never injected
+    into an arbitrary unrelated conversation."""
+    bystander = _session(session_key="other")
+    monkeypatch.setattr(server, "_sessions", {"a": bystander})
+
+    # Explicit owner "ghost" has no live session → orphaned.
+    assert server._async_delegation_event_is_orphaned(
+        bystander, {"type": "async_delegation", "session_key": "ghost"}
+    ) is True
+
+    # A live owner exists (directly) → not orphaned.
+    owner = _session(session_key="ghost")
+    monkeypatch.setattr(server, "_sessions", {"a": bystander, "b": owner})
+    assert server._async_delegation_event_is_orphaned(
+        bystander, {"type": "async_delegation", "session_key": "ghost"}
+    ) is False
+
+    # Live owner via compression chain → not orphaned.
+    chained = _session(session_key="cont", session_key_chain=["orig"])
+    monkeypatch.setattr(server, "_sessions", {"a": bystander, "b": chained})
+    assert server._async_delegation_event_is_orphaned(
+        bystander, {"type": "async_delegation", "session_key": "orig"}
+    ) is False
+
+    # Empty session_key is a genuine global/system event, NOT an orphan.
+    assert server._async_delegation_event_is_orphaned(
+        bystander, {"type": "async_delegation", "session_key": ""}
+    ) is False
+
+    # Non-delegation events are never treated as delegation orphans.
+    assert server._async_delegation_event_is_orphaned(
+        bystander, {"type": "completion", "session_key": "ghost"}
+    ) is False
+
+
+def test_record_session_key_history_dedupes_and_preserves_order():
+    """#57576: rotated-out keys accumulate in order without duplicates."""
+    session = _session(session_key="k0")
+    server._record_session_key_history(session, "k0")
+    server._record_session_key_history(session, "k1")
+    server._record_session_key_history(session, "k1")  # dup ignored
+    server._record_session_key_history(session, "")  # empty ignored
+    assert session["session_key_chain"] == ["k0", "k1"]
+
+
 def test_prompt_submit_rejects_negative_truncate_ordinal(monkeypatch):
     """A negative truncate_before_user_ordinal must be rejected, not honoured.
 

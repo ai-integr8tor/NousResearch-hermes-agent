@@ -3005,6 +3005,7 @@ def _sync_session_key_after_compress(
             unregister_gateway_notify(old_key)
         except Exception:
             pass
+        _record_session_key_history(session, old_key)
         session["session_key"] = new_session_id
         try:
             yolo_was_on = is_session_yolo_enabled(old_key)
@@ -3027,6 +3028,7 @@ def _sync_session_key_after_compress(
         # Even if the approval module fails to import, still anchor the
         # session_key on the new continuation id so downstream lookups
         # don't keep targeting the ended row.
+        _record_session_key_history(session, old_key)
         session["session_key"] = new_session_id
 
     if clear_pending_title:
@@ -8296,6 +8298,45 @@ def _(rid, params: dict) -> dict:
     return _ok(rid, {"status": "streaming"})
 
 
+def _record_session_key_history(session: dict, old_key: str) -> None:
+    """Append a rotated-out session key to the session's compression chain.
+
+    Called when compression re-anchors ``session["session_key"]`` to a new
+    continuation id. Preserving the prior keys lets ``_session_owns_key``
+    still recognize background-job completions that were dispatched under an
+    earlier key. See #57576.
+    """
+    if not old_key:
+        return
+    chain = session.get("session_key_chain")
+    if not isinstance(chain, list):
+        chain = []
+        session["session_key_chain"] = chain
+    if old_key not in chain:
+        chain.append(old_key)
+
+
+def _session_owns_key(session: dict, key: str) -> bool:
+    """True if ``key`` is the session's current key or a prior key of its
+    compression chain.
+
+    Context compression rotates ``session["session_key"]`` to a new
+    continuation id (see ``_reanchor_session_key_after_compression``). A
+    background job dispatched *before* compression recorded the old key, so
+    ownership must be checked against the full history — not just the current
+    key — otherwise the dispatching session stops recognizing its own
+    completion event once it compresses. See #57576.
+    """
+    if not key:
+        return False
+    if key == str(session.get("session_key") or ""):
+        return True
+    chain = session.get("session_key_chain")
+    if chain and key in chain:
+        return True
+    return False
+
+
 def _notification_event_belongs_elsewhere(session: dict, evt: dict) -> bool:
     """True if ``evt`` is owned by a *different* live session.
 
@@ -8306,11 +8347,17 @@ def _notification_event_belongs_elsewhere(session: dict, evt: dict) -> bool:
     whichever poller happened to dequeue first. Orphaned events (owner gone)
     and global/system events (empty ``session_key``) return False so the
     current poller still handles them rather than losing them.
+
+    Ownership is matched against each session's compression chain, not just
+    its current ``session_key``: an async delegation dispatched before the
+    launching session compressed still belongs to that (now-rotated) session
+    rather than being treated as an orphan and grabbed by whichever poller
+    dequeues first. See #57576.
     """
     evt_key = str(evt.get("session_key") or "")
     if not evt_key:
         return False
-    if evt_key == str(session.get("session_key") or ""):
+    if _session_owns_key(session, evt_key):
         return False
     try:
         with _sessions_lock:
@@ -8321,9 +8368,40 @@ def _notification_event_belongs_elsewhere(session: dict, evt: dict) -> bool:
         return False
 
     return any(
-        s is not session and str(s.get("session_key") or "") == evt_key
+        s is not session and _session_owns_key(s, evt_key)
         for s in snapshot
     )
+
+
+def _async_delegation_event_is_orphaned(session: dict, evt: dict) -> bool:
+    """True if ``evt`` is an async-delegation completion with an explicit owner
+    that no *live* session currently owns.
+
+    An ``async_delegation`` result carries the ``session_key`` of the session
+    that launched the delegation. If that key is non-empty but no live session
+    owns it (directly or via its ``session_key_chain``), the completion has no
+    rightful home right now. Converting it into a synthetic user prompt in
+    whichever arbitrary session happened to dequeue it would inject a
+    background result into an unrelated conversation — the exact cross-session
+    delivery this routing is meant to prevent (#57576).
+
+    Note this is distinct from a truly global/system event (empty
+    ``session_key``): those are intentionally handled by the current poller.
+    Only delegations with an *explicit* owner that is no longer live are
+    treated as orphaned so they are dropped rather than misdelivered.
+    """
+    if evt.get("type") != "async_delegation":
+        return False
+    evt_key = str(evt.get("session_key") or "")
+    if not evt_key:
+        return False
+    try:
+        with _sessions_lock:
+            snapshot = list(_sessions.values())
+    except Exception:
+        # Fail open: if we can't enumerate live sessions, don't drop the event.
+        return False
+    return not any(_session_owns_key(s, evt_key) for s in snapshot)
 
 
 def _notification_event_dedup_key(evt: dict) -> tuple:
@@ -8396,6 +8474,17 @@ def _notification_poller_loop(
             time.sleep(0.1)
             continue
 
+        # An async-delegation result with an explicit owner that is no longer
+        # live must never be injected into an arbitrary conversation. Drop it
+        # rather than converting it into a synthetic prompt here (#57576).
+        if _async_delegation_event_is_orphaned(session, evt):
+            print(
+                f"[tui_gateway] dropping orphaned async_delegation event for "
+                f"session_key={evt.get('session_key')!r}: no live owner",
+                file=sys.stderr,
+            )
+            continue
+
         _evt_sid = evt.get("session_id", "")
         if evt.get("type") == "completion" and process_registry.is_completion_consumed(_evt_sid):
             continue
@@ -8443,6 +8532,10 @@ def _notification_poller_loop(
             break
         if _notification_event_belongs_elsewhere(session, evt):
             deferred.append(evt)
+            continue
+        # Orphaned async-delegation results (explicit owner, no live session)
+        # are dropped, not misdelivered into this draining session (#57576).
+        if _async_delegation_event_is_orphaned(session, evt):
             continue
         _evt_sid = evt.get("session_id", "")
         if evt.get("type") == "completion" and process_registry.is_completion_consumed(_evt_sid):
