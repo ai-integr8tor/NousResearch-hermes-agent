@@ -1488,6 +1488,8 @@ export interface Translations {
      *  package (AppImage/.deb/.rpm) was not changed and must be reinstalled. */
     guiSkewTitle: string
     guiSkewBody: string
+    activeWorkTitle: string
+    activeWorkBody: string
     copy: string
     copied: string
     done: string
