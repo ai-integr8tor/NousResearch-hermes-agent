@@ -296,6 +296,8 @@ export const ja = defineLocale({
       embedsAlways: '常に',
       embedsOff: 'オフ',
       embedsReset: (count: number) => `許可した${count}件のサービスをリセット`,
+      menuBarCommandsTitle: 'メニューバーコマンド',
+      menuBarCommandsDesc: 'macOS メニューバーのスラッシュコマンド一覧とコピー補助を表示します。',
       product: 'プロダクト',
       productDesc: '読みやすいツール活動と簡潔な要約を表示します。',
       technical: 'テクニカル',
