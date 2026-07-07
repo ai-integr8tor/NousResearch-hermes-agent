@@ -2139,6 +2139,7 @@ export interface AuxiliaryModelsResponse {
 export interface MoaModelSlot {
   provider: string;
   model: string;
+  enabled?: boolean;
 }
 
 export interface MoaConfigResponse {
