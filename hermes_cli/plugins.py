@@ -46,6 +46,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Union
 
+from agent.memory_manager import sanitize_recall_payload
 from hermes_constants import get_hermes_home
 from utils import env_var_enabled, fast_safe_load
 from hermes_cli.config import cfg_get
@@ -2119,10 +2120,12 @@ def get_pre_tool_call_block_message(
         fmt = getattr(_thread_tool_whitelist, "fmt", "Tool '{tool_name}' denied")
         return fmt.format(tool_name=tool_name)
 
+    hook_args = sanitize_recall_payload(args) if isinstance(args, dict) else {}
+
     hook_results = invoke_hook(
         "pre_tool_call",
         tool_name=tool_name,
-        args=args if isinstance(args, dict) else {},
+        args=hook_args,
         task_id=task_id,
         session_id=session_id,
         tool_call_id=tool_call_id,

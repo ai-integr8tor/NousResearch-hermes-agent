@@ -22,6 +22,7 @@ move-and-name refactor with no semantic change.
 
 from __future__ import annotations
 
+import copy
 import logging
 import threading
 import uuid
@@ -30,6 +31,7 @@ from typing import Any, Dict, List, Optional
 
 from agent.conversation_compression import conversation_history_after_compression
 from agent.iteration_budget import IterationBudget
+from agent.memory_manager import sanitize_context, sanitize_recall_payload
 from agent.model_metadata import (
     estimate_messages_tokens_rough,
     estimate_request_tokens_rough,
@@ -340,11 +342,11 @@ def build_turn_context(
     # Crash-resilience: persist the inbound user turn as soon as the session row exists.
     try:
         agent._persist_session(messages, conversation_history)
-    except Exception:
+    except Exception as exc:
         logger.warning(
-            "Early turn-start session persistence failed for session=%s",
+            "Early turn-start session persistence failed for session=%s: %s",
             agent.session_id or "none",
-            exc_info=True,
+            exc,
         )
 
     # ── Preflight context compression ──
@@ -451,7 +453,7 @@ def build_turn_context(
             task_id=effective_task_id,
             turn_id=turn_id,
             user_message=original_user_message,
-            conversation_history=list(messages),
+            conversation_history=sanitize_recall_payload(messages),
             is_first_turn=(not bool(conversation_history)),
             model=agent.model,
             platform=getattr(agent, "platform", None) or "",
@@ -523,7 +525,7 @@ def build_turn_context(
 
     # External memory provider: prefetch once before the tool loop.
     ext_prefetch_cache = ""
-    if agent._memory_manager:
+    if agent._memory_manager and getattr(agent, "_memory_auto_inject_recall", True):
         try:
             _query = original_user_message if isinstance(original_user_message, str) else ""
             ext_prefetch_cache = agent._memory_manager.prefetch_all(_query) or ""

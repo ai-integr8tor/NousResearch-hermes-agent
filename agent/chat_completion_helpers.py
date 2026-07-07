@@ -896,6 +896,9 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
             combined = "\n\n".join(b.strip() for b in think_blocks if b.strip())
             reasoning_text = combined or None
 
+    if reasoning_text:
+        reasoning_text = _sanitize_surrogates(reasoning_text)
+
     if reasoning_text and agent.verbose_logging:
         logging.debug(f"Captured reasoning ({len(reasoning_text)} chars): {reasoning_text}")
 
@@ -918,9 +921,6 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
     # can return invalid surrogate code points that crash json.dumps() on persist.
     _raw_content = assistant_message.content or ""
     _san_content = _sanitize_surrogates(_raw_content)
-    if reasoning_text:
-        reasoning_text = _sanitize_surrogates(reasoning_text)
-
     # Strip inline reasoning tags (<think>…</think> etc.) from the stored
     # assistant content.  Reasoning was already captured into
     # ``reasoning_text`` above (either from structured fields or the
@@ -959,7 +959,8 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
         if isinstance(model_extra, dict) and "reasoning_content" in model_extra:
             raw_reasoning_content = model_extra["reasoning_content"]
     if raw_reasoning_content is not None:
-        msg["reasoning_content"] = _sanitize_surrogates(raw_reasoning_content)
+        sanitized_reasoning_content = _sanitize_surrogates(raw_reasoning_content)
+        msg["reasoning_content"] = sanitized_reasoning_content
     elif assistant_tool_calls and agent._needs_thinking_reasoning_pad():
         # DeepSeek v4 thinking mode and Kimi / Moonshot thinking mode
         # both require reasoning_content on every assistant tool-call
@@ -1005,16 +1006,16 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
         # Each provider may include opaque fields (signature, encrypted_content)
         # that must be preserved exactly.
         raw_details = assistant_message.reasoning_details
-        preserved = []
+        detail_payloads = []
         for d in raw_details:
             if isinstance(d, dict):
-                preserved.append(d)
+                detail_payloads.append(d)
             elif hasattr(d, "__dict__"):
-                preserved.append(d.__dict__)
+                detail_payloads.append(d.__dict__)
             elif hasattr(d, "model_dump"):
-                preserved.append(d.model_dump())
-        if preserved:
-            msg["reasoning_details"] = preserved
+                detail_payloads.append(d.model_dump())
+        if detail_payloads:
+            msg["reasoning_details"] = detail_payloads
 
     # Anthropic interleaved-thinking replay: when a turn interleaves signed
     # thinking blocks with tool_use, the parallel reasoning_details +
@@ -2165,10 +2166,11 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                 # reasoning display.  Non-reasoning text is harmlessly
                 # suppressed by the CLI's _stream_delta when the stream
                 # box is already closed (tool boundary flush).
-                elif agent.stream_delta_callback:
+                elif agent.stream_delta_callback or agent._stream_callback:
                     try:
-                        agent.stream_delta_callback(delta.content)
-                        agent._record_streamed_assistant_text(delta.content)
+                        _fire_first_delta()
+                        agent._fire_stream_delta(delta.content)
+                        deltas_were_sent["yes"] = True
                     except Exception:
                         pass
 

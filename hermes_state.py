@@ -25,7 +25,7 @@ import threading
 import time
 from pathlib import Path
 
-from agent.memory_manager import sanitize_context
+from agent.memory_manager import sanitize_context, sanitize_recall_payload
 from hermes_constants import get_hermes_home
 from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar
 
@@ -759,6 +759,7 @@ CREATE TABLE IF NOT EXISTS messages (
     reasoning TEXT,
     reasoning_content TEXT,
     reasoning_details TEXT,
+    thinking_signature_invalidated INTEGER DEFAULT 0,
     codex_reasoning_items TEXT,
     codex_message_items TEXT,
     platform_message_id TEXT,
@@ -1530,6 +1531,15 @@ class SessionDB:
                         "            WHERE m.session_id = sessions.id AND m.role = 'tool') "
                         "AND NOT EXISTS (SELECT 1 FROM sessions ch "
                         "                WHERE ch.parent_session_id = sessions.id)"
+                    )
+                except sqlite3.OperationalError:
+                    pass
+            if current_version < 17:
+                # v17: persist signed-thinking invalidation across resume/replay.
+                try:
+                    cursor.execute(
+                        "UPDATE messages SET thinking_signature_invalidated = 0 "
+                        "WHERE thinking_signature_invalidated IS NULL"
                     )
                 except sqlite3.OperationalError:
                     pass
@@ -3409,6 +3419,7 @@ class SessionDB:
         reasoning: str = None,
         reasoning_content: str = None,
         reasoning_details: Any = None,
+        thinking_signature_invalidated: bool = False,
         codex_reasoning_items: Any = None,
         codex_message_items: Any = None,
         platform_message_id: str = None,
@@ -3464,9 +3475,9 @@ class SessionDB:
             cursor = conn.execute(
                 """INSERT INTO messages (session_id, role, content, tool_call_id,
                    tool_calls, tool_name, timestamp, token_count, finish_reason,
-                   reasoning, reasoning_content, reasoning_details, codex_reasoning_items,
-                   codex_message_items, platform_message_id, observed)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   reasoning, reasoning_content, reasoning_details, thinking_signature_invalidated,
+                   codex_reasoning_items, codex_message_items, platform_message_id, observed)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     session_id,
                     role,
@@ -3480,6 +3491,7 @@ class SessionDB:
                     reasoning,
                     reasoning_content,
                     reasoning_details_json,
+                    1 if thinking_signature_invalidated else 0,
                     codex_items_json,
                     codex_message_items_json,
                     platform_message_id,
@@ -3530,6 +3542,9 @@ class SessionDB:
                 except (TypeError, ValueError):
                     logger.debug("Ignoring invalid explicit message timestamp: %r", msg.get("timestamp"))
             reasoning_details = msg.get("reasoning_details") if role == "assistant" else None
+            thinking_signature_invalidated = (
+                bool(msg.get("_thinking_signature_invalidated")) if role == "assistant" else False
+            )
             codex_reasoning_items = (
                 msg.get("codex_reasoning_items") if role == "assistant" else None
             )
@@ -3555,9 +3570,9 @@ class SessionDB:
             conn.execute(
                 """INSERT INTO messages (session_id, role, content, tool_call_id,
                    tool_calls, tool_name, timestamp, token_count, finish_reason,
-                   reasoning, reasoning_content, reasoning_details, codex_reasoning_items,
-                   codex_message_items, platform_message_id, observed)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   reasoning, reasoning_content, reasoning_details, thinking_signature_invalidated,
+                   codex_reasoning_items, codex_message_items, platform_message_id, observed)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     session_id,
                     role,
@@ -3571,6 +3586,7 @@ class SessionDB:
                     msg.get("reasoning") if role == "assistant" else None,
                     msg.get("reasoning_content") if role == "assistant" else None,
                     reasoning_details_json,
+                    1 if thinking_signature_invalidated else 0,
                     codex_items_json,
                     codex_message_items_json,
                     platform_msg_id,
@@ -4046,7 +4062,8 @@ class SessionDB:
             rows = self._conn.execute(
                 "SELECT role, content, tool_call_id, tool_calls, tool_name, "
                 "finish_reason, reasoning, reasoning_content, reasoning_details, "
-                "codex_reasoning_items, codex_message_items, platform_message_id, observed, timestamp "
+                "thinking_signature_invalidated, codex_reasoning_items, codex_message_items, "
+                "platform_message_id, observed, timestamp "
                 f"FROM messages WHERE session_id IN ({placeholders})"
                 # Order by AUTOINCREMENT id (true insertion order), NOT timestamp:
                 # append_message stamps rows with time.time(), which is not
@@ -4074,7 +4091,9 @@ class SessionDB:
                 msg["tool_name"] = row["tool_name"]
             if row["tool_calls"]:
                 try:
-                    msg["tool_calls"] = json.loads(row["tool_calls"])
+                    msg["tool_calls"] = sanitize_recall_payload(
+                        json.loads(row["tool_calls"])
+                    )
                 except (json.JSONDecodeError, TypeError):
                     logger.warning("Failed to deserialize tool_calls in conversation replay, falling back to []")
                     msg["tool_calls"] = []
@@ -4094,24 +4113,34 @@ class SessionDB:
                 if row["finish_reason"]:
                     msg["finish_reason"] = row["finish_reason"]
                 if row["reasoning"]:
-                    msg["reasoning"] = row["reasoning"]
+                    msg["reasoning"] = sanitize_recall_payload(row["reasoning"])
                 if row["reasoning_content"] is not None:
-                    msg["reasoning_content"] = row["reasoning_content"]
+                    msg["reasoning_content"] = sanitize_recall_payload(
+                        row["reasoning_content"]
+                    )
                 if row["reasoning_details"]:
                     try:
-                        msg["reasoning_details"] = json.loads(row["reasoning_details"])
+                        msg["reasoning_details"] = sanitize_recall_payload(
+                            json.loads(row["reasoning_details"])
+                        )
                     except (json.JSONDecodeError, TypeError):
                         logger.warning("Failed to deserialize reasoning_details, falling back to None")
                         msg["reasoning_details"] = None
+                if row["thinking_signature_invalidated"]:
+                    msg["_thinking_signature_invalidated"] = True
                 if row["codex_reasoning_items"]:
                     try:
-                        msg["codex_reasoning_items"] = json.loads(row["codex_reasoning_items"])
+                        msg["codex_reasoning_items"] = sanitize_recall_payload(
+                            json.loads(row["codex_reasoning_items"])
+                        )
                     except (json.JSONDecodeError, TypeError):
                         logger.warning("Failed to deserialize codex_reasoning_items, falling back to None")
                         msg["codex_reasoning_items"] = None
                 if row["codex_message_items"]:
                     try:
-                        msg["codex_message_items"] = json.loads(row["codex_message_items"])
+                        msg["codex_message_items"] = sanitize_recall_payload(
+                            json.loads(row["codex_message_items"])
+                        )
                     except (json.JSONDecodeError, TypeError):
                         logger.warning("Failed to deserialize codex_message_items, falling back to None")
                         msg["codex_message_items"] = None

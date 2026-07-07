@@ -34,7 +34,11 @@ from agent.error_classifier import FailoverReason, classify_api_error
 from agent.iteration_budget import IterationBudget
 from agent.turn_context import build_turn_context
 from agent.turn_retry_state import TurnRetryState
-from agent.memory_manager import build_memory_context_block
+from agent.memory_manager import (
+    build_memory_context_block,
+    sanitize_recall_payload,
+    strip_injected_recall_blocks,
+)
 from agent.message_sanitization import (
     close_interrupted_tool_sequence,
     _repair_tool_call_arguments,
@@ -814,6 +818,11 @@ def run_conversation(
                 api_msg.pop("finish_reason")
             # Strip internal thinking-prefill marker
             api_msg.pop("_thinking_prefill", None)
+            # Internal replay bookkeeping: native Anthropic replays consume
+            # this flag to demote scrubbed signed thinking, everyone else
+            # must never see it.
+            if agent.api_mode != "anthropic_messages":
+                api_msg.pop("_thinking_signature_invalidated", None)
             # Strip Codex Responses API fields (call_id, response_item_id) for
             # strict providers like Mistral, Fireworks, etc. that reject unknown fields.
             # Uses new dicts so the internal messages list retains the fields
@@ -1200,22 +1209,11 @@ def run_conversation(
                             request_messages = api_kwargs.get("input")
                         if not isinstance(request_messages, list):
                             request_messages = api_messages
-                        # Shallow-copy the outer list so plugins that retain the
-                        # reference for async snapshotting don't observe later
-                        # mutations of api_messages.  The inner dicts are not
-                        # mutated by the agent loop, so a shallow copy is
-                        # sufficient; a deepcopy would walk every tool result
-                        # and base64 image on every API call.
-                        #
-                        # The ``request_messages`` and ``conversation_history``
-                        # kwargs below are pre-existing raw passthroughs
-                        # consumed by the bundled langfuse plugin
-                        # (``plugins/observability/langfuse/__init__.py:_coerce_request_messages``).
-                        # They predate ``request`` and are intentionally NOT
-                        # sanitised — secrets are not expected here because
-                        # ``api_kwargs`` is the same object passed to the
-                        # provider client.  New consumers should read the
-                        # sanitised view from ``request["body"]["messages"]``.
+                        _hook_request_messages = sanitize_recall_payload(
+                            list(request_messages)
+                            if isinstance(request_messages, list)
+                            else []
+                        )
                         _request_payload = agent._api_request_payload_for_hook(api_kwargs)
                         _invoke_hook(
                             "pre_api_request",
@@ -1224,16 +1222,16 @@ def run_conversation(
                             api_request_id=api_request_id,
                             session_id=agent.session_id or "",
                             user_message=original_user_message,
-                            conversation_history=list(messages),
+                            conversation_history=sanitize_recall_payload(
+                                list(messages)
+                            ),
                             platform=agent.platform or "",
                             model=agent.model,
                             provider=agent.provider,
                             base_url=agent.base_url,
                             api_mode=agent.api_mode,
                             api_call_count=api_call_count,
-                            request_messages=list(request_messages)
-                            if isinstance(request_messages, list)
-                            else [],
+                            request_messages=_hook_request_messages,
                             message_count=len(api_messages),
                             tool_count=len(agent.tools or []),
                             approx_input_tokens=approx_tokens,
@@ -1659,6 +1657,7 @@ def run_conversation(
                     # channel; fall back to it so the user sees *something*.
                     if not _refusal_text:
                         _refusal_text = (agent._extract_reasoning(_refusal_result) or "").strip()
+                    _refusal_text = _sanitize_surrogates(_refusal_text)
 
                     agent._invoke_api_request_error_hook(
                         task_id=effective_task_id,
@@ -1885,8 +1884,17 @@ def run_conversation(
                             length_continue_retries += 1
                             interim_msg = agent._build_assistant_message(assistant_message, finish_reason)
                             messages.append(interim_msg)
-                            if assistant_message.content:
-                                truncated_response_parts.append(assistant_message.content)
+                            _partial_chunk = interim_msg.get("content")
+                            if isinstance(_partial_chunk, str) and _partial_chunk:
+                                _partial_chunk = _sanitize_surrogates(
+                                    getattr(assistant_message, "content", "")
+                                )
+                                _partial_chunk = agent._strip_think_blocks(_partial_chunk)
+                                if _partial_chunk:
+                                    from agent.redact import redact_sensitive_text
+                                    truncated_response_parts.append(
+                                        redact_sensitive_text(_partial_chunk)
+                                    )
 
                             if length_continue_retries < 4:
                                 _is_partial_stream_stub = (
@@ -1928,7 +1936,9 @@ def run_conversation(
                                 _retry.restart_with_length_continuation = True
                                 break
 
-                            partial_response = agent._strip_think_blocks("".join(truncated_response_parts)).strip()
+                            partial_response = strip_injected_recall_blocks(
+                                agent._strip_think_blocks("".join(truncated_response_parts))
+                            ).strip()
                             agent._cleanup_task_resources(effective_task_id)
                             agent._persist_session(messages, conversation_history)
                             return {
@@ -2279,8 +2289,10 @@ def run_conversation(
                 # record of the half-finished reply on screen, so the next turn
                 # the model "forgets" what it just said — exactly what users hit
                 # when they stop to redirect mid-response.
-                _partial = agent._strip_think_blocks(
-                    getattr(agent, "_current_streamed_assistant_text", "") or ""
+                _partial = strip_injected_recall_blocks(
+                    agent._strip_think_blocks(
+                        getattr(agent, "_current_streamed_assistant_text", "") or ""
+                    )
                 ).strip()
                 if _partial:
                     messages.append({"role": "assistant", "content": _partial})
@@ -2966,7 +2978,10 @@ def run_conversation(
                 agent._buffer_vprint(f"   📝 Error: {_error_summary}")
                 if status_code and status_code < 500:
                     _err_body = getattr(api_error, "body", None)
-                    _err_body_str = str(_err_body)[:300] if _err_body else None
+                    _err_body_str = (
+                        str(_err_body).strip()[:300]
+                        if _err_body else None
+                    )
                     if _err_body_str:
                         agent._buffer_vprint(f"   📋 Details: {_err_body_str}")
                 agent._buffer_vprint(f"   ⏱️  Elapsed: {elapsed_time:.2f}s  Context: {len(api_messages)} msgs, ~{approx_tokens:,} tokens")
@@ -3842,7 +3857,11 @@ def run_conversation(
                             f"{agent.log_prefix}        for localhost, or add the server's cert to your trust store.",
                             force=True,
                         )
-                    logger.error(f"{agent.log_prefix}Non-retryable client error: {api_error}")
+                    logger.error(
+                        "%sNon-retryable client error: %s",
+                        agent.log_prefix,
+                        _nonretryable_summary,
+                    )
                     # Skip session persistence when the error is likely
                     # context-overflow related (status 400 + large session).
                     # Persisting the failed user message would make the
@@ -4123,7 +4142,7 @@ def run_conversation(
                     max_retries,
                     agent._client_log_context(),
                     _backoff_policy or "default",
-                    api_error,
+                    _error_summary,
                 )
                 # Sleep in small increments so we can respond to interrupts quickly
                 # instead of blocking the entire wait_time in one sleep() call
@@ -4241,10 +4260,13 @@ def run_conversation(
                     invoke_hook as _invoke_hook,
                 )
                 if has_hook("post_api_request"):
-                    _assistant_tool_calls = (
-                        getattr(assistant_message, "tool_calls", None) or []
+                    _hook_assistant_message = agent._sanitize_assistant_message_for_hook(
+                        assistant_message
                     )
-                    _assistant_text = assistant_message.content or ""
+                    _assistant_tool_calls = (
+                        getattr(_hook_assistant_message, "tool_calls", None) or []
+                    )
+                    _assistant_text = getattr(_hook_assistant_message, "content", None) or ""
                     _api_ended_at = api_start_time + api_duration
                     _invoke_hook(
                         "post_api_request",
@@ -4266,11 +4288,11 @@ def run_conversation(
                         response_model=getattr(response, "model", None),
                         response=agent._api_response_payload_for_hook(
                             response,
-                            assistant_message,
+                            _hook_assistant_message,
                             finish_reason=finish_reason,
                         ),
                         usage=agent._usage_summary_for_api_request_hook(response),
-                        assistant_message=assistant_message,
+                        assistant_message=_hook_assistant_message,
                         assistant_content_chars=len(_assistant_text),
                         assistant_tool_call_count=len(_assistant_tool_calls),
                     )
@@ -4278,16 +4300,21 @@ def run_conversation(
                 pass
 
             # Handle assistant response
-            if assistant_message.content and not agent.quiet_mode:
+            _safe_assistant_text = assistant_message.content or ""
+            if _safe_assistant_text and not agent.quiet_mode:
                 if agent.verbose_logging:
-                    agent._vprint(f"{agent.log_prefix}🤖 Assistant: {assistant_message.content}")
+                    agent._vprint(f"{agent.log_prefix}🤖 Assistant: {_safe_assistant_text}")
                 else:
-                    agent._vprint(f"{agent.log_prefix}🤖 Assistant: {assistant_message.content[:100]}{'...' if len(assistant_message.content) > 100 else ''}")
+                    agent._vprint(
+                        f"{agent.log_prefix}🤖 Assistant: "
+                        f"{_safe_assistant_text[:100]}"
+                        f"{'...' if len(_safe_assistant_text) > 100 else ''}"
+                    )
 
             # Notify progress callback of model's thinking (used by subagent
             # delegation to relay the child's reasoning to the parent display).
-            if (assistant_message.content and agent.tool_progress_callback):
-                _think_text = assistant_message.content.strip()
+            if (_safe_assistant_text and agent.tool_progress_callback):
+                _think_text = _safe_assistant_text
                 # Strip reasoning XML tags that shouldn't leak to parent display
                 _think_text = re.sub(
                     r'</?(?:REASONING_SCRATCHPAD|think|reasoning)>', '', _think_text
@@ -4405,7 +4432,12 @@ def run_conversation(
                 
                 if agent.verbose_logging:
                     for tc in assistant_message.tool_calls:
-                        logging.debug(f"Tool call: {tc.function.name} with args: {tc.function.arguments[:200]}...")
+                        _safe_args = tc.function.arguments
+                        logging.debug(
+                            "Tool call: %s with args: %s...",
+                            tc.function.name,
+                            _safe_args[:200],
+                        )
                 
                 # Validate tool call names - detect model hallucinations
                 # Repair mismatched tool names before validating
@@ -4590,7 +4622,7 @@ def run_conversation(
                 # as a fallback final response. Common pattern: model delivers its
                 # answer and calls memory/skill tools as a side-effect in the same
                 # turn. If the follow-up turn after tools is empty, we use this.
-                turn_content = assistant_message.content or ""
+                turn_content = assistant_msg.get("content") or ""
                 if turn_content and agent._has_content_after_think_block(turn_content):
                     agent._last_content_with_tools = turn_content
                     # Only mute subsequent output when EVERY tool call in
@@ -4788,7 +4820,9 @@ def run_conversation(
                     )
                     if agent._has_content_after_think_block(_partial_streamed):
                         _turn_exit_reason = "partial_stream_recovery"
-                        _recovered = agent._strip_think_blocks(_partial_streamed).strip()
+                        _recovered = strip_injected_recall_blocks(
+                            agent._strip_think_blocks(_partial_streamed)
+                        ).strip()
                         logger.info(
                             "Partial stream content delivered (%d chars) "
                             "— using as final response",
@@ -5087,7 +5121,9 @@ def run_conversation(
                     truncated_response_parts = []
                     length_continue_retries = 0
                 
-                final_response = agent._strip_think_blocks(final_response).strip()
+                final_response = strip_injected_recall_blocks(
+                    agent._strip_think_blocks(final_response)
+                ).strip()
                 
                 final_msg = agent._build_assistant_message(assistant_message, finish_reason)
 
@@ -5213,19 +5249,21 @@ def run_conversation(
                 break
             
         except Exception as e:
-            error_msg = f"Error during OpenAI-compatible API call #{api_call_count}: {str(e)}"
+            _error_summary = agent._summarize_api_error(e)
+            error_msg = (
+                f"Error during OpenAI-compatible API call #{api_call_count}: "
+                f"{_error_summary}"
+            )
             try:
                 print(f"❌ {error_msg}")
             except (OSError, ValueError):
                 logger.error(error_msg)
 
-            # Emit the full traceback at ERROR level so it lands in both
-            # agent.log AND errors.log.  Previously this was logged at DEBUG,
-            # which meant intermittent outer-loop failures were unreproducible
-            # — users would see a one-line summary on screen with no way to
-            # recover the call site.  logger.exception() includes the
-            # traceback automatically and emits at ERROR.
-            logger.exception("Outer loop error in API call #%d", api_call_count)
+            logger.error(
+                "Outer loop error in API call #%d: %s",
+                api_call_count,
+                _error_summary,
+            )
             
             # If an assistant message with tool_calls was already appended,
             # the API expects a role="tool" result for every tool_call_id.
