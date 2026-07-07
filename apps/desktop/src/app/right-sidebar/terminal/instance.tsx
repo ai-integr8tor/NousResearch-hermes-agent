@@ -27,7 +27,7 @@ interface TerminalInstanceProps {
 export function TerminalInstance({ id, active, cwd, onAddSelectionToChat, reviveBuffer }: TerminalInstanceProps) {
   const { t } = useI18n()
 
-  const { addSelectionToChat, hostRef, selection, selectionStyle, status } = useTerminalSession({
+  const { addSelectionToChat, hostRef, selection, selectionStyle, shellName, status } = useTerminalSession({
     id,
     cwd,
     active,
@@ -73,8 +73,10 @@ export function TerminalInstance({ id, active, cwd, onAddSelectionToChat, revive
       {/* Outer div paints the terminal inset; inner div is the xterm host so the
           canvas sizes to the content area and p-2 stays as terminal padding. */}
       <div
+        aria-label={`${shellName} terminal`}
         className="h-full min-h-0 overflow-hidden text-(--ui-text-secondary) [&_.xterm]:h-full [&_.xterm-screen]:bg-(--ui-editor-surface-background)! [&_.xterm-viewport]:bg-(--ui-editor-surface-background)!"
         ref={hostRef}
+        role="region"
       />
     </div>
   )
@@ -99,8 +101,10 @@ export function AgentTerminalInstance({ active, id, procId }: AgentTerminalInsta
       data-terminal=""
     >
       <div
+        aria-label="Agent terminal output"
         className="h-full min-h-0 overflow-hidden text-(--ui-text-secondary) [&_.xterm]:h-full [&_.xterm-screen]:bg-(--ui-editor-surface-background)! [&_.xterm-viewport]:bg-(--ui-editor-surface-background)!"
         ref={hostRef}
+        role="region"
       />
     </div>
   )
