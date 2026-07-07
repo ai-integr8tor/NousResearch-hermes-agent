@@ -10001,7 +10001,42 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # No bare text matching — "yes" in normal conversation must not trigger
         # execution of a dangerous command.
 
-        if await asyncio.to_thread(self._is_telegram_topic_root_lobby, source):
+        # ── Telegram topic-mode desync auto-recovery ────────────────
+        # If topic mode is ON in the DB but the Telegram chat no longer
+        # has forum topics enabled (user disabled via BotFather/UI),
+        # auto-disable topic mode so the user isn't locked out.
+        if (
+            source.platform == Platform.TELEGRAM
+            and source.chat_type == "dm"
+            and self._telegram_topic_mode_enabled(source)
+        ):
+            raw_msg = getattr(event, "raw_message", None)
+            raw_chat = getattr(raw_msg, "chat", None) if raw_msg else None
+            chat_is_forum = getattr(raw_chat, "is_forum", None)
+            if chat_is_forum is False:
+                # Topics were disabled externally — auto-recover.
+                logger.info(
+                    "Telegram topic-mode desync detected for chat %s: "
+                    "chat.is_forum=False but DB has topic_mode=ON. "
+                    "Auto-disabling topic mode.",
+                    source.chat_id,
+                )
+                try:
+                    if self._session_db:
+                        self._session_db.disable_telegram_topic_mode(
+                            chat_id=str(source.chat_id)
+                        )
+                except Exception:
+                    logger.debug("Failed to auto-disable topic mode", exc_info=True)
+                # Clear lobby debounce state so the user doesn't see stale timers.
+                for attr in ("_telegram_lobby_reminder_ts", "_telegram_capability_hint_ts"):
+                    store = getattr(self, attr, None)
+                    if isinstance(store, dict):
+                        store.pop(str(source.chat_id), None)
+                # Fall through — the lobby gate below will now return False
+                # and the message will be processed normally.
+
+        if self._is_telegram_topic_root_lobby(source):
             # Debounce the lobby reminder so a user who forgets about
             # topic mode and fires ten prompts doesn't get ten copies.
             if self._should_send_telegram_lobby_reminder(source):
