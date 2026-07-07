@@ -828,7 +828,7 @@ def _apply_write_gate(action: str, target: str, content: Optional[str],
 
     Only the mutating actions (add/replace/remove) are gated.
     """
-    if action not in {"add", "replace", "remove"}:
+    if action not in {"add", "replace", "remove", "audit"}:
         return None
 
     try:
@@ -991,6 +991,24 @@ def memory_tool(
         return json.dumps(result, ensure_ascii=False)
 
     # --- Single-op path ---------------------------------------------------
+
+    # --- Audit (read-only) ------------------------------------------------
+    if action == "audit":
+        entries = store._entries_for(target)
+        char_limit = store._char_limit(target)
+        char_count = store._char_count(target)
+        result = {
+            "target": target,
+            "usage": f"{char_count}/{char_limit} chars",
+            "usage_pct": f"{int(char_count / char_limit * 100) if char_limit else 0}%",
+            "entry_count": len(entries),
+            "entries": [
+                {"idx": i, "chars": len(e), "preview": e[:80]}
+                for i, e in enumerate(entries)
+            ],
+        }
+        return json.dumps(result, ensure_ascii=False)
+
     # Validate required params BEFORE the gate so an invalid write is rejected
     # immediately instead of being staged and only failing at approve time.
     if action == "add" and not content:
@@ -1059,22 +1077,24 @@ MEMORY_SCHEMA = {
     "name": "memory",
     "description": (
         "Save durable facts to persistent memory that survive across sessions. Memory is "
-        "injected into every future turn, so keep entries compact and high-signal.\n\n"
+        "injected into every future turn, so keep entries compact and high-signal.\n"
+        "ACTIONS: use action='audit' to inspect current entries (read-only), 'add' to save, "
+        "'replace' to update existing, or 'remove' to delete.\n"
         "HOW: make ALL your changes in ONE call via an 'operations' array (each item: "
         "{action, content?, old_text?}). The batch applies atomically and the char limit is "
         "checked only on the FINAL result — so a single call can remove/replace stale entries "
         "to free room AND add new ones, even when an add alone would overflow. The response "
         "reports current/limit chars and confirms completion; one batch call finishes the "
         "update, so don't repeat it. Use the bare action/content/old_text fields only for a "
-        "single lone change.\n\n"
+        "single lone change.\n"
         "WHEN: save proactively when the user states a preference, correction, or personal "
         "detail, or you learn a stable fact about their environment, conventions, or workflow. "
         "Priority: user preferences & corrections > environment facts > procedures. The best "
-        "memory stops the user repeating themselves.\n\n"
+        "memory stops the user repeating themselves.\n"
         "IF FULL: an add is rejected with the current entries shown. Reissue as ONE batch that "
-        "removes or shortens enough stale entries and adds the new one together.\n\n"
+        "removes or shortens enough stale entries and adds the new one together.\n"
         "TARGETS: 'user' = who the user is (name, role, preferences, style). 'memory' = your "
-        "notes (environment, conventions, tool quirks, lessons).\n\n"
+        "notes (environment, conventions, tool quirks, lessons).\n"
         "SKIP: trivial/obvious info, easily re-discovered facts, raw data dumps, task progress, "
         "completed-work logs, temporary TODO state (use session_search for those). Reusable "
         "procedures belong in a skill, not memory."
@@ -1084,7 +1104,7 @@ MEMORY_SCHEMA = {
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["add", "replace", "remove"],
+                "enum": ["add", "replace", "remove", "audit"],
                 "description": "The action to perform (single-op shape). Omit when using 'operations'."
             },
             "target": {
@@ -1110,7 +1130,7 @@ MEMORY_SCHEMA = {
                 "items": {
                     "type": "object",
                     "properties": {
-                        "action": {"type": "string", "enum": ["add", "replace", "remove"]},
+                        "action": {"type": "string", "enum": ["add", "replace", "remove", "audit"]},
                         "content": {"type": "string", "description": "Entry content for add/replace."},
                         "old_text": {"type": "string", "description": "Substring identifying the entry for replace/remove."},
                     },
