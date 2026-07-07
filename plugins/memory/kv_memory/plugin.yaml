@@ -1,0 +1,13 @@
+name: kv_memory
+version: 0.1.0
+kind: exclusive
+description: >-
+  Semantic memory via Q4-quantized embeddings with pluggable backends
+  (sentence-transformers, API, or local inference). Stores embeddings at
+  3-4x smaller than float32 with statistically identical retrieval quality.
+hooks:
+  - on_session_end
+  - on_session_switch
+provides_tools:
+  - kv_memory_search
+  - kv_memory_status
