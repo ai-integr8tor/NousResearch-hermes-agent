@@ -230,6 +230,7 @@ class TestExtractCacheBustingConfig:
                     "threshold": 0.6,
                     "target_ratio": 0.3,
                     "protect_last_n": 25,
+                    "context_assembly": {"enabled": False},
                     "some_other_key": "ignored",
                 }
             }
@@ -238,6 +239,7 @@ class TestExtractCacheBustingConfig:
         assert out["compression.threshold"] == 0.6
         assert out["compression.target_ratio"] == 0.3
         assert out["compression.protect_last_n"] == 25
+        assert out["compression.context_assembly"] == {"enabled": False}
 
     def test_missing_keys_yield_none(self):
         """Absent config keys must produce None values (still contribute to signature)."""
@@ -2116,4 +2118,3 @@ class TestCrossProcessInvalidationDefersCleanup:
 
         assert release_calls == [old_agent]
         runner._cleanup_agent_resources.assert_not_called()
-
