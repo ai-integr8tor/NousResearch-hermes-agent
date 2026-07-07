@@ -321,10 +321,21 @@ class TestMemoryStoreAdd:
 class TestMemoryStoreReplace:
     def test_replace_entry(self, store):
         store.add("memory", "Python 3.11 project")
-        result = store.replace("memory", "3.11", "Python 3.12 project")
+        result = store.replace("memory", "3.11", "3.12")
         assert result["success"] is True
         assert "Python 3.12 project" in store.memory_entries
         assert "Python 3.11 project" not in store.memory_entries
+
+    def test_replace_substring_preserves_context(self, store):
+        """Substring replacement within an entry preserves surrounding content."""
+        store.add("memory", "Section A\ncontent A\n\nSection B\ncontent B\n\nSection C\ncontent C")
+        result = store.replace("memory", "Section B\ncontent B", "Section B\nupdated B")
+        assert result["success"] is True
+        entry = store.memory_entries[0]
+        assert "Section A" in entry
+        assert "Section C" in entry
+        assert "updated B" in entry
+        assert "content B" not in entry
 
     def test_replace_no_match(self, store):
         store.add("memory", "fact A")

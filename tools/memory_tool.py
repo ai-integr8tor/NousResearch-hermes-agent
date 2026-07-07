@@ -386,7 +386,13 @@ class MemoryStore:
         return self._success_response(target, "Entry added.")
 
     def replace(self, target: str, old_text: str, new_content: str) -> Dict[str, Any]:
-        """Find entry containing old_text substring, replace it with new_content."""
+        """Find entry containing old_text substring, replace that substring with new_content.
+
+        The replacement is a substring substitution within the matched entry —
+        only the portion matching *old_text* is replaced; surrounding content
+        in the same entry is preserved.  This lets callers surgically update
+        one section of a multi-section entry without losing the rest.
+        """
         old_text = old_text.strip()
         new_content = new_content.strip()
         if not old_text:
@@ -429,9 +435,13 @@ class MemoryStore:
             idx = matches[0][0]
             limit = self._char_limit(target)
 
+            # Substring replacement: only the matching portion is swapped out,
+            # preserving the rest of the entry.
+            updated_entry = entries[idx].replace(old_text, new_content, 1)
+
             # Check that replacement doesn't blow the budget
             test_entries = entries.copy()
-            test_entries[idx] = new_content
+            test_entries[idx] = updated_entry
             new_total = len(ENTRY_DELIMITER.join(test_entries))
 
             if new_total > limit:
@@ -448,7 +458,7 @@ class MemoryStore:
                     "usage": f"{current:,}/{limit:,}",
                 })
 
-            entries[idx] = new_content
+            entries[idx] = updated_entry
             self._set_entries(target, entries)
             self.save_to_disk(target)
 
