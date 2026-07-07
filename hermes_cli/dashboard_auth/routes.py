@@ -193,6 +193,19 @@ async def auth_login(request: Request, provider: str, next: str = ""):
             detail=f"Provider does not support interactive login: {provider!r}",
         )
 
+    if getattr(p, "supports_password", False):
+        # Password-only providers have no OAuth redirect flow.
+        # Redirect to the login page which renders the credential form.
+        # Use the same safe-next validation + prefix-aware URL building as
+        # the rest of the auth flow so reverse-proxy and open-redirect
+        # protections are preserved.
+        safe_next = _validate_post_login_target(next)
+        target = f"{_prefix(request)}/login"
+        if safe_next:
+            from urllib.parse import quote
+            target = f"{target}?next={quote(safe_next, safe='')}"
+        return RedirectResponse(url=target, status_code=303)
+
     try:
         ls = p.start_login(redirect_uri=_redirect_uri(request))
     except ProviderError as e:
