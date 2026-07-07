@@ -9201,6 +9201,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if _cmd_def_inner and _cmd_def_inner.name == "kanban":
                 return await self._handle_kanban_command(event)
 
+            # /approvals is durable control-plane state. Approval ids resolve
+            # exact stored PR actions and do not depend on the running chat
+            # turn, so it must remain usable while the agent is busy.
+            if _cmd_def_inner and _cmd_def_inner.name == "approvals":
+                return await self._handle_approvals_command(event)
+
             # /goal is safe mid-run for status/pause/clear/wait (inspection
             # and control-plane only — doesn't interrupt the running turn).
             # Setting a new goal text mid-run is rejected with the same
@@ -9594,6 +9600,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         if canonical == "kanban":
             return await self._handle_kanban_command(event)
+
+        if canonical == "approvals":
+            return await self._handle_approvals_command(event)
 
         if canonical == "suggestions":
             return await self._handle_suggestions_command(event)

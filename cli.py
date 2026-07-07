@@ -8613,6 +8613,8 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             self._handle_learn_command(cmd_original)
         elif canonical == "memory":
             self._handle_memory_command(cmd_original)
+        elif canonical == "approvals":
+            self._handle_approvals_command(cmd_original)
         elif canonical == "platforms":
             self._show_gateway_status()
         elif canonical == "status":
