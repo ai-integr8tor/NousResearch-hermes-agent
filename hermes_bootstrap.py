@@ -118,6 +118,31 @@ def apply_windows_utf8_bootstrap() -> bool:
             except (OSError, ValueError):
                 pass
 
+    # 3. Enable Virtual Terminal Processing (ANSI escape codes) on the
+    #    console output handle so that hermes_cli/colors.py and Rich
+    #    color output renders correctly in Windows Terminal, CMD, and
+    #    PowerShell.  Without this, escape sequences like \033[35m are
+    #    printed as literal text.  ENABLE_VIRTUAL_TERMINAL_PROCESSING is
+    #    0x0004.  Non-fatal if it fails (e.g. redirected output, CI).
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        STD_OUTPUT_HANDLE = -11
+        handle = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
+        if handle and handle != -1:  # -1 is INVALID_HANDLE_VALUE
+            mode = wintypes.DWORD()
+            if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+                ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+                new_mode = mode.value | ENABLE_VIRTUAL_TERMINAL_PROCESSING
+                kernel32.SetConsoleMode(handle, new_mode)
+    except Exception:
+        # Non-fatal: if VT processing can't be enabled (old Windows,
+        # redirected output, CI), ANSI codes just won't render.  The
+        # CLI is still functional without color.
+        pass
+
     _bootstrap_applied = True
     return True
 
