@@ -428,6 +428,11 @@ _SUDO_STDIN_RE = re.compile(
     r'(?:^|[;&|`\n]|&&|\|\||\$\()\s*sudo\s+-S\b',
     re.IGNORECASE)
 
+# Inter-token blank runs (space / tab) used to normalize approvals.deny globs
+# and candidate commands so extra whitespace can't sidestep a single-spaced
+# deny rule. Deliberately excludes newlines so distinct commands are not folded.
+_BLANK_RUN_RE = re.compile(r"[ \t]+")
+
 
 def _check_sudo_stdin_guard(command: str) -> tuple:
     """Detect ``sudo -S`` (stdin password) without configured SUDO_PASSWORD.
@@ -486,11 +491,24 @@ def _match_user_deny_rule(command: str) -> str | None:
              if isinstance(p, str) and p.strip()]
     if not globs:
         return None
+    # Collapse runs of inter-token blanks (space / tab) to a single space so a
+    # deny rule written with single spaces (as the docs show, e.g. "git push
+    # --force*") still fires against a command carrying extra whitespace (double
+    # space / tab / ${IFS}-expanded runs — the shell word-splits all of them
+    # identically). fnmatch has no whitespace-run wildcard, and
+    # _command_detection_variants normalizes ${IFS} to a single space but leaves
+    # literal blank runs intact; without this collapse the dangerous-pattern
+    # detector (which anchors on \s+) tolerates the obfuscation while this deny
+    # matcher does not — a gap the docstring's anti-quoting-tricks promise
+    # explicitly disclaims. Use [ \t]+ (not \s+) so newlines that separate
+    # distinct commands are never folded into a single glob-space. Normalize the
+    # globs once here rather than per command variant on this hot path.
+    normalized_globs = [(_BLANK_RUN_RE.sub(" ", p.lower()).strip(), p) for p in globs]
     for command_variant in _command_detection_variants(command):
-        candidate = command_variant.lower().strip()
-        for pattern in globs:
-            if fnmatch.fnmatchcase(candidate, pattern.lower()):
-                return pattern
+        candidate = _BLANK_RUN_RE.sub(" ", command_variant.lower()).strip()
+        for normalized_glob, original in normalized_globs:
+            if fnmatch.fnmatchcase(candidate, normalized_glob):
+                return original
     return None
 
 
