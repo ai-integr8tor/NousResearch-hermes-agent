@@ -1202,6 +1202,7 @@ class HindsightMemoryProvider(MemoryProvider):
     def initialize(self, session_id: str, **kwargs) -> None:
         self._session_id = str(session_id or "").strip()
         self._parent_session_id = str(kwargs.get("parent_session_id", "") or "").strip()
+        self._agent_context = str(kwargs.get("agent_context") or "primary").strip() or "primary"
 
         # Each process lifecycle gets its own document_id. Reusing session_id
         # alone caused overwrites on /resume — the reloaded session starts
@@ -1352,6 +1353,14 @@ class HindsightMemoryProvider(MemoryProvider):
         self._recall_prompt_preamble = self._config.get("recall_prompt_preamble", "")
         self._recall_max_input_chars = int(self._config.get("recall_max_input_chars", 800))
         self._retain_async = self._config.get("retain_async", True)
+
+        if self._agent_context in {"cron", "flush"} or self._platform == "cron":
+            # Cron/flush runs need explicit Hindsight tools available without
+            # inheriting the normal prompt-memory surface or auto-retaining the
+            # scheduler's own chatter into durable memory.
+            self._memory_mode = "tools"
+            self._auto_recall = False
+            self._auto_retain = False
 
         _client_version = "unknown"
         try:

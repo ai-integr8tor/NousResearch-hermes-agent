@@ -2383,6 +2383,27 @@ def _guard_job_credential_exfil(job: dict) -> None:
         raise RuntimeError(f"Cron job '{job_id}' blocked for safety: {err}")
 
 
+def _configure_cron_memory_surface(agent) -> None:
+    """Expose provider-backed memory tools to cron without the built-in memory tool."""
+    try:
+        tools = getattr(agent, "tools", None) or []
+        filtered_tools = []
+        for tool in tools:
+            name = None
+            if isinstance(tool, dict):
+                name = tool.get("function", {}).get("name")
+            if name == "memory":
+                continue
+            filtered_tools.append(tool)
+        agent.tools = filtered_tools
+        if getattr(agent, "valid_tool_names", None) is not None:
+            agent.valid_tool_names.discard("memory")
+        if hasattr(agent, "_memory_nudge_interval"):
+            agent._memory_nudge_interval = 0
+    except Exception:
+        logger.debug("Failed to reconfigure cron memory surface", exc_info=True)
+
+
 def run_job(
     job: dict, *, defer_agent_teardown: Optional[list] = None
 ) -> tuple[bool, str, str, Optional[str]]:
@@ -2972,10 +2993,13 @@ def run_job(
             skip_context_files=not bool(_job_workdir),
             load_soul_identity=True,
             skip_memory=True,  # Cron system prompts would corrupt user representations
+            enable_memory_provider_tools=True,
+            memory_provider_agent_context="cron",
             platform="cron",
             session_id=_cron_session_id,
             session_db=_session_db,
         )
+        _configure_cron_memory_surface(agent)
         
         # Run the agent with an *inactivity*-based timeout: the job can run
         # for hours if it's actively calling tools / receiving stream tokens,
