@@ -51,6 +51,7 @@ from hermes_cli.config import (
 )
 from hermes_constants import OPENROUTER_BASE_URL, secure_parent_dir
 from agent.credential_persistence import sanitize_borrowed_credential_payload
+from agent.redact import redact_sensitive_text
 from utils import atomic_replace, atomic_yaml_write, env_float, is_truthy_value
 
 logger = logging.getLogger(__name__)
@@ -869,7 +870,7 @@ def _oauth_trace(event: str, *, sequence_id: Optional[str] = None, **fields: Any
     if sequence_id:
         payload["sequence_id"] = sequence_id
     payload.update(fields)
-    logger.info("oauth_trace %s", json.dumps(payload, sort_keys=True, ensure_ascii=False))
+    logger.info("oauth_trace %s", redact_sensitive_text(json.dumps(payload, sort_keys=True, ensure_ascii=False)))
 
 
 # =============================================================================
