@@ -46,6 +46,8 @@ import re
 from pathlib import Path as _Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from agent.secret_scope import get_secret as _get_secret, is_multiplex_active
+
 # Heavy google-cloud + googleapiclient imports are deferred to first
 # adapter use. Importing them eagerly here added ~110ms wall and ~33MB
 # RSS to *every* CLI invocation (the plugin loader imports this module at
@@ -567,7 +569,8 @@ class GoogleChatAdapter(BasePlatformAdapter):
         """
         sa_path = (
             self.config.extra.get("service_account_json")
-            or os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+            or _get_secret("GOOGLE_CHAT_SERVICE_ACCOUNT_JSON")
+            or _get_secret("GOOGLE_APPLICATION_CREDENTIALS")
         )
         if sa_path:
             # Inline JSON (rare, but supported).
@@ -610,6 +613,16 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 "or install google-auth to use Application Default Credentials."
             )
         try:
+            if is_multiplex_active() and (
+                os.environ.get("GOOGLE_CHAT_SERVICE_ACCOUNT_JSON")
+                or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+            ):
+                raise ValueError(
+                    "Google Chat ADC skipped for this profile: service-account "
+                    "credentials are set in the process environment but not in "
+                    "this profile's secret scope. Set "
+                    "GOOGLE_CHAT_SERVICE_ACCOUNT_JSON in this profile's .env."
+                )
             credentials, _project = google_auth.default(scopes=_CHAT_SCOPES)
         except Exception as exc:
             raise ValueError(
@@ -2970,12 +2983,12 @@ def _check_for_registry() -> bool:
     if not check_google_chat_requirements():
         return False
     project = (
-        os.getenv("GOOGLE_CHAT_PROJECT_ID")
-        or os.getenv("GOOGLE_CLOUD_PROJECT")
+        _get_secret("GOOGLE_CHAT_PROJECT_ID")
+        or _get_secret("GOOGLE_CLOUD_PROJECT")
     )
     subscription = (
-        os.getenv("GOOGLE_CHAT_SUBSCRIPTION_NAME")
-        or os.getenv("GOOGLE_CHAT_SUBSCRIPTION")
+        _get_secret("GOOGLE_CHAT_SUBSCRIPTION_NAME")
+        or _get_secret("GOOGLE_CHAT_SUBSCRIPTION")
     )
     return bool(project and subscription)
 
@@ -3000,12 +3013,12 @@ def _env_enablement() -> Optional[Dict[str, Any]]:
     ``PlatformConfig`` rather than being merged into ``extra``.
     """
     project = (
-        os.getenv("GOOGLE_CHAT_PROJECT_ID")
-        or os.getenv("GOOGLE_CLOUD_PROJECT")
+        _get_secret("GOOGLE_CHAT_PROJECT_ID")
+        or _get_secret("GOOGLE_CLOUD_PROJECT")
     )
     subscription = (
-        os.getenv("GOOGLE_CHAT_SUBSCRIPTION_NAME")
-        or os.getenv("GOOGLE_CHAT_SUBSCRIPTION")
+        _get_secret("GOOGLE_CHAT_SUBSCRIPTION_NAME")
+        or _get_secret("GOOGLE_CHAT_SUBSCRIPTION")
     )
     if not (project and subscription):
         return None
@@ -3014,16 +3027,16 @@ def _env_enablement() -> Optional[Dict[str, Any]]:
         "subscription_name": subscription,
     }
     sa_json = (
-        os.getenv("GOOGLE_CHAT_SERVICE_ACCOUNT_JSON")
-        or os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+        _get_secret("GOOGLE_CHAT_SERVICE_ACCOUNT_JSON")
+        or _get_secret("GOOGLE_APPLICATION_CREDENTIALS")
     )
     if sa_json:
         seed["service_account_json"] = sa_json
-    home = os.getenv("GOOGLE_CHAT_HOME_CHANNEL")
+    home = _get_secret("GOOGLE_CHAT_HOME_CHANNEL")
     if home:
         seed["home_channel"] = {
             "chat_id": home,
-            "name": os.getenv("GOOGLE_CHAT_HOME_CHANNEL_NAME", "Home"),
+            "name": _get_secret("GOOGLE_CHAT_HOME_CHANNEL_NAME", "Home") or "Home",
         }
     return seed
 
@@ -3173,8 +3186,8 @@ async def _standalone_send(
     extra = getattr(pconfig, "extra", {}) or {}
     sa_value = (
         extra.get("service_account_json")
-        or os.getenv("GOOGLE_CHAT_SERVICE_ACCOUNT_JSON")
-        or os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+        or _get_secret("GOOGLE_CHAT_SERVICE_ACCOUNT_JSON")
+        or _get_secret("GOOGLE_APPLICATION_CREDENTIALS")
     )
 
     if service_account is None:
