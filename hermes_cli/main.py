@@ -8138,6 +8138,25 @@ def _update_node_dependencies() -> None:
             print(f"    {stderr.splitlines()[-1]}")
 
 
+def _browser_toolset_enabled_for_update() -> bool:
+    """Best-effort check used to skip optional Node/browser update work.
+
+    ``hermes tools disable browser`` writes the primary CLI platform toolset
+    config, while blank-slate/global disables can write
+    ``agent.disabled_toolsets``.  Either opt-out should prevent update from
+    doing heavyweight browser dependency work.
+    """
+    try:
+        from hermes_cli.config import load_config
+        from hermes_cli.tools_config import _get_platform_tools
+
+        config = load_config() or {}
+        return "browser" in _get_platform_tools(config, "cli")
+    except Exception as exc:
+        logger.debug("Could not resolve browser toolset state for update: %s", exc)
+        return True
+
+
 class _UpdateOutputStream:
     """Stream wrapper used during ``hermes update`` to survive terminal loss.
 
@@ -9912,8 +9931,11 @@ def _cmd_update_impl(args, gateway_mode: bool):
 
         _refresh_active_lazy_features()
 
-        _update_node_dependencies()
-        _build_web_ui(PROJECT_ROOT / "web")
+        if _browser_toolset_enabled_for_update():
+            _update_node_dependencies()
+            _build_web_ui(PROJECT_ROOT / "web")
+        else:
+            print("→ Browser toolset disabled; skipping Node/browser dependency refresh")
 
         # Rebuild the desktop app if the source tree changed since the last
         # build.  ``hermes desktop --build-only`` uses the content-hash stamp

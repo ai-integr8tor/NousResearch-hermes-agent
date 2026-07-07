@@ -46,6 +46,29 @@ _DEP_DESCRIPTIONS = {
 }
 
 
+def _browser_toolset_disabled_by_config() -> bool:
+    """Return True when config says the primary browser toolset is disabled."""
+    try:
+        from hermes_cli.config import load_config
+        from hermes_cli.tools_config import _get_platform_tools
+
+        config = load_config() or {}
+    except Exception:
+        return False
+
+    agent_cfg = config.get("agent") or {}
+    if not isinstance(agent_cfg, dict):
+        agent_cfg = {}
+    disabled = agent_cfg.get("disabled_toolsets") or []
+    if any(str(toolset) == "browser" for toolset in disabled):
+        return True
+
+    try:
+        return "browser" not in _get_platform_tools(config, "cli")
+    except Exception:
+        return False
+
+
 def _has_system_browser() -> bool:
     if _IS_WINDOWS:
         names = ("chrome", "msedge", "chromium")
@@ -111,6 +134,10 @@ def ensure_dependency(
     check = _DEP_CHECKS.get(dep)
     if check is None:
         # Unknown dep — don't silently forward to install script.
+        return False
+    if dep == "browser" and _browser_toolset_disabled_by_config():
+        if interactive:
+            print("  Browser toolset is disabled in config; skipping browser dependency install.")
         return False
     if check():
         return True

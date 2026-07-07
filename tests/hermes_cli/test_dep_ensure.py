@@ -20,6 +20,33 @@ def test_ensure_dependency_returns_false_when_missing_noninteractive():
             assert result is False
 
 
+def test_ensure_dependency_skips_browser_when_globally_disabled():
+    """A disabled browser toolset must not spawn install.sh --ensure browser."""
+    from hermes_cli.dep_ensure import ensure_dependency
+
+    with patch("hermes_cli.dep_ensure._DEP_CHECKS", {"browser": lambda: False}), \
+         patch("hermes_cli.config.load_config", return_value={"agent": {"disabled_toolsets": ["browser"]}}), \
+         patch("hermes_cli.dep_ensure._find_install_script") as find_script:
+        result = ensure_dependency("browser", interactive=False)
+
+    assert result is False
+    find_script.assert_not_called()
+
+
+def test_ensure_dependency_skips_browser_when_cli_toolset_disabled():
+    """`hermes tools disable browser` removes it from the primary CLI toolsets."""
+    from hermes_cli.dep_ensure import ensure_dependency
+
+    config = {"platform_toolsets": {"cli": ["file", "terminal", "web"]}}
+    with patch("hermes_cli.dep_ensure._DEP_CHECKS", {"browser": lambda: False}), \
+         patch("hermes_cli.config.load_config", return_value=config), \
+         patch("hermes_cli.dep_ensure._find_install_script") as find_script:
+        result = ensure_dependency("browser", interactive=False)
+
+    assert result is False
+    find_script.assert_not_called()
+
+
 def test_find_install_script_from_checkout(tmp_path):
     """_find_install_script finds scripts/install.sh in a git checkout."""
     from hermes_cli.dep_ensure import _find_install_script
