@@ -324,6 +324,12 @@ class TestModelResolution:
             mid, _ = image_tool._resolve_fal_model()
         assert mid == "fal-ai/flux-2/klein/9b"
 
+    def test_unknown_explicit_model_override_falls_back_to_default_with_warning(self, image_tool, caplog):
+        with caplog.at_level("WARNING"):
+            mid, _ = image_tool._resolve_fal_model("fal-ai/does-not-exist")
+        assert mid == "fal-ai/flux-2/klein/9b"
+        assert "Unknown explicit FAL model override 'fal-ai/does-not-exist'" in caplog.text
+
     def test_env_var_fallback_when_no_config(self, image_tool, monkeypatch):
         monkeypatch.setenv("FAL_IMAGE_MODEL", "fal-ai/z-image/turbo")
         with patch("hermes_cli.config.load_config", return_value={}):
@@ -364,15 +370,14 @@ class TestAspectRatioNormalization:
 class TestRegistryIntegration:
 
     def test_schema_exposes_expected_agent_params(self, image_tool):
-        """The agent-facing schema exposes the unified text+image surface:
-        prompt (required), aspect_ratio, and the image-to-image inputs
-        image_url + reference_image_urls. Model selection stays a user-level
-        config choice, never an agent-level arg."""
+        """Agent-facing schema exposes the stable generation/editing surface plus
+        optional per-call provider/model overrides."""
         props = image_tool.IMAGE_GENERATE_SCHEMA["parameters"]["properties"]
         assert set(props.keys()) == {
-            "prompt", "aspect_ratio", "image_url", "reference_image_urls",
+            "prompt", "aspect_ratio", "image_url", "reference_image_urls", "provider", "model",
         }
         assert image_tool.IMAGE_GENERATE_SCHEMA["parameters"]["required"] == ["prompt"]
+
 
     def test_aspect_ratio_enum_is_three_values(self, image_tool):
         enum = image_tool.IMAGE_GENERATE_SCHEMA["parameters"]["properties"]["aspect_ratio"]["enum"]
