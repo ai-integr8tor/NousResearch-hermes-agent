@@ -577,6 +577,12 @@ async def auth_middleware(request: Request, call_next):
     if getattr(request.app.state, "auth_required", False):
         return await call_next(request)
     path = request.url.path
+    # CORS preflight (OPTIONS) carries no credentials by design — the
+    # session-token check would always fail and return a 401 before
+    # CORSMiddleware can answer with the proper CORS headers.  Short-circuit
+    # here so CORSMiddleware handles the reply.
+    if request.method == "OPTIONS":
+        return await call_next(request)
     if path.startswith("/api/") and path not in _PUBLIC_API_PATHS:
         if not _has_valid_session_token(request) and not _has_valid_query_token(request, path):
             return JSONResponse(
