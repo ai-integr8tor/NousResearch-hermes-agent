@@ -496,6 +496,33 @@ def _resolve_progress_thread_id(platform: Any, source_thread_id: Any, event_mess
     return None
 
 
+def _adapter_supports_streaming_edits(adapter: Any) -> bool:
+    """Return whether adapter edits are safe for high-frequency streaming.
+
+    SUPPORTS_MESSAGE_EDITING means explicit user/operator edits are possible.
+    Streaming is a narrower capability: some platforms expose an edit API but
+    make every edit a visible high-frequency event, so they should opt out of
+    response-stream editing while keeping explicit edit_message().
+    """
+    streaming_capability = getattr(adapter, "SUPPORTS_STREAMING_EDITS", None)
+    if streaming_capability is not None:
+        return bool(streaming_capability)
+    return bool(getattr(adapter, "SUPPORTS_MESSAGE_EDITING", True))
+
+
+def _adapter_supports_progress_edits(adapter: Any) -> bool:
+    """Return whether adapter edits are safe for tool/thinking progress.
+
+    Progress bubbles use the same high-frequency edit cadence as token
+    streaming. Platforms may expose explicit edit_message() for deliberate
+    user/operator edits while still opting out of automatic progress edits.
+    """
+    progress_capability = getattr(adapter, "SUPPORTS_PROGRESS_EDITS", None)
+    if progress_capability is not None:
+        return bool(progress_capability)
+    return _adapter_supports_streaming_edits(adapter)
+
+
 def _has_platform_display_override(user_config: dict, platform_key: str, setting: str) -> bool:
     """Return True when display.platforms.<platform> explicitly sets setting."""
     display = user_config.get("display") if isinstance(user_config, dict) else None
@@ -16247,7 +16274,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             _chat_id=source.chat_id,
                         ) -> None:
                             _adapter.pause_typing_for_chat(_chat_id)
-                    _adapter_supports_edit = getattr(_adapter, "SUPPORTS_MESSAGE_EDITING", True)
+                    _adapter_supports_edit = _adapter_supports_streaming_edits(_adapter)
                     _effective_cursor = _scfg.cursor if _adapter_supports_edit else ""
                     _buffer_only = False
                     if source.platform == Platform.MATRIX:
@@ -17044,10 +17071,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if not adapter:
                 return
 
-            # Skip tool progress for platforms that don't support message
-            # editing (e.g. iMessage/BlueBubbles) — each progress update
-            # would become a separate message bubble, which is noisy.
-            if type(adapter).edit_message is BasePlatformAdapter.edit_message:
+            # Skip tool/thinking progress for platforms that cannot safely edit
+            # progress bubbles. Some adapters (Signal) support explicit
+            # edit_message() calls but opt out of high-frequency automatic
+            # progress edits because clients surface every edit or require
+            # timestamp-chained edit handles.
+            if (
+                not _adapter_supports_progress_edits(adapter)
+                or type(adapter).edit_message is BasePlatformAdapter.edit_message
+            ):
                 while not progress_queue.empty():
                     try:
                         progress_queue.get_nowait()
@@ -17575,7 +17607,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         # without edit support, the consumer sends a partial
                         # first message that can never be updated, resulting in
                         # duplicate messages (partial + final).
-                        _adapter_supports_edit = getattr(_adapter, "SUPPORTS_MESSAGE_EDITING", True)
+                        _adapter_supports_edit = _adapter_supports_streaming_edits(_adapter)
                         if not _adapter_supports_edit:
                             raise RuntimeError("skip streaming for non-editable platform")
                         _effective_cursor = _scfg.cursor
