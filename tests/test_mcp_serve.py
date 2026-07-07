@@ -494,20 +494,32 @@ class TestEventBridge:
     def _make_sqlite_session_db(db_path):
         class TestDB:
             def __init__(self):
-                self._conn = sqlite3.connect(str(db_path))
-                self._conn.row_factory = sqlite3.Row
+                self._db_path = db_path
+                self._conn = self._connect()
                 self._lock = threading.Lock()
+
+            def _connect(self):
+                conn = sqlite3.connect(str(self._db_path))
+                conn.row_factory = sqlite3.Row
+                return conn
+
+            def _ensure_conn(self):
+                if self._conn is None:
+                    self._conn = self._connect()
+                return self._conn
 
             def get_messages(self, session_id):
                 with self._lock:
-                    rows = self._conn.execute(
+                    rows = self._ensure_conn().execute(
                         "SELECT * FROM messages WHERE session_id = ? ORDER BY id",
                         (session_id,),
                     ).fetchall()
                 return [dict(r) for r in rows]
 
             def close(self):
-                self._conn.close()
+                if self._conn is not None:
+                    self._conn.close()
+                    self._conn = None
 
         return TestDB()
 
