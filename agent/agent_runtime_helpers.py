@@ -249,6 +249,8 @@ def sanitize_tool_call_arguments(
     session_id: str = None,
 ) -> int:
     """Repair corrupted assistant tool-call argument JSON in-place."""
+    from agent.message_sanitization import repair_tool_call_arguments_with_status
+
     log = logger or logging.getLogger(__name__)
     if not isinstance(messages, list):
         return 0
@@ -314,6 +316,7 @@ def sanitize_tool_call_arguments(
                 # itself becomes an orphan (#58168).
                 tool_call_id = _ra().AIAgent._get_tool_call_id_static(tool_call) or None
                 function_name = function.get("name", "?")
+                repair = repair_tool_call_arguments_with_status(arguments, function_name)
                 preview = arguments[:80]
                 log.warning(
                     "Corrupted tool_call arguments repaired before request "
@@ -324,7 +327,7 @@ def sanitize_tool_call_arguments(
                     function_name,
                     preview,
                 )
-                function["arguments"] = "{}"
+                function["arguments"] = repair.arguments
 
                 existing_tool_msg = None
                 scan_index = message_index + 1
