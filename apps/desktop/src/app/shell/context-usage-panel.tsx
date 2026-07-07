@@ -7,11 +7,17 @@ import type { ContextBreakdown, ContextUsageCategory, UsageStats } from '@/types
 
 interface ContextUsagePanelProps {
   currentUsage: UsageStats
+  onUsageSnapshot?: (usage: Partial<UsageStats>) => void
   requestGateway: <T = unknown>(method: string, params?: Record<string, unknown>) => Promise<T>
   sessionId: string | null
 }
 
-export function ContextUsagePanel({ currentUsage, requestGateway, sessionId }: ContextUsagePanelProps) {
+export function ContextUsagePanel({
+  currentUsage,
+  onUsageSnapshot,
+  requestGateway,
+  sessionId
+}: ContextUsagePanelProps) {
   const { t } = useI18n()
   const copy = t.shell.statusbar.contextUsagePanel
   const [breakdown, setBreakdown] = useState<ContextBreakdown | null>(null)
@@ -32,6 +38,12 @@ export function ContextUsagePanel({ currentUsage, requestGateway, sessionId }: C
       .then(data => {
         if (!cancelled) {
           setBreakdown(data)
+
+          onUsageSnapshot?.({
+            context_max: data.context_max,
+            context_percent: data.context_percent,
+            context_used: data.context_used
+          })
         }
       })
       .catch(() => {
@@ -48,7 +60,7 @@ export function ContextUsagePanel({ currentUsage, requestGateway, sessionId }: C
     return () => {
       cancelled = true
     }
-  }, [requestGateway, sessionId])
+  }, [onUsageSnapshot, requestGateway, sessionId])
 
   const contextMax = breakdown?.context_max ?? currentUsage.context_max ?? 0
   const contextUsed = breakdown?.context_used ?? currentUsage.context_used ?? 0
