@@ -45,9 +45,10 @@ _E164_TARGET_RE = re.compile(r"^\s*\+(\d{7,15})\s*$")
 # newsletter chats. These are explicit native targets the bridge accepts
 # verbatim — they must NOT fall through to home-channel resolution.
 _WHATSAPP_JID_RE = re.compile(
-    r"^\s*[\w-]+@(?:g\.us|s\.whatsapp\.net|lid|broadcast|newsletter)\s*$",
+    r"^\s*[-\w]+@(?:g\.us|s\.whatsapp\.net|lid|broadcast|newsletter)\s*$",
     re.IGNORECASE,
 )
+_WHATSAPP_LID_RE = re.compile(r"^\s*(\d+@lid)\s*$")
 # Email addresses — a valid email like "user@domain.com" should be treated as
 # an explicit target for the email platform, not fall through to channel-name
 # resolution which has no way to resolve a raw address.

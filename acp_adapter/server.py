@@ -649,10 +649,27 @@ class HermesACPAgent(acp.Agent):
         new_model = raw_model.strip()
 
         try:
-            from hermes_cli.models import detect_provider_for_model, parse_model_input
+            from hermes_cli.models import (
+                _KNOWN_PROVIDER_NAMES,
+                detect_provider_for_model,
+                parse_model_input,
+            )
 
             target_provider, new_model = parse_model_input(new_model, current_provider)
-            if target_provider == current_provider:
+            # Only skip provider detection when the raw input used a *real*
+            # provider prefix recognized by parse_model_input. Bare model ids may
+            # legally contain colons for variant tags (for example `:free`), and
+            # those still need provider detection.
+            stripped_raw_model = raw_model.strip()
+            colon = stripped_raw_model.find(":")
+            _had_explicit_provider = False
+            if colon > 0:
+                provider_part = stripped_raw_model[:colon].strip().lower()
+                model_part = stripped_raw_model[colon + 1 :].strip()
+                _had_explicit_provider = bool(
+                    provider_part and model_part and provider_part in _KNOWN_PROVIDER_NAMES
+                )
+            if not _had_explicit_provider and target_provider == current_provider:
                 detected = detect_provider_for_model(new_model, current_provider)
                 if detected:
                     target_provider, new_model = detected
