@@ -77,6 +77,8 @@ class ToolCallGuardrailConfig:
     same_tool_failure_halt_after: int = 8
     no_progress_warn_after: int = 2
     no_progress_block_after: int = 5
+    same_content_warn_after: int = 3
+    same_content_block_after: int = 6
     idempotent_tools: frozenset[str] = field(default_factory=lambda: IDEMPOTENT_TOOL_NAMES)
     mutating_tools: frozenset[str] = field(default_factory=lambda: MUTATING_TOOL_NAMES)
 
@@ -109,6 +111,10 @@ class ToolCallGuardrailConfig:
                 warn_after.get("idempotent_no_progress", data.get("no_progress_warn_after")),
                 defaults.no_progress_warn_after,
             ),
+            same_content_warn_after=_positive_int(
+                warn_after.get("same_content", data.get("same_content_warn_after")),
+                defaults.same_content_warn_after,
+            ),
             exact_failure_block_after=_positive_int(
                 hard_stop_after.get("exact_failure", data.get("exact_failure_block_after")),
                 defaults.exact_failure_block_after,
@@ -120,6 +126,10 @@ class ToolCallGuardrailConfig:
             no_progress_block_after=_positive_int(
                 hard_stop_after.get("idempotent_no_progress", data.get("no_progress_block_after")),
                 defaults.no_progress_block_after,
+            ),
+            same_content_block_after=_positive_int(
+                hard_stop_after.get("same_content", data.get("same_content_block_after")),
+                defaults.same_content_block_after,
             ),
         )
 
@@ -232,6 +242,7 @@ class ToolCallGuardrailController:
         self._exact_failure_counts: dict[ToolCallSignature, int] = {}
         self._same_tool_failure_counts: dict[str, int] = {}
         self._no_progress: dict[ToolCallSignature, tuple[str, int]] = {}
+        self._same_content_counts: dict[str, tuple[str, int]] = {}
         self._halt_decision: ToolGuardrailDecision | None = None
 
     @property
@@ -346,6 +357,53 @@ class ToolCallGuardrailController:
 
         self._exact_failure_counts.pop(signature, None)
         self._same_tool_failure_counts.pop(tool_name, None)
+
+        # Content-based repetition detection — catches loops where args vary
+        # but the result content stays the same (e.g. different query params
+        # to a consistently-blocked/scraped page, or repeated error bodies
+        # from a non-idempotent tool that "succeeds" with the same payload).
+        # Keyed by result content hash only (no args), so varying-arguments /
+        # fixed-result loops are detected.  Runs for ALL tools, not just
+        # idempotent ones (#60084).
+        content_hash = _result_hash(result)
+        if content_hash is not None:
+            prev = self._same_content_counts.get(content_hash)
+            if prev is not None and prev[0] == tool_name:
+                repeat_count = prev[1] + 1
+            else:
+                repeat_count = 1
+            self._same_content_counts[content_hash] = (tool_name, repeat_count)
+
+            if self.config.warnings_enabled and repeat_count >= self.config.same_content_warn_after:
+                warn_decision = ToolGuardrailDecision(
+                    action="warn",
+                    code="same_content_warning",
+                    message=(
+                        f"{tool_name} returned the same content {repeat_count} times "
+                        "(this turn's tool-loop guardrail detected content repetition "
+                        "across different argument sets). The result has not changed. "
+                        "Stop retrying and use the content you already have or switch "
+                        "to a different approach."
+                    ),
+                    tool_name=tool_name,
+                    count=repeat_count,
+                    signature=signature,
+                )
+                if repeat_count >= self.config.same_content_block_after and self.config.hard_stop_enabled:
+                    warn_decision = ToolGuardrailDecision(
+                        action="block",
+                        code="same_content_block",
+                        message=(
+                            f"Blocked {tool_name}: this tool returned the same content "
+                            f"{repeat_count} times across different calls. "
+                            "Stop retrying; use the content already provided."
+                        ),
+                        tool_name=tool_name,
+                        count=repeat_count,
+                        signature=signature,
+                    )
+                    self._halt_decision = warn_decision
+                return warn_decision
 
         if not self._is_idempotent(tool_name):
             self._no_progress.pop(signature, None)
