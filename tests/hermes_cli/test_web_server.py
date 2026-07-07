@@ -748,6 +748,50 @@ class TestWebServerEndpoints:
         restored = self.client.get("/api/sessions").json()
         assert any(s["id"] == "arch-me" for s in restored["sessions"])
 
+    def test_sessions_ids_fetches_row_outside_recent_page(self):
+        """Explicit id hydration lets desktop recover pinned rows that aged off
+        its bounded recent page after a restart/reconnect."""
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            db.create_session(session_id="old-pinned", source="cli")
+            db.append_message("old-pinned", role="user", content="keep me")
+            db.create_session(session_id="newer", source="cli")
+            db.append_message("newer", role="user", content="new")
+        finally:
+            db.close()
+
+        recent = self.client.get("/api/sessions?limit=1&order=recent&min_messages=0").json()
+        assert [s["id"] for s in recent["sessions"]] == ["newer"]
+
+        resp = self.client.get("/api/sessions?ids=old-pinned&limit=1&order=recent&min_messages=0")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert [s["id"] for s in data["sessions"]] == ["old-pinned"]
+        assert data["total"] == 1
+
+    def test_profiles_sessions_ids_fetches_row_outside_recent_page(self):
+        """Cross-profile id hydration tags the owner profile for desktop."""
+        from hermes_state import SessionDB
+        from hermes_cli import profiles as profiles_mod
+
+        worker_home = profiles_mod.get_profile_dir("worker")
+        worker_home.mkdir(parents=True)
+
+        worker_db = SessionDB(db_path=worker_home / "state.db")
+        try:
+            worker_db.create_session(session_id="worker-pinned", source="cli")
+            worker_db.append_message("worker-pinned", role="user", content="keep worker")
+        finally:
+            worker_db.close()
+
+        resp = self.client.get("/api/profiles/sessions?ids=worker-pinned&limit=1&min_messages=0")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert [s["id"] for s in data["sessions"]] == ["worker-pinned"]
+        assert data["sessions"][0]["profile"] == "worker"
+
     def test_patch_session_without_fields_is_400(self):
         """An existing session + empty body is a bad request, not a 404."""
         from hermes_state import SessionDB

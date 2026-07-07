@@ -11,6 +11,7 @@ import { setCronJobs } from '@/store/cron'
 import { $pinnedSessionIds, $sessionsLimit, bumpSessionsLimit, SIDEBAR_SESSIONS_PAGE_SIZE } from '@/store/layout'
 import { ALL_PROFILES, normalizeProfileKey } from '@/store/profile'
 import {
+  $cronSessions,
   $messagingSessions,
   $selectedStoredSessionId,
   $sessions,
@@ -65,6 +66,20 @@ function sessionsToKeep(scope?: string): Set<string> {
   }
 
   return keep
+}
+
+function loadedSessionIds(): Set<string> {
+  const ids = new Set<string>()
+
+  for (const session of [...$sessions.get(), ...$cronSessions.get(), ...$messagingSessions.get()]) {
+    ids.add(session.id)
+
+    if (session._lineage_root_id) {
+      ids.add(session._lineage_root_id)
+    }
+  }
+
+  return ids
 }
 
 interface UseSessionListActionsArgs {
@@ -152,6 +167,36 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
     }
   }, [])
 
+  const hydrateMissingPinnedSessions = useCallback(async () => {
+    const pinned = $pinnedSessionIds.get()
+
+    if (pinned.length === 0) {
+      return
+    }
+
+    const loaded = loadedSessionIds()
+    const missing = pinned.filter(id => !loaded.has(id))
+
+    if (missing.length === 0) {
+      return
+    }
+
+    try {
+      const sessionProfile = profileScope === ALL_PROFILES ? 'all' : profileScope
+      const result = await listAllProfileSessions(Math.max(missing.length, 1), 0, 'exclude', 'recent', sessionProfile, {
+        ids: missing
+      })
+
+      if (result.sessions.length === 0) {
+        return
+      }
+
+      setSessions(prev => mergeSessionPage(prev, result.sessions, pinned))
+    } catch {
+      // Non-fatal: a later refresh, search, or explicit resume can hydrate pins.
+    }
+  }, [profileScope])
+
   const refreshSessions = useCallback(async () => {
     const requestId = refreshSessionsRequestRef.current + 1
     refreshSessionsRequestRef.current = requestId
@@ -191,7 +236,8 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
     void refreshCronSessions()
     void refreshCronJobs()
     void refreshMessagingSessions()
-  }, [profileScope, refreshCronSessions, refreshCronJobs, refreshMessagingSessions])
+    void hydrateMissingPinnedSessions()
+  }, [profileScope, refreshCronSessions, refreshCronJobs, refreshMessagingSessions, hydrateMissingPinnedSessions])
 
   const loadMoreSessions = useCallback(async () => {
     bumpSessionsLimit()
