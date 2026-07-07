@@ -100,6 +100,26 @@ def wait_for_mcp_discovery(timeout: "float | None" = None) -> None:
     thread.join(timeout=_resolve_discovery_timeout(timeout))
 
 
+def ensure_mcp_discovery_before_agent_build(
+    *,
+    logger,
+    timeout: "float | None" = None,
+    thread_name: str = "cli-mcp-discovery",
+) -> None:
+    """Give configured MCP tools a bounded chance to register before AIAgent.
+
+    Non-interactive first turns can build ``AIAgent`` before the normal banner
+    or tool-list paths touch ``get_tool_definitions()``.  This keeps startup
+    fail-open while preserving the existing background discovery path, including
+    OAuth prompt suppression and the configured timeout bound.
+    """
+    try:
+        start_background_mcp_discovery(logger=logger, thread_name=thread_name)
+        wait_for_mcp_discovery(timeout=timeout)
+    except Exception:
+        logger.debug("MCP discovery readiness check failed before agent build", exc_info=True)
+
+
 def mcp_discovery_in_flight() -> bool:
     """Return True if THIS module's background discovery thread is still running.
 
