@@ -103,6 +103,12 @@ OpenAI = _OpenAIProxy()  # module-level name, resolves lazily on call/isinstance
 from agent.credential_pool import load_pool
 from agent.model_metadata import MINIMUM_CONTEXT_LENGTH, get_model_context_length
 from agent.process_bootstrap import build_keepalive_http_client
+from agent.request_options import (
+    merge_request_overrides,
+    reasoning_config_from_request_options,
+    scoped_request_options_from_mapping,
+    strip_internal_request_options,
+)
 from hermes_cli.config import get_hermes_home
 from hermes_constants import OPENROUTER_BASE_URL
 from utils import base_url_host_matches, base_url_hostname, env_float, model_forces_max_completion_tokens, normalize_proxy_env_vars
@@ -3285,6 +3291,8 @@ def _retry_same_provider_sync(
     tools: Optional[list],
     effective_timeout: float,
     effective_extra_body: dict,
+    effective_request_overrides: dict,
+    effective_reasoning_config: Optional[dict],
 ) -> Any:
     if task == "vision":
         _, retry_client, retry_model = resolve_vision_provider_client(
@@ -3319,6 +3327,8 @@ def _retry_same_provider_sync(
         timeout=effective_timeout,
         extra_body=effective_extra_body,
         base_url=retry_base or resolved_base_url,
+        reasoning_config=effective_reasoning_config,
+        request_overrides=effective_request_overrides,
     )
     if _is_anthropic_compat_endpoint(resolved_provider, retry_base):
         retry_kwargs["messages"] = _convert_openai_images_to_anthropic(retry_kwargs["messages"])
@@ -3342,6 +3352,8 @@ async def _retry_same_provider_async(
     tools: Optional[list],
     effective_timeout: float,
     effective_extra_body: dict,
+    effective_request_overrides: dict,
+    effective_reasoning_config: Optional[dict],
 ) -> Any:
     if task == "vision":
         _, retry_client, retry_model = resolve_vision_provider_client(
@@ -3376,6 +3388,8 @@ async def _retry_same_provider_async(
         timeout=effective_timeout,
         extra_body=effective_extra_body,
         base_url=retry_base or resolved_base_url,
+        reasoning_config=effective_reasoning_config,
+        request_overrides=effective_request_overrides,
     )
     if _is_anthropic_compat_endpoint(resolved_provider, retry_base):
         retry_kwargs["messages"] = _convert_openai_images_to_anthropic(retry_kwargs["messages"])
@@ -3494,6 +3508,8 @@ def _call_fallback_candidate_sync(
     tools: Optional[list],
     effective_timeout: float,
     effective_extra_body: dict,
+    effective_request_overrides: Optional[dict],
+    effective_reasoning_config: Optional[dict],
 ) -> Optional[Any]:
     """Call one fallback candidate with stale-credential recovery.
 
@@ -3515,7 +3531,11 @@ def _call_fallback_candidate_sync(
         fb_label, fb_model, messages,
         temperature=temperature, max_tokens=max_tokens,
         tools=tools, timeout=effective_timeout,
-        extra_body=effective_extra_body, base_url=fb_base)
+        extra_body=effective_extra_body,
+        base_url=fb_base,
+        reasoning_config=effective_reasoning_config,
+        request_overrides=effective_request_overrides,
+    )
     try:
         return _validate_llm_response(
             fb_client.chat.completions.create(**fb_kwargs), task)
@@ -3531,7 +3551,10 @@ def _call_fallback_candidate_sync(
                     temperature=temperature, max_tokens=max_tokens,
                     tools=tools, timeout=effective_timeout,
                     extra_body=effective_extra_body,
-                    base_url=str(getattr(retry_client, "base_url", "") or fb_base))
+                    base_url=str(getattr(retry_client, "base_url", "") or fb_base),
+                    reasoning_config=effective_reasoning_config,
+                    request_overrides=effective_request_overrides,
+                )
                 try:
                     return _validate_llm_response(
                         retry_client.chat.completions.create(**retry_kwargs), task)
@@ -3563,6 +3586,8 @@ async def _call_fallback_candidate_async(
     tools: Optional[list],
     effective_timeout: float,
     effective_extra_body: dict,
+    effective_request_overrides: Optional[dict],
+    effective_reasoning_config: Optional[dict],
 ) -> Optional[Any]:
     """Async mirror of :func:`_call_fallback_candidate_sync`."""
     fb_base = str(getattr(fb_client, "base_url", "") or "")
@@ -3570,7 +3595,11 @@ async def _call_fallback_candidate_async(
         fb_label, fb_model, messages,
         temperature=temperature, max_tokens=max_tokens,
         tools=tools, timeout=effective_timeout,
-        extra_body=effective_extra_body, base_url=fb_base)
+        extra_body=effective_extra_body,
+        base_url=fb_base,
+        reasoning_config=effective_reasoning_config,
+        request_overrides=effective_request_overrides,
+    )
     try:
         return _validate_llm_response(
             await fb_client.chat.completions.create(**fb_kwargs), task)
@@ -3587,7 +3616,10 @@ async def _call_fallback_candidate_async(
                     temperature=temperature, max_tokens=max_tokens,
                     tools=tools, timeout=effective_timeout,
                     extra_body=effective_extra_body,
-                    base_url=str(getattr(retry_client, "base_url", "") or fb_base))
+                    base_url=str(getattr(retry_client, "base_url", "") or fb_base),
+                    reasoning_config=effective_reasoning_config,
+                    request_overrides=effective_request_overrides,
+                )
                 try:
                     return _validate_llm_response(
                         await retry_client.chat.completions.create(**retry_kwargs), task)
@@ -5961,6 +5993,11 @@ def _get_task_extra_body(task: str) -> Dict[str, Any]:
     return {}
 
 
+def _get_task_request_options(task: str) -> Dict[str, Any]:
+    """Read request options declared on ``auxiliary.<task>``."""
+    return scoped_request_options_from_mapping(_get_auxiliary_task_config(task))
+
+
 # ---------------------------------------------------------------------------
 # Anthropic-compatible endpoint detection + image block conversion
 # ---------------------------------------------------------------------------
@@ -6077,6 +6114,8 @@ def _build_call_kwargs(
     timeout: float = 30.0,
     extra_body: Optional[dict] = None,
     base_url: Optional[str] = None,
+    reasoning_config: Optional[dict] = None,
+    request_overrides: Optional[dict] = None,
 ) -> dict:
     """Build kwargs for .chat.completions.create() with model/provider adjustments."""
     kwargs: Dict[str, Any] = {
@@ -6161,10 +6200,30 @@ def _build_call_kwargs(
 
     # Provider-specific extra_body
     merged_extra = dict(extra_body or {})
+    if reasoning_config and isinstance(reasoning_config, dict):
+        if reasoning_config.get("enabled") is False:
+            merged_extra.setdefault("reasoning", {"enabled": False})
+        elif reasoning_config.get("effort"):
+            effort = str(reasoning_config.get("effort") or "").strip().lower()
+            if effort:
+                merged_extra.setdefault(
+                    "reasoning",
+                    {"enabled": True, "effort": effort},
+                )
     if provider == "nous":
         merged_extra.setdefault("tags", []).extend(_nous_portal_tags())
     if merged_extra:
         kwargs["extra_body"] = merged_extra
+
+    overrides = strip_internal_request_options(request_overrides)
+    override_extra = overrides.pop("extra_body", None)
+    if isinstance(override_extra, dict):
+        kwargs["extra_body"] = merge_request_overrides(
+            {"extra_body": kwargs.get("extra_body", {})},
+            {"extra_body": override_extra},
+        )["extra_body"]
+    if overrides:
+        kwargs.update(overrides)
 
     return kwargs
 
@@ -6316,8 +6375,19 @@ def call_llm(
         task, provider, model, base_url, api_key)
     if api_mode:
         resolved_api_mode = api_mode
-    effective_extra_body = _get_task_extra_body(task)
+    task_request_options = _get_task_request_options(task)
+    effective_extra_body = {}
+    task_extra_body = task_request_options.get("extra_body")
+    if isinstance(task_extra_body, dict):
+        effective_extra_body.update(task_extra_body)
     effective_extra_body.update(extra_body or {})
+    effective_request_overrides = merge_request_overrides(
+        strip_internal_request_options(task_request_options),
+        {"extra_body": effective_extra_body} if effective_extra_body else {},
+    )
+    effective_reasoning_config = reasoning_config_from_request_options(
+        task_request_options
+    )
 
     if task == "vision":
         effective_provider, client, final_model = resolve_vision_provider_client(
@@ -6402,7 +6472,9 @@ def call_llm(
         resolved_provider, final_model, messages,
         temperature=temperature, max_tokens=max_tokens,
         tools=tools, timeout=effective_timeout, extra_body=effective_extra_body,
-        base_url=_base_info or resolved_base_url)
+        base_url=_base_info or resolved_base_url,
+        reasoning_config=effective_reasoning_config,
+        request_overrides=effective_request_overrides)
 
     # Convert image blocks for Anthropic-compatible endpoints (e.g. MiniMax)
     _client_base = str(getattr(client, "base_url", "") or "")
@@ -6654,6 +6726,8 @@ def call_llm(
                     tools=tools,
                     effective_timeout=effective_timeout,
                     effective_extra_body=effective_extra_body,
+                    effective_request_overrides=effective_request_overrides,
+                    effective_reasoning_config=effective_reasoning_config,
                 )
 
         # ── Same-provider credential-pool recovery ─────────────────────
@@ -6696,6 +6770,8 @@ def call_llm(
                         tools=tools,
                         effective_timeout=effective_timeout,
                         effective_extra_body=effective_extra_body,
+                        effective_request_overrides=effective_request_overrides,
+                        effective_reasoning_config=effective_reasoning_config,
                     )
                 except Exception as retry2_err:
                     # The rotated key also hit a quota/auth wall.  Mark it
@@ -6817,7 +6893,10 @@ def call_llm(
                     task=task, messages=messages,
                     temperature=temperature, max_tokens=max_tokens,
                     tools=tools, effective_timeout=effective_timeout,
-                    effective_extra_body=effective_extra_body)
+                    effective_extra_body=effective_extra_body,
+                    effective_request_overrides=effective_request_overrides,
+                    effective_reasoning_config=effective_reasoning_config,
+                )
                 if fb_resp is not None:
                     return fb_resp
                 # The candidate had a stale/unrefreshable credential and was
@@ -6831,7 +6910,10 @@ def call_llm(
                         task=task, messages=messages,
                         temperature=temperature, max_tokens=max_tokens,
                         tools=tools, effective_timeout=effective_timeout,
-                        effective_extra_body=effective_extra_body)
+                        effective_extra_body=effective_extra_body,
+                        effective_request_overrides=effective_request_overrides,
+                        effective_reasoning_config=effective_reasoning_config,
+                    )
                     if fb_resp is not None:
                         return fb_resp
             # All fallback layers exhausted — emit a single user-visible
@@ -6933,8 +7015,19 @@ async def async_call_llm(
     """
     resolved_provider, resolved_model, resolved_base_url, resolved_api_key, resolved_api_mode = _resolve_task_provider_model(
         task, provider, model, base_url, api_key)
-    effective_extra_body = _get_task_extra_body(task)
+    task_request_options = _get_task_request_options(task)
+    effective_extra_body = {}
+    task_extra_body = task_request_options.get("extra_body")
+    if isinstance(task_extra_body, dict):
+        effective_extra_body.update(task_extra_body)
     effective_extra_body.update(extra_body or {})
+    effective_request_overrides = merge_request_overrides(
+        strip_internal_request_options(task_request_options),
+        {"extra_body": effective_extra_body} if effective_extra_body else {},
+    )
+    effective_reasoning_config = reasoning_config_from_request_options(
+        task_request_options
+    )
 
     if task == "vision":
         effective_provider, client, final_model = resolve_vision_provider_client(
@@ -7005,7 +7098,9 @@ async def async_call_llm(
         resolved_provider, final_model, messages,
         temperature=temperature, max_tokens=max_tokens,
         tools=tools, timeout=effective_timeout, extra_body=effective_extra_body,
-        base_url=_client_base or resolved_base_url)
+        base_url=_client_base or resolved_base_url,
+        reasoning_config=effective_reasoning_config,
+        request_overrides=effective_request_overrides)
 
     # Convert image blocks for Anthropic-compatible endpoints (e.g. MiniMax)
     if _is_anthropic_compat_endpoint(resolved_provider, _client_base):
@@ -7201,6 +7296,8 @@ async def async_call_llm(
                     tools=tools,
                     effective_timeout=effective_timeout,
                     effective_extra_body=effective_extra_body,
+                    effective_request_overrides=effective_request_overrides,
+                    effective_reasoning_config=effective_reasoning_config,
                 )
 
         # ── Same-provider credential-pool recovery (mirrors sync) ─────
@@ -7238,6 +7335,8 @@ async def async_call_llm(
                         tools=tools,
                         effective_timeout=effective_timeout,
                         effective_extra_body=effective_extra_body,
+                        effective_request_overrides=effective_request_overrides,
+                        effective_reasoning_config=effective_reasoning_config,
                     )
                 except Exception as retry2_err:
                     if (_is_payment_error(retry2_err) or _is_auth_error(retry2_err)
@@ -7326,7 +7425,10 @@ async def async_call_llm(
                     task=task, messages=messages,
                     temperature=temperature, max_tokens=max_tokens,
                     tools=tools, effective_timeout=effective_timeout,
-                    effective_extra_body=effective_extra_body)
+                    effective_extra_body=effective_extra_body,
+                    effective_request_overrides=effective_request_overrides,
+                    effective_reasoning_config=effective_reasoning_config,
+                )
                 if fb_resp is not None:
                     return fb_resp
                 # Stale/unrefreshable candidate credential — quarantined; walk
@@ -7342,7 +7444,10 @@ async def async_call_llm(
                         task=task, messages=messages,
                         temperature=temperature, max_tokens=max_tokens,
                         tools=tools, effective_timeout=effective_timeout,
-                        effective_extra_body=effective_extra_body)
+                        effective_extra_body=effective_extra_body,
+                        effective_request_overrides=effective_request_overrides,
+                        effective_reasoning_config=effective_reasoning_config,
+                    )
                     if fb_resp is not None:
                         return fb_resp
             # All fallback layers exhausted — warn before re-raising. (#26882)
