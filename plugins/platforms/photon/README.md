@@ -124,6 +124,7 @@ All env vars are documented in `plugin.yaml`. The most important:
 | `PHOTON_TELEMETRY`        | false                      | Spectrum SDK telemetry — toggle with `hermes photon telemetry on\|off` (restart the gateway to apply) |
 | `PHOTON_MARKDOWN`         | true                       | Send agent replies as markdown (iMessage renders natively). `false` strips formatting to plain text |
 | `PHOTON_REACTIONS`        | false                      | Tapback 👀/👍/👎 as processing status; tapbacks on bot messages reach the agent as `reaction:added:<emoji>` |
+| `PHOTON_READ_RECEIPTS`    | false                      | Send native iMessage read receipts when Hermes starts processing an inbound Photon message |
 
 ## Attachments & limitations
 
@@ -131,9 +132,12 @@ All env vars are documented in `plugin.yaml`. The most important:
   the bytes (`content.read()`) and base64-inlines them on the NDJSON event; the
   adapter caches them to the shared media cache and populates `media_urls` /
   `media_types`, so the agent sees the real image/file or can transcribe the
-  voice note — parity with the BlueBubbles iMessage channel. Mixed iMessage
-  bubbles that contain both text and attachments are normalized as a grouped
-  payload so the user's typed text is preserved alongside the cached media.
+  voice note — parity with the BlueBubbles iMessage channel. HEIC/HEIF iMessage
+  photos are best-effort converted to JPEG on macOS via the built-in `sips`
+  tool before reaching the vision pipeline; if conversion is unavailable, the
+  original bytes are preserved as a document instead of being dropped. Mixed
+  iMessage bubbles that contain both text and attachments are normalized as a
+  grouped payload so the user's typed text is preserved alongside the cached media.
   Media larger than `PHOTON_MAX_INLINE_ATTACHMENT_BYTES` (default 20 MB), or
   any byte read that fails, falls back to a text marker (`[Photon attachment
   received: …]` or `[Photon voice received: …]`) so the agent still knows
@@ -153,6 +157,11 @@ All env vars are documented in `plugin.yaml`. The most important:
   restart is best-effort — the live reaction handle is lost, so a stale
   tapback heals when the next reaction replaces it. Group spaces stay
   reachable across restarts via spectrum-ts' `space.get(id)`.
+- **Read receipts are opt-in.** Set `PHOTON_READ_RECEIPTS=true` to have Hermes
+  send a native iMessage read receipt for the triggering message when the
+  gateway starts processing it. The sidecar uses spectrum-ts' iMessage
+  `read(message)` builder through `/read`; failures are soft so message
+  handling continues even if Photon cannot mark a message read.
 - **Message effects, polls** — supported by `spectrum-ts` but not yet
   exposed; the sidecar is the natural place to add them.
 

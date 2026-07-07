@@ -34,10 +34,12 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 if TYPE_CHECKING:
     # Type checkers see ``httpx`` as the always-imported module, so every use
@@ -348,6 +350,55 @@ class PhotonAdapter(BasePlatformAdapter):
             if "mention_patterns" in extra
             else os.getenv("PHOTON_MENTION_PATTERNS")
         )
+
+        _read_receipts = extra.get("read_receipts")
+        if _read_receipts is None:
+            _read_receipts = os.getenv("PHOTON_READ_RECEIPTS")
+        self._read_receipts_enabled = str(_read_receipts).strip().lower() in {
+            "true", "1", "yes", "on",
+        }
+
+        _native_effects = extra.get("native_effects")
+        if _native_effects is None:
+            _native_effects = os.getenv("PHOTON_NATIVE_EFFECTS")
+        self._native_effects_enabled = str(_native_effects).strip().lower() in {
+            "true", "1", "yes", "on",
+        }
+
+        _native_replies = extra.get("native_replies")
+        if _native_replies is None:
+            _native_replies = os.getenv("PHOTON_NATIVE_REPLIES")
+        self._native_replies_enabled = str(_native_replies).strip().lower() in {
+            "true", "1", "yes", "on",
+        }
+
+        _native_edits = extra.get("native_edits")
+        if _native_edits is None:
+            _native_edits = os.getenv("PHOTON_NATIVE_EDITS")
+        self._native_edits_enabled = str(_native_edits).strip().lower() in {
+            "true", "1", "yes", "on",
+        }
+
+        _native_unsend = extra.get("native_unsend")
+        if _native_unsend is None:
+            _native_unsend = os.getenv("PHOTON_NATIVE_UNSEND")
+        self._native_unsend_enabled = str(_native_unsend).strip().lower() in {
+            "true", "1", "yes", "on",
+        }
+
+        _native_polls = extra.get("native_polls")
+        if _native_polls is None:
+            _native_polls = os.getenv("PHOTON_NATIVE_POLLS")
+        self._native_polls_enabled = str(_native_polls).strip().lower() in {
+            "true", "1", "yes", "on",
+        }
+
+        _mini_apps = extra.get("mini_apps")
+        if _mini_apps is None:
+            _mini_apps = os.getenv("PHOTON_MINI_APPS")
+        self._mini_apps_enabled = str(_mini_apps).strip().lower() in {
+            "true", "1", "yes", "on",
+        }
 
     # -- Group-mention gating (parity with BlueBubbles) -------------------
 
@@ -676,11 +727,12 @@ class PhotonAdapter(BasePlatformAdapter):
                 payload, name, mime, force_audio=is_voice
             )
             if cached:
+                cached_path, cached_mime = cached
                 return (
                     "(voice)" if is_voice else "(attachment)",
                     mtype,
-                    [cached],
-                    [mime or ("audio/mp4" if is_voice else "application/octet-stream")],
+                    [cached_path],
+                    [cached_mime or mime or ("audio/mp4" if is_voice else "application/octet-stream")],
                 )
             label = "voice" if is_voice else "attachment"
             duration = payload.get("duration")
@@ -696,6 +748,19 @@ class PhotonAdapter(BasePlatformAdapter):
                 [],
                 [],
             )
+
+        def _poll_summary(poll: Dict[str, Any] | None) -> str:
+            if not isinstance(poll, dict):
+                return "Poll"
+            title = (poll.get("title") or "Poll").strip() or "Poll"
+            options = [
+                (option.get("title") or "").strip()
+                for option in (poll.get("options") or [])
+                if isinstance(option, dict) and (option.get("title") or "").strip()
+            ]
+            if not options:
+                return title
+            return f"{title} — options: {', '.join(options)}"
 
         ctype = content.get("type")
         if ctype == "reaction":
@@ -749,6 +814,20 @@ class PhotonAdapter(BasePlatformAdapter):
         if ctype == "text":
             text = content.get("text") or ""
             mtype = MessageType.TEXT
+        elif ctype == "poll":
+            text = f"[Photon poll received: {_poll_summary(content)}]"
+            mtype = MessageType.TEXT
+        elif ctype == "poll_option":
+            option_content = content.get("option")
+            option = option_content if isinstance(option_content, dict) else {}
+            option_title = (
+                content.get("title") or option.get("title") or "Option"
+            ).strip() or "Option"
+            poll_content = content.get("poll")
+            poll_text = _poll_summary(poll_content if isinstance(poll_content, dict) else None)
+            action = "selected" if content.get("selected") else "deselected"
+            text = f"[Photon poll option {action}: {option_title} in {poll_text}]"
+            mtype = MessageType.TEXT
         elif ctype in {"attachment", "voice"}:
             text, mtype, media_urls, media_types = _normalize_binary_payload(content)
         elif ctype == "group":
@@ -765,6 +844,24 @@ class PhotonAdapter(BasePlatformAdapter):
                     item_text = item_content.get("text") or ""
                     if item_text:
                         text_parts.append(item_text)
+                    continue
+                if item_type == "poll":
+                    text_parts.append(f"[Photon poll received: {_poll_summary(item_content)}]")
+                    continue
+                if item_type == "poll_option":
+                    option_content = item_content.get("option")
+                    option = option_content if isinstance(option_content, dict) else {}
+                    option_title = (
+                        item_content.get("title") or option.get("title") or "Option"
+                    ).strip() or "Option"
+                    poll_content = item_content.get("poll")
+                    poll_text = _poll_summary(
+                        poll_content if isinstance(poll_content, dict) else None
+                    )
+                    action = "selected" if item_content.get("selected") else "deselected"
+                    text_parts.append(
+                        f"[Photon poll option {action}: {option_title} in {poll_text}]"
+                    )
                     continue
                 if item_type in {"attachment", "voice"}:
                     marker, item_mtype, item_urls, item_types = _normalize_binary_payload(
@@ -939,6 +1036,12 @@ class PhotonAdapter(BasePlatformAdapter):
         env["PHOTON_SIDECAR_PORT"] = str(self._sidecar_port)
         env["PHOTON_SIDECAR_BIND"] = self._sidecar_bind
         env["PHOTON_SIDECAR_TOKEN"] = self._sidecar_token
+        env["PHOTON_NATIVE_EFFECTS"] = "true" if self._native_effects_enabled else "false"
+        env["PHOTON_NATIVE_REPLIES"] = "true" if self._native_replies_enabled else "false"
+        env["PHOTON_NATIVE_EDITS"] = "true" if self._native_edits_enabled else "false"
+        env["PHOTON_NATIVE_UNSEND"] = "true" if self._native_unsend_enabled else "false"
+        env["PHOTON_NATIVE_POLLS"] = "true" if self._native_polls_enabled else "false"
+        env["PHOTON_MINI_APPS"] = "true" if self._mini_apps_enabled else "false"
         # The sidecar exits when its stdin (the pipe below) hits EOF, so a
         # gateway death of ANY kind — including SIGKILL, where disconnect()
         # never runs — can't leave it orphaned on the port.
@@ -1087,7 +1190,315 @@ class PhotonAdapter(BasePlatformAdapter):
         reply_to: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
+        if reply_to and self._native_replies_enabled:
+            result = await self.reply_to_message(chat_id, reply_to, content)
+            if result.success:
+                return result
+            logger.debug(
+                "[photon] native reply failed for %s; falling back to plain send: %s",
+                reply_to,
+                result.error,
+            )
         return await self._sidecar_send(chat_id, self.format_message(content))
+
+    async def send_with_effect(
+        self,
+        chat_id: str,
+        content: str,
+        effect: str,
+        *,
+        markdown: bool = True,
+    ) -> SendResult:
+        """Send an iMessage bubble/screen effect through the Photon sidecar.
+
+        This is deliberately a narrow, feature-gated primitive: no polls,
+        replies, mini-apps, background changes, or global model tool surface.
+        """
+        if not self._native_effects_enabled:
+            return SendResult(success=False, error="Photon native effects are disabled")
+        text = self.format_message(content)
+        if len(text) > self.MAX_MESSAGE_LENGTH:
+            logger.warning(
+                "[photon] truncating effect outbound from %d to %d chars",
+                len(text), self.MAX_MESSAGE_LENGTH,
+            )
+            text = text[: self.MAX_MESSAGE_LENGTH]
+        body: Dict[str, Any] = {
+            "spaceId": chat_id,
+            "text": text,
+            "effect": effect,
+        }
+        if markdown and _markdown_enabled():
+            body["format"] = "markdown"
+        try:
+            data = await self._sidecar_call("/send-effect", body)
+        except Exception as e:
+            return SendResult(success=False, error=str(e))
+        self._record_sent_message(data.get("messageId"))
+        return SendResult(
+            success=True,
+            message_id=data.get("messageId"),
+            raw_response=data,
+        )
+
+    async def reply_to_message(
+        self,
+        chat_id: str,
+        message_id: str,
+        content: str,
+        *,
+        markdown: bool = True,
+    ) -> SendResult:
+        """Send a native iMessage threaded reply through the Photon sidecar."""
+        if not self._native_replies_enabled:
+            return SendResult(success=False, error="Photon native replies are disabled")
+        text = self.format_message(content)
+        if len(text) > self.MAX_MESSAGE_LENGTH:
+            logger.warning(
+                "[photon] truncating reply outbound from %d to %d chars",
+                len(text), self.MAX_MESSAGE_LENGTH,
+            )
+            text = text[: self.MAX_MESSAGE_LENGTH]
+        body: Dict[str, Any] = {
+            "spaceId": chat_id,
+            "messageId": message_id,
+            "text": text,
+        }
+        if markdown and _markdown_enabled():
+            body["format"] = "markdown"
+        try:
+            data = await self._sidecar_call("/reply", body)
+        except Exception as e:
+            return SendResult(success=False, error=str(e))
+        self._record_sent_message(data.get("messageId"))
+        return SendResult(
+            success=True,
+            message_id=data.get("messageId"),
+            raw_response=data,
+        )
+
+    def _is_sent_by_hermes(self, message_id: Optional[str]) -> bool:
+        return bool(message_id and message_id in self._sent_message_ids)
+
+    async def edit_sent_message(
+        self,
+        chat_id: str,
+        message_id: str,
+        content: str,
+        *,
+        markdown: bool = True,
+    ) -> SendResult:
+        """Edit a native iMessage, guarded to messages Hermes sent this run."""
+        if not self._native_edits_enabled:
+            return SendResult(success=False, error="Photon native edits are disabled")
+        if not self._is_sent_by_hermes(message_id):
+            return SendResult(
+                success=False,
+                error="Photon native edits are limited to tracked Hermes-sent messages",
+            )
+        text = self.format_message(content)
+        if len(text) > self.MAX_MESSAGE_LENGTH:
+            logger.warning(
+                "[photon] truncating edit outbound from %d to %d chars",
+                len(text), self.MAX_MESSAGE_LENGTH,
+            )
+            text = text[: self.MAX_MESSAGE_LENGTH]
+        body: Dict[str, Any] = {
+            "spaceId": chat_id,
+            "messageId": message_id,
+            "text": text,
+            "hermesSent": True,
+        }
+        # Native iMessage edits are text-only in spectrum-ts. Keep the
+        # markdown parameter for API compatibility, but do not request markdown
+        # edit content here because Spectrum rejects non-text edits before they
+        # reach Photon.
+        try:
+            data = await self._sidecar_call("/edit", body)
+        except Exception as e:
+            return SendResult(success=False, error=str(e))
+        return SendResult(success=True, message_id=message_id, raw_response=data)
+
+    async def unsend_sent_message(
+        self,
+        chat_id: str,
+        message_id: str,
+    ) -> SendResult:
+        """Unsend a native iMessage, guarded to messages Hermes sent this run."""
+        if not self._native_unsend_enabled:
+            return SendResult(success=False, error="Photon native unsend is disabled")
+        if not self._is_sent_by_hermes(message_id):
+            return SendResult(
+                success=False,
+                error="Photon native unsend is limited to tracked Hermes-sent messages",
+            )
+        try:
+            data = await self._sidecar_call(
+                "/unsend",
+                {"spaceId": chat_id, "messageId": message_id, "hermesSent": True},
+            )
+        except Exception as e:
+            return SendResult(success=False, error=str(e))
+        self._sent_message_ids.pop(message_id, None)
+        return SendResult(success=True, message_id=message_id, raw_response=data)
+
+    async def send_poll(
+        self,
+        chat_id: str,
+        question: str,
+        options: List[str],
+    ) -> SendResult:
+        """Create a native iMessage poll. The same flag gates explicit mutations."""
+        if not self._native_polls_enabled:
+            return SendResult(success=False, error="Photon native polls are disabled")
+        clean_question = question.strip()
+        clean_options = [option.strip() for option in options if option.strip()]
+        if not clean_question:
+            return SendResult(success=False, error="Photon native polls require a question")
+        if len(clean_options) < 2:
+            return SendResult(
+                success=False,
+                error="Photon native polls require at least two options",
+            )
+        try:
+            data = await self._sidecar_call(
+                "/send-poll",
+                {
+                    "spaceId": chat_id,
+                    "question": clean_question,
+                    "options": clean_options,
+                },
+            )
+        except Exception as e:
+            return SendResult(success=False, error=str(e))
+        self._record_sent_message(data.get("messageId"))
+        return SendResult(
+            success=True,
+            message_id=data.get("messageId"),
+            raw_response=data,
+        )
+
+    async def send_mini_app(
+        self,
+        chat_id: str,
+        url: str,
+        *,
+        app_name: Optional[str] = None,
+        extension_bundle_id: Optional[str] = None,
+        team_id: Optional[str] = None,
+    ) -> SendResult:
+        """Send a narrow iMessage app-url card through Photon.
+
+        This intentionally exposes only the generic Spectrum ``app(url)``
+        launch path, gated behind ``PHOTON_MINI_APPS=true``. Capability tokens
+        may live in the URL, so callers and logs must treat the URL as
+        sensitive and avoid echoing it back to the model/user.
+        """
+        if not self._mini_apps_enabled:
+            return SendResult(success=False, error="Photon mini-app cards are disabled")
+
+        clean_url = str(url or "").strip()
+        parsed = urlparse(clean_url)
+        if parsed.scheme != "https" or not parsed.netloc:
+            return SendResult(success=False, error="Photon mini-app cards require an https URL")
+
+        body: Dict[str, Any] = {"spaceId": chat_id, "url": clean_url}
+        if app_name:
+            body["appName"] = app_name.strip()
+        if extension_bundle_id:
+            body["extensionBundleId"] = extension_bundle_id.strip()
+        if team_id:
+            body["teamId"] = team_id.strip()
+
+        try:
+            data = await self._sidecar_call("/send-mini-app", body)
+        except Exception as e:
+            return SendResult(success=False, error=str(e))
+        self._record_sent_message(data.get("messageId"))
+        return SendResult(
+            success=True,
+            message_id=data.get("messageId"),
+            raw_response=data,
+        )
+
+    async def add_poll_option(
+        self,
+        chat_id: str,
+        poll_message_id: str,
+        option: str,
+    ) -> SendResult:
+        """Add an option to a native iMessage poll."""
+        if not self._native_polls_enabled:
+            return SendResult(success=False, error="Photon native polls are disabled")
+        clean_option = option.strip()
+        if not clean_option:
+            return SendResult(success=False, error="Photon poll option is required")
+        try:
+            data = await self._sidecar_call(
+                "/poll-add-option",
+                {
+                    "spaceId": chat_id,
+                    "pollMessageId": poll_message_id,
+                    "option": clean_option,
+                },
+            )
+        except Exception as e:
+            return SendResult(success=False, error=str(e))
+        return SendResult(
+            success=True,
+            message_id=data.get("pollMessageId", poll_message_id),
+            raw_response=data,
+        )
+
+    async def vote_poll(
+        self,
+        chat_id: str,
+        poll_message_id: str,
+        option_id: str,
+    ) -> SendResult:
+        """Vote for an option in a native iMessage poll."""
+        if not self._native_polls_enabled:
+            return SendResult(success=False, error="Photon native polls are disabled")
+        clean_option_id = option_id.strip()
+        if not clean_option_id:
+            return SendResult(success=False, error="Photon poll optionId is required")
+        try:
+            data = await self._sidecar_call(
+                "/poll-vote",
+                {
+                    "spaceId": chat_id,
+                    "pollMessageId": poll_message_id,
+                    "optionId": clean_option_id,
+                },
+            )
+        except Exception as e:
+            return SendResult(success=False, error=str(e))
+        return SendResult(
+            success=True,
+            message_id=data.get("pollMessageId", poll_message_id),
+            raw_response=data,
+        )
+
+    async def unvote_poll(
+        self,
+        chat_id: str,
+        poll_message_id: str,
+    ) -> SendResult:
+        """Remove this account's vote from a native iMessage poll."""
+        if not self._native_polls_enabled:
+            return SendResult(success=False, error="Photon native polls are disabled")
+        try:
+            data = await self._sidecar_call(
+                "/poll-unvote",
+                {"spaceId": chat_id, "pollMessageId": poll_message_id},
+            )
+        except Exception as e:
+            return SendResult(success=False, error=str(e))
+        return SendResult(
+            success=True,
+            message_id=data.get("pollMessageId", poll_message_id),
+            raw_response=data,
+        )
 
     # -- Outbound media (parity with the BlueBubbles iMessage channel) -----
     #
@@ -1256,6 +1667,17 @@ class PhotonAdapter(BasePlatformAdapter):
             "true", "1", "yes", "on",
         }
 
+    async def _mark_read(self, chat_id: str, message_id: str) -> bool:
+        """Mark an inbound iMessage as read. Soft-fails (False), never raises."""
+        try:
+            await self._sidecar_call(
+                "/read", {"spaceId": chat_id, "messageId": message_id}
+            )
+            return True
+        except Exception as e:
+            logger.debug("[photon] mark_read failed: %s", e)
+            return False
+
     async def _add_reaction(
         self, chat_id: str, message_id: str, emoji: str
     ) -> bool:
@@ -1343,11 +1765,13 @@ class PhotonAdapter(BasePlatformAdapter):
         return {"success": True, "message_id": target}
 
     async def on_processing_start(self, event: MessageEvent) -> None:
-        """Tapback 👀 on the triggering message while the agent works."""
-        if not self._reactions_enabled():
-            return
+        """Mark the triggering message read, then optionally tapback 👀."""
         chat_id = getattr(event.source, "chat_id", None)
         message_id = getattr(event, "message_id", None)
+        if chat_id and message_id and self._read_receipts_enabled:
+            await self._mark_read(chat_id, message_id)
+        if not self._reactions_enabled():
+            return
         if chat_id and message_id:
             await self._add_reaction(chat_id, message_id, "\U0001f440")
 
@@ -1485,7 +1909,11 @@ class PhotonAdapter(BasePlatformAdapter):
         except Exception as e:
             return SendResult(success=False, error=str(e))
         self._record_sent_message(data.get("messageId"))
-        return SendResult(success=True, message_id=data.get("messageId"))
+        return SendResult(
+            success=True,
+            message_id=data.get("messageId"),
+            raw_response=data,
+        )
 
     async def _sidecar_send_attachment(
         self,
@@ -1534,7 +1962,11 @@ class PhotonAdapter(BasePlatformAdapter):
         except Exception as e:
             return SendResult(success=False, error=str(e))
         self._record_sent_message(data.get("messageId"))
-        return SendResult(success=True, message_id=data.get("messageId"))
+        return SendResult(
+            success=True,
+            message_id=data.get("messageId"),
+            raw_response=data,
+        )
 
     async def _sidecar_call(self, path: str, body: Dict[str, Any]) -> Dict[str, Any]:
         # Guard: adapter not yet connected (no sidecar address known).
@@ -1599,13 +2031,49 @@ _AUDIO_EXT_BY_MIME = {
 }
 
 
+_HEIC_IMAGE_MIMES = {"image/heic", "image/heif"}
+
+
+def _convert_heic_to_jpeg_bytes(raw: bytes, name: str) -> Optional[bytes]:
+    """Best-effort macOS HEIC/HEIF conversion for inbound iMessage photos.
+
+    Hermes vision tooling cannot reliably consume HEIC directly. On macOS,
+    ``sips`` is available without adding a dependency, so convert to JPEG before
+    caching as image media. Fail closed: if conversion is unavailable or fails,
+    the caller keeps the original bytes as a document rather than dropping them.
+    """
+    sips = shutil.which("sips")
+    if not sips:
+        return None
+    try:
+        with tempfile.TemporaryDirectory(prefix="hermes-photon-heic-") as tmp:
+            in_path = Path(tmp) / (Path(name).name or "inbound.heic")
+            out_path = Path(tmp) / "converted.jpg"
+            in_path.write_bytes(raw)
+            subprocess.run(  # noqa: S603 - fixed binary path from shutil.which
+                [sips, "-s", "format", "jpeg", str(in_path), "--out", str(out_path)],
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=True,
+            )
+            converted = out_path.read_bytes()
+    except Exception as exc:
+        logger.warning("[photon] failed to convert inbound HEIC %s: %s", name, exc)
+        return None
+    if not converted.startswith(b"\xff\xd8\xff"):
+        logger.warning("[photon] sips converted HEIC %s but output was not JPEG", name)
+        return None
+    return converted
+
+
 def _cache_inbound_attachment(
     content: Dict[str, Any],
     name: str,
     mime: str,
     *,
     force_audio: bool = False,
-) -> Optional[str]:
+) -> Optional[tuple[str, str]]:
     """Decode a base64-inlined inbound attachment and cache it locally.
 
     The sidecar inlines the attachment bytes as ``content["data"]`` (base64).
@@ -1635,20 +2103,25 @@ def _cache_inbound_attachment(
     suffix = Path(name).suffix if name else ""
     try:
         if mime.startswith("image/"):
+            if mime in _HEIC_IMAGE_MIMES:
+                converted = _convert_heic_to_jpeg_bytes(raw, name)
+                if converted:
+                    return cache_image_from_bytes(converted, ".jpg"), "image/jpeg"
             ext = suffix or _IMAGE_EXT_BY_MIME.get(mime, ".jpg")
             try:
-                return cache_image_from_bytes(raw, ext)
+                return cache_image_from_bytes(raw, ext), mime or "image/jpeg"
             except ValueError:
-                # Bytes don't look like a supported image (e.g. HEIC magic) —
-                # still deliver them as a document rather than dropping them.
-                return cache_document_from_bytes(raw, name)
+                # Bytes don't look like a supported image (e.g. HEIC magic when
+                # conversion is unavailable) — still deliver them as a document
+                # rather than dropping them.
+                return cache_document_from_bytes(raw, name), mime or "application/octet-stream"
         if force_audio or mime.startswith("audio/"):
             ext = suffix or _AUDIO_EXT_BY_MIME.get(
                 mime, ".m4a" if force_audio else ".mp3"
             )
-            return cache_audio_from_bytes(raw, ext)
+            return cache_audio_from_bytes(raw, ext), mime or ("audio/mp4" if force_audio else "audio/mpeg")
         # Video, application/*, and everything else → document cache.
-        return cache_document_from_bytes(raw, name)
+        return cache_document_from_bytes(raw, name), mime or "application/octet-stream"
     except Exception as exc:
         logger.warning("[photon] failed to cache inbound attachment %s: %s", name, exc)
         return None

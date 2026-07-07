@@ -31,6 +31,12 @@
 //   - POST /unreact     -> {"ok": true} | 400 soft failure
 //       body: {"spaceId": "...", "messageId": "<target msg id>",
 //              "reactionId": "..." | null (restart-recovery fallback)}
+//   - POST /read        -> {"ok": true}
+//       body: {"spaceId": "...", "messageId": "<target msg id>"}
+//   - POST /send-mini-app -> {"ok": true, "messageId": "..."}
+//       body: {"spaceId": "...", "url": "https://...",
+//              "appName": "..." | null,
+//              "extensionBundleId": "..." | null, "teamId": "..." | null}
 //   - POST /typing      -> {"ok": true}
 //       body: {"spaceId": "...", "state": "start" | "stop"}
 //   - POST /shutdown    -> {"ok": true}; then process exits
@@ -73,10 +79,72 @@ const telemetry = /^(1|true|yes|on)$/i.test(
 // images / transcribe voice). Cap the size we inline — above it we forward
 // metadata only and the adapter surfaces a text marker, so one large clip can't
 // balloon a single NDJSON line. Override via PHOTON_MAX_INLINE_ATTACHMENT_BYTES.
-const MAX_INLINE_ATTACHMENT_BYTES =
-  Number(process.env.PHOTON_MAX_INLINE_ATTACHMENT_BYTES) || 20 * 1024 * 1024;
-const DM_CHAT_GUID_RE = /^any;-;(\+\d{6,})$/;
-const E164_RE = /^\+\d{6,}$/;
+const DEFAULT_INLINE_ATTACHMENT_BYTES = 20 * 1024 * 1024;
+const HARD_MAX_INLINE_ATTACHMENT_BYTES = 100 * 1024 * 1024;
+
+function parseInlineAttachmentCap(raw) {
+  if (raw == null || String(raw).trim() === "") {
+    return DEFAULT_INLINE_ATTACHMENT_BYTES;
+  }
+  const parsed = Number(raw);
+  if (
+    !Number.isFinite(parsed) ||
+    parsed < 0 ||
+    parsed > HARD_MAX_INLINE_ATTACHMENT_BYTES
+  ) {
+    console.error(
+      `photon-sidecar: invalid PHOTON_MAX_INLINE_ATTACHMENT_BYTES=${raw}; ` +
+        `using default ${DEFAULT_INLINE_ATTACHMENT_BYTES}`
+    );
+    return DEFAULT_INLINE_ATTACHMENT_BYTES;
+  }
+  return Math.floor(parsed);
+}
+
+const MAX_INLINE_ATTACHMENT_BYTES = parseInlineAttachmentCap(
+  process.env.PHOTON_MAX_INLINE_ATTACHMENT_BYTES
+);
+const DM_CHAT_GUID_RE = /^any;-;(.+)$/;
+const E164_RE = /^\+\d{6,15}$/;
+const CHILD_MESSAGE_ID_RE = /^p:(\d+)\/(.+)$/;
+const nativeEffectsEnabled = /^(1|true|yes|on)$/i.test(
+  (process.env.PHOTON_NATIVE_EFFECTS || "").trim()
+);
+const nativeRepliesEnabled = /^(1|true|yes|on)$/i.test(
+  (process.env.PHOTON_NATIVE_REPLIES || "").trim()
+);
+const nativeEditsEnabled = /^(1|true|yes|on)$/i.test(
+  (process.env.PHOTON_NATIVE_EDITS || "").trim()
+);
+const nativeUnsendEnabled = /^(1|true|yes|on)$/i.test(
+  (process.env.PHOTON_NATIVE_UNSEND || "").trim()
+);
+const nativePollsEnabled = /^(1|true|yes|on)$/i.test(
+  (process.env.PHOTON_NATIVE_POLLS || "").trim()
+);
+const miniAppsEnabled = /^(1|true|yes|on)$/i.test(
+  (process.env.PHOTON_MINI_APPS || "").trim()
+);
+const EFFECTS = {
+  slam: "com.apple.MobileSMS.expressivesend.impact",
+  impact: "com.apple.MobileSMS.expressivesend.impact",
+  loud: "com.apple.MobileSMS.expressivesend.loud",
+  gentle: "com.apple.MobileSMS.expressivesend.gentle",
+  invisible: "com.apple.MobileSMS.expressivesend.invisibleink",
+  invisibleink: "com.apple.MobileSMS.expressivesend.invisibleink",
+  "invisible-ink": "com.apple.MobileSMS.expressivesend.invisibleink",
+  confetti: "com.apple.messages.effect.CKConfettiEffect",
+  fireworks: "com.apple.messages.effect.CKFireworksEffect",
+  balloons: "com.apple.messages.effect.CKBalloonEffect",
+  balloon: "com.apple.messages.effect.CKBalloonEffect",
+  heart: "com.apple.messages.effect.CKHeartEffect",
+  lasers: "com.apple.messages.effect.CKLasersEffect",
+  celebration: "com.apple.messages.effect.CKHappyBirthdayEffect",
+  birthday: "com.apple.messages.effect.CKHappyBirthdayEffect",
+  sparkles: "com.apple.messages.effect.CKSparklesEffect",
+  spotlight: "com.apple.messages.effect.CKSpotlightEffect",
+  echo: "com.apple.messages.effect.CKEchoEffect",
+};
 const MAX_KNOWN_SPACES = 2048;
 const MAX_KNOWN_MESSAGES = 1024;
 const MAX_REACTION_HANDLES = 512;
@@ -234,21 +302,40 @@ try {
 }
 let Spectrum,
   imessage,
+  imessageRead,
   attachment,
   voice,
+  cloud,
+  editContent,
+  pollContent,
+  replyContent,
+  unsendContent,
+  appUrlContent,
   spectrumText,
   spectrumMarkdown,
-  spectrumTyping;
+  spectrumTyping,
+  imessageEffect,
+  advancedCreateClient;
 try {
   ({
     Spectrum,
     attachment,
     voice,
+    cloud,
+    edit: editContent,
+    poll: pollContent,
+    reply: replyContent,
+    unsend: unsendContent,
+    app: appUrlContent,
     text: spectrumText,
     markdown: spectrumMarkdown,
     typing: spectrumTyping,
   } = await import("spectrum-ts"));
-  ({ imessage } = await import("spectrum-ts/providers/imessage"));
+  ({
+    imessage,
+    effect: imessageEffect,
+    read: imessageRead,
+  } = await import("spectrum-ts/providers/imessage"));
 } catch (e) {
   console.error(
     "photon-sidecar: spectrum-ts is not installed. Run `npm install` " +
@@ -256,6 +343,14 @@ try {
       (e && e.stack ? e.stack : String(e))
   );
   process.exit(3);
+}
+
+try {
+  ({ createClient: advancedCreateClient } = await import(
+    "@photon-ai/advanced-imessage"
+  ));
+} catch {
+  advancedCreateClient = null;
 }
 
 const app = await Spectrum({
@@ -308,6 +403,167 @@ function phoneTargetFromSpaceId(spaceId) {
   if (E164_RE.test(spaceId)) return spaceId;
   const dmGuid = spaceId.match(DM_CHAT_GUID_RE);
   return dmGuid ? dmGuid[1] : null;
+}
+
+function advancedSpacePhone(space) {
+  const phone = String(space?.phone ?? "").trim();
+  return phone || phoneTargetFromSpaceId(space?.id) || undefined;
+}
+
+function advancedChatId(space) {
+  const id = String(space?.id ?? "").trim();
+  if (id.includes(";-;") || id.includes(";+;")) return id;
+  const phone = advancedSpacePhone(space);
+  if (phone) return `any;-;${phone}`;
+  if (id) return id;
+  throw new Error("could not resolve advanced iMessage chat id");
+}
+
+function advancedTargetMessage(messageId) {
+  const id = String(messageId || "").trim();
+  const child = id.match(CHILD_MESSAGE_ID_RE);
+  if (!child) return { messageGuid: id, options: undefined };
+  return {
+    messageGuid: child[2],
+    options: { partIndex: Number(child[1]) },
+  };
+}
+
+// The advanced client resolves its `token` callback per RPC (auth
+// middleware), so the gRPC channels can stay open for the sidecar's lifetime
+// while token issuance is memoized briefly — instead of issuing tokens and
+// building + tearing down every channel on each advanced action.
+const ADVANCED_TOKEN_TTL_MS = 45_000;
+let advancedTokenCache = null; // { data, fetchedAt }
+let advancedClients = null; // [{ phone, client }]
+
+async function issueAdvancedTokens() {
+  const now = Date.now();
+  if (advancedTokenCache && now - advancedTokenCache.fetchedAt < ADVANCED_TOKEN_TTL_MS) {
+    return advancedTokenCache.data;
+  }
+  const data = await cloud.issueImessageTokens(projectId, projectSecret);
+  advancedTokenCache = { data, fetchedAt: now };
+  return data;
+}
+
+async function getAdvancedClients() {
+  if (advancedClients) return advancedClients;
+  const tokenData = await issueAdvancedTokens();
+  const clients = [];
+  if (tokenData?.type === "shared") {
+    const address =
+      process.env.SPECTRUM_IMESSAGE_ADDRESS ?? "imessage.spectrum.photon.codes:443";
+    clients.push({
+      phone: "shared",
+      client: advancedCreateClient({
+        address,
+        tls: true,
+        token: async () => (await issueAdvancedTokens()).token,
+      }),
+    });
+  } else {
+    const numbers = tokenData?.numbers ?? {};
+    for (const instanceId of Object.keys(tokenData?.auth ?? {})) {
+      const phone = String(numbers[instanceId] ?? "");
+      if (!phone) continue;
+      clients.push({
+        phone,
+        client: advancedCreateClient({
+          address: `${instanceId}.imsg.photon.codes:443`,
+          tls: true,
+          token: async () => String((await issueAdvancedTokens())?.auth?.[instanceId] ?? ""),
+        }),
+      });
+    }
+  }
+  if (clients.length === 0) {
+    throw new Error("could not create an advanced iMessage client");
+  }
+  advancedClients = clients;
+  return clients;
+}
+
+async function closeAdvancedClients() {
+  const clients = advancedClients;
+  advancedClients = null;
+  advancedTokenCache = null;
+  if (clients) {
+    await Promise.allSettled(clients.map(({ client }) => client.close()));
+  }
+}
+
+function isUpstreamMessageRpcError(error) {
+  return /MessageService\/(Edit|Unsend)Message/.test(String(error?.message ?? error ?? ""));
+}
+
+// Spectrum's UnsupportedError is a deliberate capability refusal (e.g.
+// "iMessage polls cannot be unsent"), not a delivery failure. The advanced
+// fallback must never bypass it — an OpenClaw live smoke showed the
+// equivalent fallback unsending an active poll Spectrum had refused to.
+function isSpectrumCapabilityError(error) {
+  return error?.name === "UnsupportedError";
+}
+
+// Spectrum's inbound poll events carry synthetic message ids —
+// "<pollGuid>:<sender>:<optionId>:<vote|unvote>:<timestamp>" for votes and
+// "<pollGuid>:poll:<sequence>" for poll changes — while the advanced poll
+// mutation APIs want the bare poll message guid. Callers naturally hand us
+// whichever id they last saw in chat context, so normalize here.
+const POLL_GUID_PREFIX =
+  /^([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})(?=:)/;
+
+function pollMessageGuid(messageId) {
+  const raw = String(messageId ?? "").trim();
+  const match = raw.match(POLL_GUID_PREFIX);
+  return match ? match[1] : raw;
+}
+
+function isAdvancedTransportError(error) {
+  const message = String(error?.message ?? error ?? "");
+  return (
+    message.includes("ECONNRESET") ||
+    message.includes("UNAVAILABLE") ||
+    message.includes("DEADLINE_EXCEEDED") ||
+    message.includes("ConnectionError") ||
+    message.includes("Connection dropped") ||
+    message.includes("stream interrupted")
+  );
+}
+
+async function withAdvancedIMessageClient(space, fn) {
+  if (!advancedCreateClient) {
+    throw new Error(
+      "advanced iMessage poll actions require @photon-ai/advanced-imessage"
+    );
+  }
+  if (typeof cloud?.issueImessageTokens !== "function") {
+    throw new Error("advanced iMessage poll actions require cloud token support");
+  }
+  const clients = await getAdvancedClients();
+  const phone = advancedSpacePhone(space);
+  const entry =
+    clients.length === 1 || clients[0]?.phone === "shared"
+      ? clients[0]
+      : clients.find((candidate) => candidate.phone === phone);
+  if (!entry) {
+    throw new Error(
+      `could not find an advanced iMessage client for phone ${phone ?? "<unknown>"}`
+    );
+  }
+  try {
+    return await fn(entry.client);
+  } catch (error) {
+    // A dead channel would poison every later action; reconnect fresh next
+    // call. Dedicated-mode instance ids can also change when a line moves, so
+    // rebuilding on transport failure covers re-routing too.
+    if (isAdvancedTransportError(error)) await closeAdvancedClients();
+    throw error;
+  }
+}
+
+function clientMessageId(prefix) {
+  return `${prefix || "photon"}-${crypto.randomUUID()}`;
 }
 
 function rememberInboundSpace(space, message) {
@@ -469,6 +725,51 @@ async function normalizeContent(content) {
       targetText: reactionTargetText(target),
     };
   }
+  if (content.type === "poll") {
+    return {
+      type: "poll",
+      title: typeof content.title === "string" ? content.title : "",
+      options: Array.isArray(content.options)
+        ? content.options.map((option) => ({
+            title:
+              option && typeof option === "object" && typeof option.title === "string"
+                ? option.title
+                : "",
+          }))
+        : [],
+    };
+  }
+  if (content.type === "poll_option") {
+    return {
+      type: "poll_option",
+      title: typeof content.title === "string" ? content.title : "",
+      selected: Boolean(content.selected),
+      option:
+        content.option && typeof content.option === "object"
+          ? {
+              title:
+                typeof content.option.title === "string" ? content.option.title : "",
+            }
+          : null,
+      poll:
+        content.poll && typeof content.poll === "object"
+          ? {
+              type: "poll",
+              title: typeof content.poll.title === "string" ? content.poll.title : "",
+              options: Array.isArray(content.poll.options)
+                ? content.poll.options.map((option) => ({
+                    title:
+                      option &&
+                      typeof option === "object" &&
+                      typeof option.title === "string"
+                        ? option.title
+                        : "",
+                  }))
+                : [],
+            }
+          : null,
+    };
+  }
   return { type: content.type || "unknown" };
 }
 
@@ -595,6 +896,13 @@ function badRequest(res, msg) {
   res.statusCode = 400;
   res.setHeader("Content-Type", "application/json");
   res.end(JSON.stringify({ ok: false, error: msg }));
+}
+
+function effectId(raw) {
+  const value = typeof raw === "string" ? raw.trim() : "";
+  if (!value) return null;
+  if (value.startsWith("com.apple.")) return value;
+  return EFFECTS[value.toLowerCase()] || null;
 }
 
 function serverError(res) {
@@ -733,7 +1041,328 @@ const server = http.createServer(async (req, res) => {
       const builder =
         format === "markdown" ? spectrumMarkdown(text) : spectrumText(text);
       const result = await space.send(builder);
+      rememberKnownMessage(result);
       return ok(res, { messageId: result?.id || null });
+    }
+    if (req.url === "/send-effect") {
+      if (!nativeEffectsEnabled) {
+        return badRequest(res, "native effects are disabled");
+      }
+      const { spaceId, text, format = "text" } = body || {};
+      const resolvedEffect = effectId(body?.effectId || body?.effect);
+      if (!spaceId || typeof text !== "string") {
+        return badRequest(res, "spaceId and text are required");
+      }
+      if (!resolvedEffect) {
+        return badRequest(
+          res,
+          "effect must be one of: slam, loud, gentle, invisible, confetti, fireworks, balloons, heart, lasers, celebration, sparkles, spotlight, echo"
+        );
+      }
+      if (format !== "text" && format !== "markdown") {
+        return badRequest(res, "format must be text or markdown");
+      }
+      if (typeof imessageEffect !== "function") {
+        return badRequest(res, "native effects not supported on this platform");
+      }
+      const space = await resolveSpace(spaceId);
+      const content =
+        format === "markdown" ? spectrumMarkdown(text) : spectrumText(text);
+      const result = await space.send(imessageEffect(content, resolvedEffect));
+      rememberKnownMessage(result);
+      return ok(res, { messageId: result?.id || null, effect: resolvedEffect });
+    }
+    if (req.url === "/reply") {
+      if (!nativeRepliesEnabled) {
+        return badRequest(res, "native replies are disabled");
+      }
+      const { spaceId, messageId, text, format = "text" } = body || {};
+      if (!spaceId || !messageId || typeof text !== "string") {
+        return badRequest(res, "spaceId, messageId and text are required");
+      }
+      if (format !== "text" && format !== "markdown") {
+        return badRequest(res, "format must be text or markdown");
+      }
+      if (typeof replyContent !== "function") {
+        return badRequest(res, "native replies not supported on this platform");
+      }
+      const space = await resolveSpace(spaceId);
+      const target =
+        knownMessages.get(messageId) ?? (await space.getMessage(messageId));
+      if (!target) {
+        return badRequest(res, "message not found");
+      }
+      const content =
+        format === "markdown" ? spectrumMarkdown(text) : spectrumText(text);
+      const result = await space.send(replyContent(content, target));
+      rememberKnownMessage(result);
+      return ok(res, { messageId: result?.id || null, repliedTo: messageId });
+    }
+    if (req.url === "/edit") {
+      if (!nativeEditsEnabled) {
+        return badRequest(res, "native edits are disabled");
+      }
+      const { spaceId, messageId, text, format = "text", hermesSent = false } = body || {};
+      if (hermesSent !== true) {
+        return badRequest(res, "edit requires a Hermes-sent message guard");
+      }
+      if (!spaceId || !messageId || typeof text !== "string") {
+        return badRequest(res, "spaceId, messageId and text are required");
+      }
+      if (format !== "text" && format !== "markdown") {
+        return badRequest(res, "format must be text or markdown");
+      }
+      if (typeof editContent !== "function") {
+        return badRequest(res, "native edits not supported on this platform");
+      }
+      const space = await resolveSpace(spaceId);
+      const target =
+        knownMessages.get(messageId) ?? (await space.getMessage(messageId));
+      if (!target) {
+        return badRequest(res, "message not found");
+      }
+      if (target.direction && target.direction !== "outbound") {
+        return badRequest(res, "only outbound messages can be edited");
+      }
+      // spectrum-ts iMessage edits are text-only. Markdown edit content throws
+      // in the provider before it reaches Photon, which would fall back to the
+      // direct advanced edit path that live canaries showed can return upstream
+      // 500s.
+      const content = spectrumText(text);
+      try {
+        // Match OpenClaw/Spectrum's canonical edit path first. The direct
+        // advanced SDK edit endpoint returned upstream 500s in live canaries,
+        // while Spectrum routes edits through its provider send action.
+        if (typeof target.edit === "function") {
+          await target.edit(content);
+          return ok(res, { messageId, edited: true, method: "message.edit" });
+        }
+        await space.send(editContent(content, target));
+        return ok(res, { messageId, edited: true, method: "space.send(edit)" });
+      } catch (spectrumError) {
+        if (!advancedCreateClient) throw spectrumError;
+        // Spectrum's provider edit already calls the advanced EditMessage RPC;
+        // when the failure names that RPC the upstream service itself failed
+        // and the fallback would re-dial the identical endpoint.
+        if (isUpstreamMessageRpcError(spectrumError)) throw spectrumError;
+        if (isSpectrumCapabilityError(spectrumError)) throw spectrumError;
+        console.error(
+          "photon-sidecar: Spectrum edit failed; trying advanced edit fallback: " +
+            (spectrumError && spectrumError.stack
+              ? spectrumError.stack
+              : String(spectrumError))
+        );
+        const targetMsg = advancedTargetMessage(messageId);
+        const advancedResult = await withAdvancedIMessageClient(space, (client) =>
+          client.messages.edit(advancedChatId(space), targetMsg.messageGuid, text, {
+            ...targetMsg.options,
+            backwardCompatText: text,
+            clientMessageId: clientMessageId("edit"),
+          })
+        );
+        rememberKnownMessage(advancedResult);
+        return ok(res, {
+          messageId,
+          edited: true,
+          method: "advanced.messages.edit",
+        });
+      }
+    }
+    if (req.url === "/unsend") {
+      if (!nativeUnsendEnabled) {
+        return badRequest(res, "native unsend is disabled");
+      }
+      const { spaceId, messageId, hermesSent = false } = body || {};
+      if (hermesSent !== true) {
+        return badRequest(res, "unsend requires a Hermes-sent message guard");
+      }
+      if (!spaceId || !messageId) {
+        return badRequest(res, "spaceId and messageId are required");
+      }
+      if (typeof unsendContent !== "function") {
+        return badRequest(res, "native unsend not supported on this platform");
+      }
+      const space = await resolveSpace(spaceId);
+      const target =
+        knownMessages.get(messageId) ?? (await space.getMessage(messageId));
+      if (!target) {
+        return badRequest(res, "message not found");
+      }
+      if (target.direction && target.direction !== "outbound") {
+        return badRequest(res, "only outbound messages can be unsent");
+      }
+      try {
+        // Prefer Spectrum's message method/canonical wrapper shape for parity
+        // with OpenClaw, but keep the advanced route as a fallback because it
+        // returned an explicit accepted response in live canaries.
+        if (typeof target.unsend === "function") {
+          await target.unsend();
+          knownMessages.delete(messageId);
+          return ok(res, { messageId, unsent: true, method: "message.unsend" });
+        }
+        await space.send(unsendContent(target));
+        knownMessages.delete(messageId);
+        return ok(res, { messageId, unsent: true, method: "space.send(unsend)" });
+      } catch (spectrumError) {
+        if (!advancedCreateClient) throw spectrumError;
+        if (isUpstreamMessageRpcError(spectrumError)) throw spectrumError;
+        if (isSpectrumCapabilityError(spectrumError)) throw spectrumError;
+        console.error(
+          "photon-sidecar: Spectrum unsend failed; trying advanced unsend fallback: " +
+            (spectrumError && spectrumError.stack
+              ? spectrumError.stack
+              : String(spectrumError))
+        );
+        const targetMsg = advancedTargetMessage(messageId);
+        await withAdvancedIMessageClient(space, (client) =>
+          client.messages.unsend(advancedChatId(space), targetMsg.messageGuid, {
+            ...targetMsg.options,
+            clientMessageId: clientMessageId("unsend"),
+          })
+        );
+        knownMessages.delete(messageId);
+        return ok(res, {
+          messageId,
+          unsent: true,
+          method: "advanced.messages.unsend",
+        });
+      }
+    }
+    if (req.url === "/send-mini-app") {
+      if (!miniAppsEnabled) {
+        return badRequest(res, "mini-app cards are disabled");
+      }
+      const { spaceId, url } = body || {};
+      if (!spaceId || typeof url !== "string" || !url.trim()) {
+        return badRequest(res, "spaceId and url are required");
+      }
+      let parsedUrl;
+      try {
+        parsedUrl = new URL(url.trim());
+      } catch {
+        return badRequest(res, "url must be a valid https URL");
+      }
+      if (parsedUrl.protocol !== "https:") {
+        return badRequest(res, "url must be a valid https URL");
+      }
+      if (typeof appUrlContent !== "function") {
+        return badRequest(res, "mini-app cards not supported on this platform");
+      }
+      const allowedMetadata = {};
+      for (const key of ["appName", "extensionBundleId", "teamId"]) {
+        if (typeof body?.[key] === "string" && body[key].trim()) {
+          allowedMetadata[key] = body[key].trim();
+        }
+      }
+      const space = await resolveSpace(spaceId);
+      const result = await space.send(appUrlContent(parsedUrl.toString()));
+      rememberKnownMessage(result);
+      return ok(res, {
+        messageId: result?.id || null,
+        ...allowedMetadata,
+      });
+    }
+    if (req.url === "/send-poll") {
+      if (!nativePollsEnabled) {
+        return badRequest(res, "native polls are disabled");
+      }
+      const { spaceId, question } = body || {};
+      const options = Array.isArray(body?.options)
+        ? body.options.filter((option) => typeof option === "string" && option.trim())
+        : [];
+      if (!spaceId || typeof question !== "string" || !question.trim()) {
+        return badRequest(res, "spaceId and question are required");
+      }
+      if (options.length < 2) {
+        return badRequest(res, "at least two poll options are required");
+      }
+      const space = await resolveSpace(spaceId);
+      const cleanQuestion = question.trim();
+      const cleanOptions = options.map((option) => option.trim());
+      const pollState = await withAdvancedIMessageClient(space, (client) =>
+        client.polls.create(advancedChatId(space), cleanQuestion, cleanOptions, {
+          clientMessageId: clientMessageId("poll"),
+        })
+      );
+      return ok(res, {
+        messageId: pollState?.pollMessageGuid || null,
+        pollMessageId: pollState?.pollMessageGuid || null,
+        question: pollState?.title || cleanQuestion,
+        optionCount: Array.isArray(pollState?.options)
+          ? pollState.options.length
+          : cleanOptions.length,
+        options: Array.isArray(pollState?.options)
+          ? pollState.options.map((option) => ({
+              id: option.optionIdentifier,
+              text: option.text,
+            }))
+          : [],
+      });
+    }
+    if (
+      req.url === "/poll-add-option" ||
+      req.url === "/poll-vote" ||
+      req.url === "/poll-unvote"
+    ) {
+      if (!nativePollsEnabled) {
+        return badRequest(res, "native polls are disabled");
+      }
+      const { spaceId, pollMessageId, messageId } = body || {};
+      const targetPollId = pollMessageGuid(pollMessageId || messageId);
+      if (!spaceId || !targetPollId) {
+        return badRequest(res, "spaceId and pollMessageId are required");
+      }
+      const space = await resolveSpace(spaceId);
+      let pollState;
+      try {
+        pollState = await withAdvancedIMessageClient(space, (client) => {
+          const opts = { clientMessageId: clientMessageId(targetPollId) };
+          if (req.url === "/poll-add-option") {
+            const option = typeof body?.option === "string" ? body.option.trim() : "";
+            if (!option) return Promise.reject(new Error("option is required"));
+            return client.polls.addOption(targetPollId, option, opts);
+          }
+          if (req.url === "/poll-vote") {
+            const optionId =
+              typeof body?.optionId === "string" ? body.optionId.trim() : "";
+            if (!optionId) return Promise.reject(new Error("optionId is required"));
+            return client.polls.vote(targetPollId, optionId, opts);
+          }
+          return client.polls.unvote(targetPollId, opts);
+        });
+      } catch (error) {
+        // Photon's shared-line gateway routes PollService mutations by
+        // pollMessageGuid lookup and currently fails to route even the guid
+        // its own CreatePoll returned ("No instance routed for this
+        // request"). Classify it so callers see the upstream category
+        // instead of a generic 500 — the raw text still only goes to logs.
+        if (/No instance routed/i.test(String(error?.message ?? error))) {
+          console.error(
+            "photon-sidecar: poll mutation unroutable upstream: " +
+              (error && error.stack ? error.stack : String(error))
+          );
+          res.statusCode = 502;
+          res.setHeader("Content-Type", "application/json");
+          res.end(
+            JSON.stringify({
+              ok: false,
+              code: "poll_mutation_unroutable",
+              error:
+                "Photon could not route this poll mutation to an iMessage " +
+                "instance (PollService lookup by pollMessageGuid failed " +
+                "upstream). Poll creation and inbound votes are unaffected; " +
+                "report the pollMessageId to Photon.",
+            })
+          );
+          return;
+        }
+        throw error;
+      }
+      return ok(res, {
+        pollMessageId: pollState?.pollMessageGuid || targetPollId,
+        optionCount: Array.isArray(pollState?.options) ? pollState.options.length : null,
+        voteCount: Array.isArray(pollState?.votes) ? pollState.votes.length : null,
+      });
     }
     if (req.url === "/send-attachment") {
       const { spaceId, path, name, mimeType, caption, kind } =
@@ -755,6 +1384,7 @@ const server = http.createServer(async (req, res) => {
           : attachment(path, Object.keys(opts).length ? opts : undefined);
 
       const result = await space.send(builder);
+      rememberKnownMessage(result);
 
       // iMessage delivers the caption as a separate bubble; send it
       // after the media so the attachment renders first.
@@ -828,6 +1458,27 @@ const server = http.createServer(async (req, res) => {
       }
       return badRequest(res, "no tracked reaction for message");
     }
+    if (req.url === "/read") {
+      const { spaceId, messageId } = body || {};
+      if (!spaceId || !messageId) {
+        return badRequest(res, "spaceId and messageId are required");
+      }
+      if (typeof imessageRead !== "function") {
+        return badRequest(res, "read receipts not supported on this platform");
+      }
+      const space = await resolveSpace(spaceId);
+      const target =
+        knownMessages.get(messageId) ?? (await space.getMessage(messageId));
+      if (!target) {
+        return badRequest(res, "message not found");
+      }
+      if (typeof target.read === "function") {
+        await target.read();
+        return ok(res, { method: "message.read" });
+      }
+      await space.send(imessageRead(target));
+      return ok(res, { method: "space.send(read)" });
+    }
     if (req.url === "/typing") {
       const { spaceId, state = "start" } = body || {};
       if (!spaceId) return badRequest(res, "spaceId is required");
@@ -865,7 +1516,7 @@ async function shutdown(signal) {
   console.error(`photon-sidecar: received ${signal}, stopping...`);
   try {
     await Promise.race([
-      app.stop(),
+      Promise.allSettled([app.stop(), closeAdvancedClients()]),
       new Promise((resolve) => setTimeout(resolve, 3000)),
     ]);
   } catch (e) {
