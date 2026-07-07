@@ -48,7 +48,7 @@ _TWILIO_WEBHOOK_MAX_BODY_BYTES = 65_536  # 64 KiB — Twilio payloads are small
 def check_sms_requirements() -> bool:
     """Check if SMS adapter dependencies are available."""
     try:
-        import aiohttp  # noqa: F401
+        import aiohttp
     except ImportError:
         return False
     return bool(os.getenv("TWILIO_ACCOUNT_SID") and os.getenv("TWILIO_AUTH_TOKEN"))
