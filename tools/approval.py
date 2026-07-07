@@ -175,6 +175,45 @@ def _get_session_platform() -> str:
         return os.getenv("HERMES_SESSION_PLATFORM", "") or ""
 
 
+def _get_session_env_flag(name: str) -> bool:
+    """Read a truthy session/env flag, preferring gateway ContextVars."""
+    try:
+        from gateway.session_context import get_session_env
+
+        value = get_session_env(name, "")
+    except Exception:
+        value = os.getenv(name, "")
+    return is_truthy_value(value)
+
+
+def _is_unattended_approval_context() -> bool:
+    """True when the current turn has no live approver attached."""
+    return (
+        env_var_enabled("HERMES_CRON_SESSION")
+        or _get_session_env_flag("HERMES_UNATTENDED_SESSION")
+        or bool(os.getenv("HERMES_KANBAN_TASK"))
+    )
+
+
+def _unattended_context_label() -> str:
+    if env_var_enabled("HERMES_CRON_SESSION"):
+        return "Cron jobs"
+    if bool(os.getenv("HERMES_KANBAN_TASK")):
+        return "Kanban worker sessions"
+    return "Unattended sessions"
+
+
+def _unattended_dangerous_block_message(description: str) -> str:
+    label = _unattended_context_label()
+    return (
+        f"BLOCKED: Command flagged as dangerous ({description}) "
+        f"but {label.lower()} run without a user present to approve it. "
+        "Find an alternative approach that avoids this command. "
+        "To allow dangerous commands in unattended jobs, set "
+        "approvals.cron_mode: approve in config.yaml."
+    )
+
+
 def _is_gateway_approval_context() -> bool:
     """True when this call is inside a gateway/API session.
 
@@ -189,7 +228,7 @@ def _is_gateway_approval_context() -> bool:
     fall through to the gateway branch would submit a pending approval
     with no listener and block the job indefinitely.
     """
-    if env_var_enabled("HERMES_CRON_SESSION"):
+    if _is_unattended_approval_context():
         return False
     if env_var_enabled("HERMES_GATEWAY_SESSION"):
         return True
@@ -702,7 +741,8 @@ DANGEROUS_PATTERNS = [
     # a full shell context.
     (r'\b(bash|sh|zsh|ksh)\s+<<', "shell execution via heredoc"),
     # Git destructive operations that can lose uncommitted work or rewrite
-    # shared history. Not captured by rm/chmod/etc patterns.
+    # shared history, plus remote VCS operations that mutate repository state
+    # outside the local checkout. Not captured by rm/chmod/etc patterns.
     # `git reset --hard` accepts any unambiguous long-flag prefix (--h,
     # --ha, --har, --hard) because git's own option parser resolves
     # abbreviated long flags -- `--hard` is the only `git reset` mode
@@ -712,6 +752,8 @@ DANGEROUS_PATTERNS = [
     (r'\bgit\s+reset\s+--h(?:a(?:r(?:d)?)?)?\b', "git reset --hard (destroys uncommitted changes)"),
     (r'\bgit\s+push\b.*--forc[a-z]*\b', "git force push (rewrites remote history)"),
     (r'\bgit\s+push\b.*-f\b', "git force push short flag (rewrites remote history)"),
+    (_CMDPOS + r'git\s+push\b(?![^;|&\n]*\s(?:--dry-run|-n)\b)(?![^;|&\n]*\s(?:--help|-h)\b)',
+     "git push (updates remote refs)"),
     (r'\bgit\s+clean\s+-[^\s]*f', "git clean with force (deletes untracked files)"),
     (r'\bgit\s+branch\s+-D\b', "git branch force delete"),
     # `-D` is shorthand for `-d --force`; the long-flag spellings
@@ -724,6 +766,11 @@ DANGEROUS_PATTERNS = [
     # later command in the same script.
     (r'\bgit\s+branch\b[^;|&\n]*?(?:-d\b|--delete\b)[^;|&\n]*?(?:-f\b|--force\b)', "git branch force delete (long flags)"),
     (r'\bgit\s+branch\b[^;|&\n]*?(?:-f\b|--force\b)[^;|&\n]*?(?:-d\b|--delete\b)', "git branch force delete (long flags, force-first)"),
+    (_CMDPOS + r'gh\s+pr\s+merge\b', "gh pr merge (merges remote pull request)"),
+    (_CMDPOS + r'gh\s+api\b[^;|&\n]*(?:-X\s*(?:post|put|patch|delete)\b|--method(?:=|\s+)(?:post|put|patch|delete)\b)',
+     "gh api mutating request"),
+    (_CMDPOS + r'gh\s+release\s+(?:create|delete|edit|upload)\b',
+     "gh release mutation"),
     # Script execution after chmod +x — catches the two-step pattern where
     # a script is first made executable then immediately run. The script
     # content may contain dangerous commands that individual patterns miss.
@@ -2069,18 +2116,12 @@ def check_dangerous_command(command: str, env_type: str,
     is_gateway = _is_gateway_approval_context()
 
     if not is_cli and not is_gateway:
-        # Cron sessions: respect cron_mode config
-        if env_var_enabled("HERMES_CRON_SESSION"):
+        # Unattended sessions: respect the existing cron-mode trust switch.
+        if _is_unattended_approval_context():
             if _get_cron_approval_mode() == "deny":
                 return {
                     "approved": False,
-                    "message": (
-                        f"BLOCKED: Command flagged as dangerous ({description}) "
-                        "but cron jobs run without a user present to approve it. "
-                        "Find an alternative approach that avoids this command. "
-                        "To allow dangerous commands in cron jobs, set "
-                        "approvals.cron_mode: approve in config.yaml."
-                    ),
+                    "message": _unattended_dangerous_block_message(description),
                 }
         logger.warning(
             "AUTO-APPROVED dangerous command in non-interactive non-gateway context "
@@ -2338,24 +2379,19 @@ def check_all_command_guards(command: str, env_type: str,
     is_gateway = _is_gateway_approval_context()
     is_ask = env_var_enabled("HERMES_EXEC_ASK")
 
-    # Preserve the existing non-interactive behavior: outside CLI/gateway/ask
-    # flows, we do not block on approvals and we skip external guard work.
+    # Preserve the existing non-interactive behavior for truly local trusted
+    # flows, but fail closed for explicitly unattended jobs that have no
+    # approver attached.
     if not is_cli and not is_gateway and not is_ask:
-        # Cron sessions: respect cron_mode config
-        if env_var_enabled("HERMES_CRON_SESSION"):
+        # Unattended sessions: respect the existing cron-mode trust switch.
+        if _is_unattended_approval_context():
             if _get_cron_approval_mode() == "deny":
                 # Run detection to get a description for the block message
                 is_dangerous, _pk, description = detect_dangerous_command(command)
                 if is_dangerous:
                     return {
                         "approved": False,
-                        "message": (
-                            f"BLOCKED: Command flagged as dangerous ({description}) "
-                            "but cron jobs run without a user present to approve it. "
-                            "Find an alternative approach that avoids this command. "
-                            "To allow dangerous commands in cron jobs, set "
-                            "approvals.cron_mode: approve in config.yaml."
-                        ),
+                        "message": _unattended_dangerous_block_message(description),
                     }
                 # Also run tirith check in cron-deny mode so content-level
                 # threats (homograph URLs, pipe-to-interpreter, terminal
@@ -2370,9 +2406,9 @@ def check_all_command_guards(command: str, env_type: str,
                             "approved": False,
                             "message": (
                                 f"BLOCKED: {_cron_desc} "
-                                "but cron jobs run without a user present to approve it. "
+                                f"but {_unattended_context_label().lower()} run without a user present to approve it. "
                                 "Find an alternative approach that avoids this command. "
-                                "To allow dangerous commands in cron jobs, set "
+                                "To allow dangerous commands in unattended jobs, set "
                                 "approvals.cron_mode: approve in config.yaml."
                             ),
                         }
@@ -2398,7 +2434,7 @@ def check_all_command_guards(command: str, env_type: str,
                                 "BLOCKED: the Tirith security scanner could not be "
                                 "imported and security.tirith_fail_open is false, "
                                 "so this command cannot be silently allowed — and "
-                                "cron jobs run without a user present to approve it. "
+                                f"{_unattended_context_label().lower()} run without a user present to approve it. "
                                 "Find an alternative approach, install tirith, or set "
                                 "approvals.cron_mode: approve in config.yaml."
                             ),
@@ -2704,13 +2740,10 @@ def check_execute_code_guard(code: str, env_type: str,
     the script as a whole before it runs (#30882). Returns the same dict
     contract as ``check_all_command_guards``.
 
-    Scope (documented limitation, #30882): in a purely local non-interactive
-    non-gateway session (no TTY, not gateway, not cron-deny) this returns
-    approved — matching the existing terminal auto-approve contract. The
-    hardline floor still blocks catastrophic ``terminal()`` commands the script
-    issues; running arbitrary code headlessly without any approval surface is
-    trusted-by-config (set a gateway/ask surface or ``approvals.cron_mode`` to
-    require approval).
+    Scope: in a purely local non-interactive non-gateway session that is not
+    marked unattended, this returns approved — matching the existing terminal
+    auto-approve contract. Explicit no-approver jobs (cron, kanban workers,
+    notification wakeups) fail closed by default via ``approvals.cron_mode``.
     """
     pattern_key = "execute_code"
     description = (
@@ -2736,18 +2769,19 @@ def check_execute_code_guard(code: str, env_type: str,
     is_gateway = _is_gateway_approval_context()
     is_ask = env_var_enabled("HERMES_EXEC_ASK")
 
-    # Cron: no user is present to approve arbitrary code.
-    if env_var_enabled("HERMES_CRON_SESSION"):
+    # Unattended jobs have no user present to approve arbitrary code.
+    if _is_unattended_approval_context():
         if _get_cron_approval_mode() == "deny":
+            label = _unattended_context_label()
             return {
                 "approved": False,
                 "message": (
                     "BLOCKED: execute_code runs arbitrary local Python "
                     "(including subprocess calls that bypass shell-string "
-                    "approval checks). Cron jobs run without a user present "
+                    f"approval checks). {label} run without a user present "
                     "to approve it. Use normal tools instead, or set "
-                    "approvals.cron_mode: approve only if this cron profile "
-                    "is intentionally trusted."
+                    "approvals.cron_mode: approve only if this unattended "
+                    "profile is intentionally trusted."
                 ),
                 "pattern_key": pattern_key,
                 "description": description,
