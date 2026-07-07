@@ -1,17 +1,13 @@
 """OpenRouter-compatible image generation backend (OpenRouter + Nous Portal).
 
-Both OpenRouter and the Nous Portal inference endpoint speak the same
-OpenAI-style ``/chat/completions`` image-generation protocol: send
-``modalities: ["image", "text"]`` with an image-output model (e.g.
-``google/gemini-3-pro-image``), pass reference images as ``image_url``
-content parts for grounding, and read the generated images back from
-``choices[0].message.images[].image_url.url`` (a ``data:image/...;base64`` URI).
-
-Nous Portal proxies OpenRouter, so one implementation services both — we only
-swap the resolved ``(base_url, api_key)``. Credentials are resolved through the
-agent's existing :func:`~hermes_cli.runtime_provider.resolve_runtime_provider`,
-which already understands OpenRouter's key pool and the Nous OAuth device-code
-token, so this plugin never reinvents auth.
+OpenRouter exposes a dedicated Image API at ``/images/generations`` and
+``/images/models``.  Nous Portal still uses the OpenAI-style
+``/chat/completions`` image-generation protocol, so this provider keeps both
+wire shapes behind one implementation while swapping only the resolved
+``(base_url, api_key)``. Credentials are resolved through the agent's existing
+:func:`~hermes_cli.runtime_provider.resolve_runtime_provider`, which already
+understands OpenRouter's key pool and the Nous OAuth device-code token, so this
+plugin never reinvents auth.
 
 Reference grounding is the reason pet sprite generation cares about this
 backend: each animation row must stay the same character as the chosen base
@@ -136,6 +132,25 @@ def _extract_images(payload: Dict[str, Any]) -> List[str]:
     return out
 
 
+def _extract_image_api_images(payload: Dict[str, Any]) -> List[str]:
+    """Pull generated image URLs/data from OpenRouter's Image API response."""
+    out: List[str] = []
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, list):
+        return out
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        b64_json = item.get("b64_json")
+        if isinstance(b64_json, str) and b64_json.strip():
+            out.append(f"data:image/png;base64,{b64_json.strip()}")
+            continue
+        url = item.get("url")
+        if isinstance(url, str) and url.strip():
+            out.append(url.strip())
+    return out
+
+
 def _access_error_hint(
     display: str, model_id: str, env_var: str, status: int, err_msg: str
 ) -> Optional[str]:
@@ -171,6 +186,28 @@ def _dedupe_models(models: list[str]) -> list[str]:
         seen.add(m)
         out.append(m)
     return out
+
+
+def _copy_image_api_options(payload: Dict[str, Any], kwargs: Dict[str, Any]) -> None:
+    """Forward explicit OpenRouter Image API options from the tool dispatch.
+
+    Keep this allow-list small and scalar so arbitrary provider-specific kwargs
+    cannot smuggle unexpected nested request bodies into OpenRouter.
+    """
+    for key in ("resolution", "quality", "output_format", "background", "moderation"):
+        value = kwargs.get(key)
+        if isinstance(value, str) and value.strip():
+            payload[key] = value.strip()
+    seed = kwargs.get("seed")
+    if isinstance(seed, bool):
+        return
+    if isinstance(seed, int):
+        payload["seed"] = seed
+    elif isinstance(seed, str) and seed.strip():
+        try:
+            payload["seed"] = int(seed.strip())
+        except ValueError:
+            logger.debug("Ignoring non-integer OpenRouter image seed: %r", seed)
 
 
 class OpenRouterCompatImageProvider(ImageGenProvider):
@@ -229,6 +266,45 @@ class OpenRouterCompatImageProvider(ImageGenProvider):
         }
 
     def list_models(self) -> List[Dict[str, Any]]:
+        if self._runtime_name == "openrouter":
+            try:
+                import requests
+
+                runtime = self._resolve_runtime()
+                api_key = str(runtime.get("api_key") or "").strip()
+                base_url = str(runtime.get("base_url") or "").strip().rstrip("/")
+                if api_key and base_url:
+                    response = requests.get(
+                        f"{base_url}/images/models",
+                        headers={
+                            "Authorization": f"Bearer {api_key}",
+                            "HTTP-Referer": "https://github.com/NousResearch/hermes-agent",
+                            "X-Title": "Hermes Agent",
+                        },
+                        timeout=30.0,
+                    )
+                    response.raise_for_status()
+                    payload = response.json()
+                    rows = payload.get("data") if isinstance(payload, dict) else None
+                    models: List[Dict[str, Any]] = []
+                    if isinstance(rows, list):
+                        for row in rows:
+                            if not isinstance(row, dict):
+                                continue
+                            model_id = row.get("id")
+                            if not isinstance(model_id, str) or not model_id.strip():
+                                continue
+                            models.append(
+                                {
+                                    "id": model_id.strip(),
+                                    "display": str(row.get("name") or model_id).strip(),
+                                    "strengths": str(row.get("description") or "").strip(),
+                                }
+                            )
+                    if models:
+                        return models
+            except Exception as exc:  # noqa: BLE001 - discovery is best-effort
+                logger.debug("%s image model discovery failed: %s", self._name, exc)
         return [
             {
                 "id": DEFAULT_MODEL,
@@ -342,16 +418,36 @@ class OpenRouterCompatImageProvider(ImageGenProvider):
         }
         last_error: Optional[Dict[str, Any]] = None
         for i, model_id in enumerate(model_chain):
-            payload: Dict[str, Any] = {
-                "model": model_id,
-                "modalities": ["image", "text"],
-                "messages": [{"role": "user", "content": content}],
-                "image_config": {"aspect_ratio": or_aspect},
-            }
+            if self._runtime_name == "openrouter":
+                input_references = [
+                    part["image_url"]["url"]
+                    for part in content[1:]
+                    if isinstance(part, dict)
+                    and isinstance(part.get("image_url"), dict)
+                    and isinstance(part["image_url"].get("url"), str)
+                ]
+                payload: Dict[str, Any] = {
+                    "model": model_id,
+                    "prompt": prompt,
+                    "n": 1,
+                    "aspect_ratio": or_aspect,
+                }
+                _copy_image_api_options(payload, kwargs)
+                if input_references:
+                    payload["input_references"] = input_references
+                endpoint = f"{base_url}/images/generations"
+            else:
+                payload = {
+                    "model": model_id,
+                    "modalities": ["image", "text"],
+                    "messages": [{"role": "user", "content": content}],
+                    "image_config": {"aspect_ratio": or_aspect},
+                }
+                endpoint = f"{base_url}/chat/completions"
             is_last = i == len(model_chain) - 1
             try:
                 response = requests.post(
-                    f"{base_url}/chat/completions",
+                    endpoint,
                     headers=headers,
                     json=payload,
                     timeout=_REQUEST_TIMEOUT,
@@ -423,7 +519,7 @@ class OpenRouterCompatImageProvider(ImageGenProvider):
                     aspect_ratio=aspect,
                 )
 
-            images = _extract_images(result)
+            images = _extract_image_api_images(result) if self._runtime_name == "openrouter" else _extract_images(result)
             if not images:
                 if not is_last:
                     logger.info(
