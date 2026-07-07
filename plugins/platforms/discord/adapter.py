@@ -5314,6 +5314,7 @@ class DiscordAdapter(BasePlatformAdapter):
         self, chat_id: str, command: str, session_key: str,
         description: str = "dangerous command",
         metadata: Optional[dict] = None,
+        **kwargs: Any,
     ) -> SendResult:
         """
         Send a button-based exec approval prompt for a dangerous command.
