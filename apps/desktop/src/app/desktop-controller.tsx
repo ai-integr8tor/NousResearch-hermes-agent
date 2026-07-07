@@ -16,6 +16,7 @@ import { useSkinCommand } from '@/themes/use-skin-command'
 
 import { formatRefValue } from '../components/assistant-ui/directive-text'
 import { getSessionMessages, type SessionMessage, triggerCronJob } from '../hermes'
+import { buildBlueprintDeepLinkCommand } from '../lib/blueprint-deep-link'
 import { type ChatMessage, chatMessageText, preserveLocalAssistantErrors, toChatMessages } from '../lib/chat-messages'
 import { storedSessionIdForNotification } from '../lib/session-ids'
 import { isMessagingSource } from '../lib/session-source'
@@ -331,19 +332,15 @@ export function DesktopController() {
   // that arrived during boot is flushed exactly once.
   useEffect(() => {
     const unsubscribe = window.hermesDesktop?.onDeepLink?.(payload => {
-      if (!payload || payload.kind !== 'blueprint' || !payload.name) {
+      // Sanitization (name allowlist, slot key/value filtering, control-char
+      // stripping) lives in buildBlueprintDeepLinkCommand so it can be unit
+      // tested; the result is interpolated verbatim into a slash command.
+      const command = buildBlueprintDeepLinkCommand(payload)
+
+      if (!command) {
         return
       }
 
-      const slots = Object.entries(payload.params || {})
-        .map(([k, v]) => {
-          const sval = /\s/.test(v) ? `"${v.replace(/"/g, '\\"')}"` : v
-
-          return `${k}=${sval}`
-        })
-        .join(' ')
-
-      const command = `/blueprint ${payload.name}${slots ? ' ' + slots : ''}`
       requestComposerInsert(command, { mode: 'block', target: 'main' })
       requestComposerFocus('main')
     })
