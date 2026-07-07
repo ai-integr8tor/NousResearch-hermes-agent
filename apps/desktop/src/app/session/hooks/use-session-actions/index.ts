@@ -17,6 +17,7 @@ import {
   $currentModel,
   $currentProvider,
   $currentReasoningEffort,
+  $draftModelOverridePending,
   $messages,
   $sessions,
   $yoloActive,
@@ -28,6 +29,7 @@ import {
   setCurrentCwd,
   setCurrentServiceTier,
   setCurrentUsage,
+  setDraftModelOverridePending,
   setFreshDraftReady,
   setIntroSeed,
   setMessages,
@@ -125,12 +127,6 @@ export function useSessionActions({
       })
       setSessionStartedAt(null)
       setTurnStartedAt(null)
-      // The composer's model/effort/fast is sticky UI state (persisted in
-      // localStorage) — a new chat FOLLOWS your last pick instead of snapping
-      // back to the profile default, so we deliberately don't reset it here. The
-      // profile default still owns first-run seeding and profile switches (see
-      // refreshCurrentModel). Only $currentServiceTier (a live-session mirror)
-      // is cleared.
       setCurrentServiceTier('')
       setYoloActive(false)
       // In a project → the repo's default-branch (main worktree) checkout; not in
@@ -164,15 +160,12 @@ export function useSessionActions({
         const newChatProfile = $newChatProfile.get() ?? normalizeProfileKey($activeGatewayProfile.get())
         await ensureGatewayProfile(newChatProfile)
         const cwd = $currentCwd.get().trim() || workspaceCwdForNewSession()
-        // The composer's model/effort/fast is sticky UI state ($currentModel,
-        // $currentProvider, $currentReasoningEffort, $currentFastMode). Ship it
-        // with every session.create so the new chat opens on whatever the picker
-        // shows — applied as per-session overrides, never written to the profile
-        // default (that lives in Settings → Model).
-        const uiModel = $currentModel.get().trim()
-        const uiProvider = $currentProvider.get().trim()
+        const useDraftModelOverride = $draftModelOverridePending.get()
+        const uiModel = useDraftModelOverride ? $currentModel.get().trim() : ''
+        const uiProvider = useDraftModelOverride ? $currentProvider.get().trim() : ''
         const uiEffort = $currentReasoningEffort.get().trim()
         const uiFast = $currentFastMode.get()
+        setDraftModelOverridePending(false)
 
         const created = await requestGateway<SessionCreateResponse>('session.create', {
           cols: 96,
