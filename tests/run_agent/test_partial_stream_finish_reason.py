@@ -383,7 +383,9 @@ class TestConversationLoopPartialStreamContinuation:
             usage=None,
         )
 
+        # The loop returns a terminal partial after the fourth length retry.
         loop_agent.client.chat.completions.create.side_effect = [
+            partial_stub,
             partial_stub,
             partial_stub,
             partial_stub,
