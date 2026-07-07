@@ -187,6 +187,18 @@ async def auth_login(request: Request, provider: str, next: str = ""):
             status_code=404,
             detail=f"Unknown provider: {provider!r}",
         )
+    # Password-only providers (BasicAuthProvider, etc.) don't support OAuth redirect.
+    # They use the password-login POST endpoint instead of the OAuth flow.
+    if hasattr(p, "supports_password") and p.supports_password:
+        # Redirect to the password login page for password-only providers.
+        # This bypasses the OAuth redirect flow.
+        next_param = request.query_params.get("next", "")
+        if next_param:
+            from urllib.parse import quote
+            next_url = f"/login?next={quote(next_param)}"
+        else:
+            next_url = "/login"
+        return RedirectResponse(url=next_url, status_code=302)
     if not getattr(p, "supports_session", True):
         raise HTTPException(
             status_code=404,
