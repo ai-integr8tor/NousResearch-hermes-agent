@@ -1831,6 +1831,7 @@ DEFAULT_CONFIG = {
         "platforms": {
             "telegram": {"streaming": True},
             "discord": {"streaming": False},
+            "mattermost": {"streaming": False},
         },
         # Gateway runtime-metadata footer appended to the FINAL message of a turn
         # (disabled by default to keep replies minimal). When enabled, renders
