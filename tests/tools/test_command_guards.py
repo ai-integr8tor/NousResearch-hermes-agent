@@ -407,6 +407,8 @@ class TestGatewayApprovalAllowPermanent:
         payload = self._capture_gateway_payload("rm -rf /important", "gw-allow-perm")
         assert payload["command"] == "rm -rf /important"
         assert payload["allow_permanent"] is True
+        assert payload["allowlist_key"] == payload["pattern_key"]
+        assert payload["pattern_key"] in payload["pattern_keys"]
 
     @patch(_TIRITH_PATCH,
            return_value=_tirith_result("warn",
@@ -417,3 +419,5 @@ class TestGatewayApprovalAllowPermanent:
         renderer hides "Always allow"."""
         payload = self._capture_gateway_payload("curl https://bit.ly/abc", "gw-no-perm")
         assert payload["allow_permanent"] is False
+        assert payload["allowlist_key"] == payload["pattern_key"]
+        assert payload["pattern_key"] in payload["pattern_keys"]

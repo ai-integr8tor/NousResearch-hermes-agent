@@ -69,6 +69,7 @@ export function approvalAction(
 export function ApprovalPrompt({ cols = 80, onChoice, req, t }: ApprovalPromptProps) {
   const [sel, setSel] = useState(0)
   const opts = req.allowPermanent === false ? APPROVAL_OPTS_NO_ALWAYS : APPROVAL_OPTS
+  const approvalRule = req.ruleKey || req.allowlistKey || req.patternKey
 
   useInput((ch, key) => {
     const action = approvalAction(ch, key, sel, opts)
@@ -97,6 +98,8 @@ export function ApprovalPrompt({ cols = 80, onChoice, req, t }: ApprovalPromptPr
       <Text bold color={t.color.warn}>
         ⚠ approval required · {req.description}
       </Text>
+
+      {approvalRule ? <Text color={t.color.muted}>rule · {approvalRule}</Text> : null}
 
       <Box flexDirection="column" paddingLeft={1}>
         {shown.map((line, i) => (
