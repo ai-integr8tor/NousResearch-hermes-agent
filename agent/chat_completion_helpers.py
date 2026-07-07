@@ -2480,8 +2480,12 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
 
     def _call():
         import httpx as _httpx
+        import time as _time
 
         _max_stream_retries = env_int("HERMES_STREAM_RETRIES", 2)
+        _stream_backoff_base = 1.0
+        _stream_backoff_max = 10.0
+        _stream_backoff = 0.0
 
         try:
             for _stream_attempt in range(_max_stream_retries + 1):
@@ -2522,6 +2526,20 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                     _is_conn_err = isinstance(
                         e, (_httpx.ConnectError, _httpx.RemoteProtocolError, ConnectionError)
                     )
+                    # Anthropic SDK may wrap transport errors in its own
+                    # exception types when the stale-stream detector
+                    # closes the client.  Treat these as retryable
+                    # connection errors so the stale-detect reconnect
+                    # actually works.  (#60029)
+                    if not _is_conn_err and agent.api_mode == "anthropic_messages":
+                        try:
+                            import anthropic
+                            _is_conn_err = isinstance(
+                                e,
+                                (anthropic.APIConnectionError, anthropic.APIStatusError),
+                            )
+                        except ImportError:
+                            pass
                     _is_stream_parse_err = agent._is_provider_stream_parse_error(e)
 
                     # If the stream died AFTER some tokens were delivered:
@@ -2633,6 +2651,14 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                                 )
                             except Exception:
                                 pass
+                        # Apply exponential backoff before retry.
+                        if _stream_backoff > 0:
+                            _sleep = min(_stream_backoff, _stream_backoff_max)
+                            _time.sleep(_sleep)
+                        _stream_backoff = max(
+                            _stream_backoff_base,
+                            _stream_backoff * 2 if _stream_backoff > 0 else _stream_backoff_base,
+                        )
                         continue
 
                     # SSE error events from proxies (e.g. OpenRouter sends
@@ -2693,6 +2719,16 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                                     )
                                 except Exception:
                                     pass
+                            # Apply exponential backoff before retry so
+                            # immediate reconnection doesn't hammer an
+                            # already-overloaded provider. (#60029)
+                            if _stream_backoff > 0:
+                                _sleep = min(_stream_backoff, _stream_backoff_max)
+                                _time.sleep(_sleep)
+                            _stream_backoff = max(
+                                _stream_backoff_base,
+                                _stream_backoff * 2 if _stream_backoff > 0 else _stream_backoff_base,
+                            )
                             continue
                         # Retries exhausted. Log the final failure with
                         # full diagnostic detail (chain, headers,
@@ -2900,6 +2936,13 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
             except Exception:
                 pass
             raise InterruptedError("Agent interrupted during streaming API call")
+    # Worker thread exited before the main thread's poll loop could check
+    # the interrupt flag.  If the worker returned early due to an interrupt
+    # (e.g. _call_anthropic() detected _interrupt_requested and returned
+    # None), the InterruptedError above was never raised.  Re-check the
+    # flag here so /stop is not silently swallowed.  (#59999 area)
+    if agent._interrupt_requested:
+        raise InterruptedError("Agent interrupted during streaming API call (post-worker)")
     if result["error"] is not None:
         if deltas_were_sent["yes"]:
             # Streaming failed AFTER some tokens were already delivered to
