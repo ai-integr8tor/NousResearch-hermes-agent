@@ -2326,6 +2326,7 @@ class BasePlatformAdapter(ABC):
         self.config = config
         self.platform = platform
         self._message_handler: Optional[MessageHandler] = None
+        self._thread_title_handler: Optional[Callable[[Platform, str, str], Awaitable[None]]] = None
         # Optional hook (e.g. Telegram DM topic recovery) that rewrites
         # ``event.source.thread_id`` before session keying. Returns the
         # corrected thread_id or None to leave the source untouched.
@@ -2665,6 +2666,16 @@ class BasePlatformAdapter(ABC):
 
     def set_fatal_error_handler(self, handler: Callable[["BasePlatformAdapter"], Awaitable[None] | None]) -> None:
         self._fatal_error_handler = handler
+
+    def set_thread_title_handler(self, handler: Optional[Callable[[Platform, str, str], Awaitable[None]]]) -> None:
+        """Set an optional handler for platform thread-title changes."""
+        self._thread_title_handler = handler
+
+    async def _notify_thread_title_change(self, thread_id: str, title: str) -> None:
+        handler = self._thread_title_handler
+        if not handler or not thread_id or not title:
+            return
+        await handler(self.platform, str(thread_id), str(title))
 
     def _mark_connected(self) -> None:
         self._running = True
@@ -5445,6 +5456,7 @@ class BasePlatformAdapter(ABC):
         parent_chat_id: Optional[str] = None,
         message_id: Optional[str] = None,
         role_authorized: bool = False,
+        thread_initial_name: Optional[str] = None,
     ) -> SessionSource:
         """Helper to build a SessionSource for this platform."""
         # Normalize empty topic to None
@@ -5466,6 +5478,7 @@ class BasePlatformAdapter(ABC):
             parent_chat_id=str(parent_chat_id) if parent_chat_id else None,
             message_id=str(message_id) if message_id else None,
             role_authorized=role_authorized,
+            thread_initial_name=str(thread_initial_name) if thread_initial_name else None,
         )
     
     @abstractmethod

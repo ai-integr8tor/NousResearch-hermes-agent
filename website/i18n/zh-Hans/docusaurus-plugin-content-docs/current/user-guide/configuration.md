@@ -1518,14 +1518,18 @@ timezone: "America/New_York"   # IANA 时区（默认："" = 服务器本地时�
 
 ```yaml
 discord:
-  require_mention: true          # 在服务器频道中需要 @提及才能响应
-  free_response_channels: ""     # 逗号分隔的频道 ID，bot 在这些频道无需 @提及即可响应
-  auto_thread: true              # 在频道中 @提及时自动创建线程
+  require_mention: true              # 在服务器频道中需要 @提及才能响应
+  free_response_channels: ""         # 逗号分隔的频道 ID，bot 在这些频道无需 @提及即可响应
+  auto_thread: true                  # 在频道中 @提及时自动创建线程
+  auto_thread_name_mode: summary     # summary | message（自动创建线程的命名方式）
+  auto_thread_summary_max_chars: 70  # summary 生成线程名的最大字符数
 ```
 
 - `require_mention` —— 为 `true`（默认）时，bot 仅在服务器频道中被 `@BotName` 提及时响应。DM 始终无需提及即可工作。
 - `free_response_channels` —— 逗号分隔的频道 ID 列表，bot 在这些频道对每条消息响应，无需提及。
 - `auto_thread` —— 为 `true`（默认）时，频道中的提及会自动为对话创建线程，保持频道整洁（类似 Slack 线程）。
+- `auto_thread_name_mode` —— 控制自动创建的 Discord 线程如何命名。`summary`（默认）会在首次回复后把线程重命名为生成的 Hermes 会话标题；`message` 保留初始的消息派生线程名。
+- `auto_thread_summary_max_chars` —— summary 生成的自动线程名最大长度。默认值为 `70`；高于 Discord 100 字符限制的值会被截断。
 
 ## 安全
 

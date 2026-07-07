@@ -3463,22 +3463,34 @@ class GatewaySlashCommandsMixin:
             # Set the title
             try:
                 if await self._session_db.set_session_title(session_id, sanitized):
-                    # Propagate the user-chosen title to the visible Telegram
-                    # forum topic name too. Auto-generated titles already rename
-                    # the topic; without this, /title only updated the DB title
-                    # and the topic kept its auto-assigned name. No-ops off
-                    # Telegram topic lanes and when auto-rename is disabled.
-                    schedule_rename = getattr(
+                    # Propagate the user-chosen title to visible platform thread
+                    # names too. Auto-generated titles already rename the thread;
+                    # without this, /title only updated the DB title and the
+                    # platform thread kept its auto-assigned name. No-ops off
+                    # supported thread lanes and when auto-rename is disabled.
+                    schedule_telegram_rename = getattr(
                         self, "_schedule_telegram_topic_title_rename", None
                     )
-                    if callable(schedule_rename):
+                    if callable(schedule_telegram_rename):
                         try:
-                            await asyncio.to_thread(schedule_rename, source, session_id, sanitized)
+                            await asyncio.to_thread(
+                                schedule_telegram_rename, source, session_id, sanitized
+                            )
                         except Exception:
                             logger.debug(
                                 "Failed to rename Telegram topic from /title",
                                 exc_info=True,
                             )
+                    schedule_discord_rename = getattr(
+                        self, "_schedule_discord_thread_title_rename", None
+                    )
+                    if callable(schedule_discord_rename):
+                        schedule_discord_rename(
+                            source,
+                            session_id,
+                            sanitized,
+                            require_initial_name_match=False,
+                        )
                     return t("gateway.title.set_to", title=sanitized)
                 else:
                     return t("gateway.title.not_found")
