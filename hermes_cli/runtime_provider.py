@@ -529,6 +529,7 @@ def _resolve_runtime_from_pool_entry(
         "source": getattr(entry, "source", "pool"),
         "credential_pool": pool,
         "requested_provider": requested_provider,
+        "model": target_model,
     }
 
 
@@ -2041,6 +2042,7 @@ def resolve_runtime_provider(
             "api_key": creds.get("api_key", ""),
             "source": creds.get("source", "env"),
             "requested_provider": requested_provider,
+            "model": target_model,
         }
 
     runtime = _resolve_openrouter_runtime(
