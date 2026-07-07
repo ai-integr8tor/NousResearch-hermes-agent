@@ -1552,6 +1552,11 @@ def _session_source(session: dict | None) -> str:
 def _register_session_cwd(session: dict | None) -> None:
     if not session:
         return
+    # This flag controls per-session terminal cwd overrides, not the session's
+    # display/completion cwd. Fallback dirs from TERMINAL_CWD/os.getcwd() should
+    # not force Docker or other remote backends to use a host launch path.
+    if not session.get("explicit_cwd"):
+        return
     try:
         from tools.terminal_tool import register_task_env_overrides
 
@@ -4480,6 +4485,7 @@ def _init_session(
             "attached_images": [],
             "image_counter": 0,
             "cwd": cwd or _completion_cwd(),
+            "explicit_cwd": False,
             "cols": cols,
             "slash_worker": None,
             "show_reasoning": _load_show_reasoning(),
