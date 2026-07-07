@@ -10,6 +10,7 @@ Tests cover:
   6. OOP middleware ABC and class tests
 """
 
+import asyncio
 import sys
 import os
 import json
@@ -45,6 +46,8 @@ from gateway.platforms.yuanbao import (
     DispatchMiddleware,
     InboundPipelineBuilder,
     YuanbaoAdapter,
+    _MIN_RESOLVE_CONCURRENCY,
+    _MAX_RESOLVE_CONCURRENCY,
 )
 from gateway.config import PlatformConfig
 
