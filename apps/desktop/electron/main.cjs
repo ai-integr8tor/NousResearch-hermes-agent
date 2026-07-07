@@ -45,6 +45,7 @@ const { probeGatewayWebSocket } = require('./gateway-ws-probe.cjs')
 const { adoptServedDashboardToken } = require('./dashboard-token.cjs')
 const { waitForDashboardPortAnnouncement } = require('./backend-ready.cjs')
 const { dashboardFallbackArgs, sourceDeclaresServe } = require('./backend-command.cjs')
+const { bundleNeedsRebuild } = require('./update-stamp.cjs')
 const { serializeJsonBody, setJsonRequestHeaders } = require('./oauth-net-request.cjs')
 const { fetchMarketplaceThemes, searchMarketplaceThemes } = require('./vscode-marketplace.cjs')
 const { buildDesktopBackendEnv, normalizeHermesHomeRoot } = require('./backend-env.cjs')
@@ -1994,11 +1995,19 @@ async function checkUpdates() {
   })
   const commits = behind > 0 ? await readCommitLog(updateRoot, branch) : []
 
+  // Detect if the running app bundle is stale relative to the source checkout.
+  // `runningAppBundle()` currently resolves only packaged macOS .app bundles;
+  // Linux/Windows/dev launches return null and simply skip this hint. The
+  // helper is best-effort, so malformed or missing stamps never break update
+  // checks.
+  const rebuildNeeded = bundleNeedsRebuild(runningAppBundle(), currentSha)
+
   return {
     supported: true,
     branch,
     currentBranch,
     behind,
+    rebuildNeeded,
     currentSha,
     targetSha,
     commits,
