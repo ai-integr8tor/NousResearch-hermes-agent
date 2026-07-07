@@ -12031,6 +12031,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             model_override=turn_route["model"],
             runtime_override=turn_route["runtime"],
             request_overrides=turn_route.get("request_overrides"),
+            fallback_model_override=turn_route.get("fallback_model"),
         ):
             return None
         
@@ -16062,6 +16063,7 @@ def main(
                         model_override=turn_route["model"],
                         runtime_override=turn_route["runtime"],
                         request_overrides=turn_route.get("request_overrides"),
+                        fallback_model_override=turn_route.get("fallback_model"),
                     ):
                         cli.agent.quiet_mode = True
                         cli.agent.suppress_status_output = True
