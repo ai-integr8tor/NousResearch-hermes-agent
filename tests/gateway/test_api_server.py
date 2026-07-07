@@ -30,6 +30,7 @@ from gateway.platforms.api_server import (
     ResponseStore,
     _IdempotencyCache,
     _derive_chat_session_id,
+    _ProviderAuthResolutionError,
     _redact_api_error_text,
     check_api_server_requirements,
     cors_middleware,
@@ -477,6 +478,177 @@ class TestAdapterInit:
 
         assert isinstance(agent, FakeAgent)
         assert captured["model"] == "primary/model"
+
+    def test_create_agent_defaults_to_provider_catalog_model_when_empty(self, monkeypatch):
+        """Codex finding #2 (CRITICAL): api_server.py had no equivalent of
+        run.py's provider-catalog default when model resolves empty but a
+        provider did resolve (e.g. `hermes auth add openai-codex` without
+        `hermes model`) — AIAgent(model="") 400s every call."""
+        captured = {}
+
+        class FakeAgent:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        monkeypatch.setattr("run_agent.AIAgent", FakeAgent)
+        monkeypatch.setattr(
+            "gateway.run._resolve_runtime_agent_kwargs",
+            lambda: {"provider": "openai-codex", "base_url": "https://example.test/v1",
+                     "api_mode": "codex_responses"},
+        )
+        monkeypatch.setattr("gateway.run._resolve_gateway_model", lambda: "")
+        monkeypatch.setattr("gateway.run._load_gateway_config", lambda: {})
+        monkeypatch.setattr("gateway.run.GatewayRunner._load_reasoning_config", staticmethod(lambda: {}))
+        monkeypatch.setattr("gateway.run.GatewayRunner._load_fallback_model", staticmethod(lambda: None))
+        monkeypatch.setattr("hermes_cli.tools_config._get_platform_tools", lambda *_: set())
+        monkeypatch.setattr(
+            "hermes_cli.models.get_default_model_for_provider",
+            lambda provider: "gpt-5.5-codex" if provider == "openai-codex" else None,
+        )
+
+        adapter = APIServerAdapter(PlatformConfig(enabled=True))
+        monkeypatch.setattr(adapter, "_ensure_session_db", lambda: None)
+
+        agent = adapter._create_agent(session_id="api-session")
+
+        assert isinstance(agent, FakeAgent)
+        assert captured["model"] == "gpt-5.5-codex"
+
+    def test_create_agent_recovers_last_known_good_model_when_empty(self, monkeypatch):
+        """Codex finding #2 (CRITICAL): api_server.py had no last-known-good
+        recovery (#35314) — a transient config-cache miss producing an empty
+        model would build AIAgent(model="") and fail every call in the
+        session until manual retry, instead of reusing the model that just
+        worked."""
+        captured = []
+
+        class FakeAgent:
+            def __init__(self, **kwargs):
+                captured.append(dict(kwargs))
+
+        monkeypatch.setattr("run_agent.AIAgent", FakeAgent)
+        monkeypatch.setattr(
+            "gateway.run._resolve_runtime_agent_kwargs",
+            lambda: {"provider": "nous", "base_url": "https://example.test/v1", "api_mode": "chat_completions"},
+        )
+        monkeypatch.setattr("gateway.run._load_gateway_config", lambda: {})
+        monkeypatch.setattr("gateway.run.GatewayRunner._load_reasoning_config", staticmethod(lambda: {}))
+        monkeypatch.setattr("gateway.run.GatewayRunner._load_fallback_model", staticmethod(lambda: None))
+        monkeypatch.setattr("hermes_cli.tools_config._get_platform_tools", lambda *_: set())
+
+        adapter = APIServerAdapter(PlatformConfig(enabled=True))
+        monkeypatch.setattr(adapter, "_ensure_session_db", lambda: None)
+
+        # Turn 1: model resolves fine — populates the last-known-good cache.
+        monkeypatch.setattr("gateway.run._resolve_gateway_model", lambda: "minimax/minimax-m3")
+        adapter._create_agent(session_id="api-session")
+        assert captured[0]["model"] == "minimax/minimax-m3"
+
+        # Turn 2: transient empty resolution, no provider catalog default
+        # available — must recover the model from turn 1, not build model="".
+        monkeypatch.setattr("gateway.run._resolve_gateway_model", lambda: "")
+        monkeypatch.setattr(
+            "gateway.run._resolve_runtime_agent_kwargs",
+            lambda: {"provider": None, "base_url": None, "api_mode": None},
+        )
+        adapter._create_agent(session_id="api-session")
+        assert captured[1]["model"] == "minimax/minimax-m3"
+
+    def test_last_resolved_model_cache_does_not_grow_per_ephemeral_session_id(self, monkeypatch):
+        """Codex adversarial re-review of commit 0440094e1: /v1/responses and
+        /v1/runs hand out a fresh UUID session_id per one-off request (no
+        gateway_session_key), unlike run.py's stable, long-lived native
+        gateway chat scopes. Keying the last-known-good cache on session_id
+        would leave one permanent dict entry per stateless request, growing
+        unbounded for the life of the process. Only gateway_session_key
+        (the deliberately-stable, caller-chosen identifier) may be used as
+        a cache key; a bare session_id must never create an entry."""
+        class FakeAgent:
+            def __init__(self, **kwargs):
+                pass
+
+        monkeypatch.setattr("run_agent.AIAgent", FakeAgent)
+        monkeypatch.setattr(
+            "gateway.run._resolve_runtime_agent_kwargs",
+            lambda: {"provider": "nous", "base_url": "https://example.test/v1", "api_mode": "chat_completions"},
+        )
+        monkeypatch.setattr("gateway.run._resolve_gateway_model", lambda: "minimax/minimax-m3")
+        monkeypatch.setattr("gateway.run._load_gateway_config", lambda: {})
+        monkeypatch.setattr("gateway.run.GatewayRunner._load_reasoning_config", staticmethod(lambda: {}))
+        monkeypatch.setattr("gateway.run.GatewayRunner._load_fallback_model", staticmethod(lambda: None))
+        monkeypatch.setattr("hermes_cli.tools_config._get_platform_tools", lambda *_: set())
+
+        adapter = APIServerAdapter(PlatformConfig(enabled=True))
+        monkeypatch.setattr(adapter, "_ensure_session_db", lambda: None)
+
+        # 50 one-off requests, each a fresh UUID session_id, no gateway_session_key
+        # -- mirrors /v1/responses (~3128) and /v1/runs (~4059) with no explicit
+        # session supplied.
+        import uuid
+        for _ in range(50):
+            adapter._create_agent(session_id=str(uuid.uuid4()))
+
+        # Only the "*" process-wide fallback may exist -- never one entry per
+        # ephemeral session_id.
+        assert list(adapter._last_resolved_model.keys()) == ["*"]
+
+    def test_last_resolved_model_cache_uses_gateway_session_key_when_present(self, monkeypatch):
+        """Counterpart to the ephemeral-session test above: a caller-supplied,
+        stable gateway_session_key IS worth remembering (that's the whole
+        point of the recovery cache), so it must still be keyed correctly."""
+        captured = []
+
+        class FakeAgent:
+            def __init__(self, **kwargs):
+                captured.append(dict(kwargs))
+
+        monkeypatch.setattr("run_agent.AIAgent", FakeAgent)
+        monkeypatch.setattr(
+            "gateway.run._resolve_runtime_agent_kwargs",
+            lambda: {"provider": "nous", "base_url": "https://example.test/v1", "api_mode": "chat_completions"},
+        )
+        monkeypatch.setattr("gateway.run._load_gateway_config", lambda: {})
+        monkeypatch.setattr("gateway.run.GatewayRunner._load_reasoning_config", staticmethod(lambda: {}))
+        monkeypatch.setattr("gateway.run.GatewayRunner._load_fallback_model", staticmethod(lambda: None))
+        monkeypatch.setattr("hermes_cli.tools_config._get_platform_tools", lambda *_: set())
+
+        adapter = APIServerAdapter(PlatformConfig(enabled=True))
+        monkeypatch.setattr(adapter, "_ensure_session_db", lambda: None)
+
+        monkeypatch.setattr("gateway.run._resolve_gateway_model", lambda: "minimax/minimax-m3")
+        adapter._create_agent(session_id="api-session", gateway_session_key="stable-chan-1")
+        assert adapter._last_resolved_model["stable-chan-1"] == "minimax/minimax-m3"
+
+        monkeypatch.setattr("gateway.run._resolve_gateway_model", lambda: "")
+        monkeypatch.setattr(
+            "gateway.run._resolve_runtime_agent_kwargs",
+            lambda: {"provider": None, "base_url": None, "api_mode": None},
+        )
+        adapter._create_agent(session_id="a-totally-different-session-id", gateway_session_key="stable-chan-1")
+        assert captured[1]["model"] == "minimax/minimax-m3"
+
+    def test_create_agent_wraps_runtime_credential_failure_as_provider_auth_error(self, monkeypatch):
+        """Codex finding #5 (MEDIUM), round-2 re-review: the first version of
+        this fix caught bare RuntimeError around the whole _create_agent()+
+        run_conversation() span in _run_agent(), which would mislabel an
+        unrelated RuntimeError (e.g. from run_conversation() itself) as a
+        provider auth failure. The fix instead converts a RuntimeError from
+        gateway.run._resolve_runtime_agent_kwargs() specifically -- the sole
+        raiser of RuntimeError(format_runtime_provider_error(...)) anywhere
+        in this call graph -- into _ProviderAuthResolutionError right where
+        it's called, inside _create_agent(). This is the boundary test:
+        confirms _create_agent() itself does this conversion, independent
+        of any caller's exception handling."""
+        monkeypatch.setattr(
+            "gateway.run._resolve_runtime_agent_kwargs",
+            lambda: (_ for _ in ()).throw(RuntimeError("No credentials found for provider 'nous'")),
+        )
+
+        adapter = APIServerAdapter(PlatformConfig(enabled=True))
+        monkeypatch.setattr(adapter, "_ensure_session_db", lambda: None)
+
+        with pytest.raises(_ProviderAuthResolutionError, match="No credentials found for provider 'nous'"):
+            adapter._create_agent(session_id="api-session")
 
 
 # ---------------------------------------------------------------------------
