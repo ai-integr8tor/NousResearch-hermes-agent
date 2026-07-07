@@ -305,6 +305,166 @@ def test_root_wipe_at_command_position_is_hardline(command):
 
 
 # -------------------------------------------------------------------------
+# Command-carrying wrappers
+# -------------------------------------------------------------------------
+#
+# A wrapper that runs a command string it is handed (`sh -c <string>`, GNU
+# `env -S` / `--split-string`) or the `su`/`runuser` `-c` form puts the real
+# verb inside an argument, not at a shell command position, so the anchored
+# patterns cannot see it. The detector re-scans the carried string as its own
+# command. Only literal strings are reachable: a value computed at runtime
+# (`sh -c "$(...)"`, a pipe into a shell, a variable) is arbitrary execution no
+# static scan can resolve, and stays out of scope (see issue for the ceiling).
+_CARRIED_HARDLINE_BYPASS = [
+    "sh -c 'reboot'",
+    "bash -c 'reboot'",
+    "dash -c 'reboot'",
+    "zsh -c 'reboot'",
+    "ksh -c 'reboot'",
+    "sh -c 'systemctl poweroff'",
+    "bash -c 'shutdown -h now'",
+    "sh -c 'rm -rf /'",
+    "bash -c 'rm -rf ~'",
+    "su -c 'reboot'",
+    "runuser -c 'reboot'",
+    "su root -c 'reboot'",
+    'env --split-string="reboot"',
+    "env --split-string='rm -rf /'",
+    "env --split-string reboot",
+    "env -Sreboot",
+    "/bin/sh -c 'reboot'",
+    "sudo sh -c 'reboot'",
+    "env FOO=1 sh -c 'reboot'",
+    "env FOO=1 BAR=2 bash -c 'rm -rf /'",
+    "sh -c 'sh -c reboot'",           # carrier nested in carrier
+    "ls; sh -c 'reboot'",             # after a separator
+    "sh -ec 'reboot'",                # clustered short options, -c is last
+    "bash -ec 'reboot'",
+    "dash -ec 'reboot'",
+    "sh -xc 'rm -rf /'",
+    "bash -exc 'rm -rf /'",
+    "sh -lc 'reboot'",
+    "su -lc 'reboot'",
+    # A carrier reached behind wrapper OPTIONS, not just wrapper words and
+    # NAME=VALUE assignments. The whole option prefix must be skipped.
+    "env -i sh -c 'reboot'",
+    "env --ignore-environment sh -c 'reboot'",
+    "env -u FOO sh -c 'reboot'",
+    "env --unset=FOO sh -c 'reboot'",
+    "sudo -u root sh -c 'reboot'",
+    "sudo --user root sh -c 'reboot'",
+    "sudo -E sh -c 'reboot'",
+    "sudo -n sh -c 'reboot'",
+    "sudo -u root -E sh -c 'reboot'",
+    "sudo -u root sh -c 'rm -rf /'",
+    # Wrappers that carry no command of their own but still hide a carrier.
+    "nice sh -c 'reboot'",
+    "nice -n 10 sh -c 'reboot'",
+    "ionice sh -c 'reboot'",
+    "stdbuf -oL sh -c 'reboot'",
+    "timeout 5 sh -c 'reboot'",
+    "timeout -s KILL 5 sh -c 'reboot'",
+    "timeout 1.5s sh -c 'reboot'",
+    "timeout 5 bash -ec 'reboot'",
+    "doas sh -c 'reboot'",
+    "doas -u root sh -c 'reboot'",
+    # Wrappers nested and path-prefixed with options in between.
+    "sudo -u root env -i sh -c 'reboot'",
+    "env -i sudo sh -c 'reboot'",
+    "/usr/bin/env -i /bin/sh -c 'reboot'",
+    "/bin/sudo -u root sh -c 'reboot'",
+    # Options that really do take an operand still reach the carrier after it.
+    "ionice -c 2 sh -c 'reboot'",
+    "ionice -c best-effort sh -c 'reboot'",
+    "stdbuf -o L sh -c 'reboot'",
+    "timeout -s KILL 5 sh -c 'reboot'",
+]
+
+
+@pytest.mark.parametrize("command", _CARRIED_HARDLINE_BYPASS)
+def test_command_carrying_wrappers_are_hardline_blocked(command):
+    """A hardline verb inside a carried command string still hits the floor."""
+    is_hl, desc = detect_hardline_command(command)
+    assert is_hl, f"command-carrying wrapper leaked past the floor: {command!r}"
+    assert desc
+
+
+# The verb sits at an ARGUMENT position inside the carried string (an echo/grep
+# argument, a filename, a non-destructive subcommand), so re-scanning the string
+# must keep the command-position anchor and leave these runnable. Same guard the
+# top-level anchor gives, carried one level down.
+_CARRIED_NOT_A_COMMAND = [
+    "sh -c 'echo reboot'",
+    "bash -c 'git commit -m reboot'",
+    "sh -c 'systemctl status nginx'",
+    "sh -c 'grep -r reboot /etc'",
+    "bash -c 'ls -la'",
+    "env --split-string='echo reboot'",
+    # Non-carrier programs whose own `-c` means something else entirely.
+    "gcc -c main.c",
+    "grep -c reboot access.log",
+    "env EDITOR=vim git commit",
+    "find . -name reboot.service",
+    "sh -ec 'echo reboot'",           # clustered options, benign payload
+    "bash -lc 'ls -la'",
+    "sh -cx 'reboot'",                # -c takes inline x, reboot is only $0
+    # Wrapped commands with options, but no carrier or a benign payload, must
+    # not be swept up by the option-skipping prefix walk.
+    "sudo -u root ls",
+    "sudo -u root sh",                # interactive shell, no -c payload
+    "timeout 5 curl https://example.com",
+    "nice -n 10 make -j4",
+    "env -i printenv",
+    "env -u FOO make",
+    "stdbuf -oL grep reboot app.log",
+    "sudo -E git push",
+    "doas -u root ls",
+    "timeout 5 sh -c 'echo reboot'",
+    "sudo -u root sh -c 'echo reboot'",
+    # Interpreter carriers run another language rather than a shell command
+    # string, so they are the runtime-computed / arbitrary-code class and are
+    # deliberately left to the softer guards, not the shell-carrier extractor.
+    "python3 -c 'import os; os.system(\"reboot\")'",
+    "perl -e 'system(\"reboot\")'",
+    # A no-operand wrapper flag must not consume the wrapper's real program, so
+    # its arguments (which merely look like a carrier) are not rescanned. Here
+    # `echo` is the program and `sh -c reboot` are the words it prints.
+    "sudo -E echo sh -c reboot",
+    "sudo -n echo sh -c reboot",
+    "timeout --foreground echo sh -c reboot",
+    "timeout --preserve-status echo sh -c reboot",
+    "sudo -H echo sh -c reboot",
+    "env -v echo sh -c reboot",
+    "stdbuf -oL echo sh -c reboot",
+    # `nice -n` takes a numeric operand, so a non-numeric next token is the
+    # program, not the niceness value.
+    "nice -n echo sh -c reboot",
+]
+
+
+@pytest.mark.parametrize("command", _CARRIED_NOT_A_COMMAND)
+def test_carried_arg_position_verb_is_not_hardline(command):
+    """A verb used as data inside a carried string is not a command."""
+    is_hl, desc = detect_hardline_command(command)
+    assert not is_hl, f"false positive: carried arg-position verb blocked: {command!r} ({desc})"
+
+
+def test_command_carrying_wrapper_blocked_under_yolo(clean_session, monkeypatch):
+    """The carried root wipe cannot be waived by yolo, the floor runs first."""
+    monkeypatch.setenv("HERMES_YOLO_MODE", "1")
+    for cmd in ("sh -c 'rm -rf /'", "env --split-string='rm -rf /'"):
+        result = check_all_command_guards(cmd, "local")
+        assert result["approved"] is False, f"yolo leaked carried hardline on {cmd!r}"
+
+
+def test_command_carrying_wrapper_blocked_in_default_mode(clean_session):
+    """The carried reboot (no dangerous backstop) is blocked in default mode."""
+    for cmd in ("dash -c 'reboot'", "env --split-string='reboot'", "su -c 'reboot'"):
+        result = check_all_command_guards(cmd, "local")
+        assert result["approved"] is False, f"carried reboot approved with no prompt: {cmd!r}"
+
+
+# -------------------------------------------------------------------------
 # Shell line-continuation bypass
 # -------------------------------------------------------------------------
 #

@@ -1349,6 +1349,255 @@ def _iter_shell_command_word_spans(command: str):
             break
 
 
+# Programs whose `-c <string>` argument is a shell command line, so the real
+# verb lives inside that string rather than at a shell command position. The
+# hardline / dangerous patterns are command-position anchored and cannot see a
+# verb carried inside an argument, so we extract the string and re-scan it as
+# its own command (see `_iter_embedded_commands`). `su`/`runuser` take the same
+# `-c <string>` and are included. `env` is handled separately for its
+# `-S` / `--split-string` form.
+_SHELL_C_CARRIERS = frozenset({
+    "sh", "bash", "dash", "zsh", "ksh", "ash", "mksh", "sash",
+    "su", "runuser",
+})
+# How deep to follow carriers nested inside carriers (`sh -c 'sh -c reboot'`).
+# A small bound keeps a crafted deeply-nested string from spinning.
+_EMBEDDED_COMMAND_MAX_DEPTH = 4
+
+# Standard command wrappers a carrier can hide behind. A carrier reached
+# through any composition of these, with their options, option operands, bare
+# numeric or duration arguments, and NAME=VALUE assignments, is still the same
+# carried-command class (`sudo -u root sh -c 'reboot'`, `env -i sh -c 'reboot'`,
+# `timeout 5 sh -c 'reboot'`), so the whole prefix is skipped before looking for
+# the carrier program. This is the wrapper set the command-position rules treat
+# the same way, kept here so carrier detection does not fall behind it.
+_CARRIER_WRAPPER_WORDS = frozenset({
+    "sudo", "doas", "env", "exec", "nohup", "setsid", "time",
+    "command", "builtin", "nice", "ionice", "stdbuf", "timeout",
+})
+# A bare numeric or duration argument (`5`, `1.5s`, `30m`). `timeout` takes one
+# as its leading positional, so it is part of the prefix there.
+_WRAPPER_NUMERIC_ARG_RE = re.compile(r"\d+(?:\.\d+)?[A-Za-z]*")
+
+# Wrapper options that consume a following STRING operand (a username, host,
+# signal name, variable, chdir path). Skipping the operand is what lets the real
+# program after it be reached. A `--opt=value` form carries its own operand and
+# needs no entry. Any option NOT listed for its wrapper is treated as taking no
+# operand, so a no-operand flag (`sudo -E`, `sudo -n`, `timeout --foreground`)
+# can never swallow the wrapper's actual program word.
+_WRAPPER_OPTIONS_STR_ARG = {
+    "sudo": {
+        "-u", "--user", "-g", "--group", "-h", "--host", "-p", "--prompt",
+        "-r", "--role", "-t", "--type", "-R", "--chroot", "-D", "--chdir",
+        "-T", "--command-timeout", "-U", "--other-user",
+    },
+    "doas": {"-u", "-C", "-a"},
+    "env": {"-u", "--unset", "-C", "--chdir"},
+    "timeout": {"-s", "--signal", "-k", "--kill-after"},
+    "stdbuf": {"-i", "--input", "-o", "--output", "-e", "--error"},
+    "exec": {"-a"},
+}
+# Wrapper options whose operand is numeric (a priority, class, pid, fd), so a
+# non-numeric following token is the program, not the operand (`nice -n echo` is
+# `echo` run at default niceness, not niceness `echo`).
+_WRAPPER_OPTIONS_NUM_ARG = {
+    "nice": {"-n", "--adjustment"},
+    "ionice": {"-n", "--classdata", "-p", "--pid", "-P", "--pgid", "-u", "--uid"},
+    "sudo": {"-C", "--close-from"},
+}
+# `ionice -c` takes either a numeric class or a class name.
+_IONICE_CLASS_OPTIONS = {"-c", "--class"}
+_IONICE_CLASS_NAMES = {"none", "realtime", "best-effort", "idle"}
+
+
+def _carrier_prefix_word(token: str) -> str:
+    """Normalise a token to its lowercase basename for carrier matching."""
+    word = _strip_optional_shell_quotes(
+        _deobfuscate_shell_word_for_detection(token)
+    )
+    return word.lower().rsplit("/", 1)[-1]
+
+
+def _wrapper_option_takes_operand(wrapper: str, option: str, operand: str) -> bool:
+    """Whether ``option`` of ``wrapper`` consumes ``operand`` as its value."""
+    if option in _WRAPPER_OPTIONS_STR_ARG.get(wrapper, ()):
+        return True
+    if option in _WRAPPER_OPTIONS_NUM_ARG.get(wrapper, ()):
+        return bool(_WRAPPER_NUMERIC_ARG_RE.fullmatch(operand))
+    if wrapper == "ionice" and option in _IONICE_CLASS_OPTIONS:
+        return bool(_WRAPPER_NUMERIC_ARG_RE.fullmatch(operand)) or (
+            operand.lower() in _IONICE_CLASS_NAMES
+        )
+    return False
+
+
+def _skip_wrapper_arguments(tokens: list, idx: int, wrapper: str) -> int:
+    """Advance past a wrapper's options, option operands, leading duration, and
+    assignments, stopping at the next program candidate.
+
+    Option parsing is arity-aware: a flag consumes one operand only when that
+    wrapper's option is known to take one, so `sudo -u root sh -c` skips the
+    `root` operand and reaches `sh`, while a no-operand flag (`sudo -E sh -c`,
+    `timeout --foreground echo ...`) leaves the following word as the program.
+    A carrier or another wrapper is never consumed as an operand either, so a
+    carrier is always reached rather than skipped.
+    """
+    while idx < len(tokens):
+        word = _strip_optional_shell_quotes(
+            _deobfuscate_shell_word_for_detection(tokens[idx])
+        )
+        if _ENV_ASSIGNMENT_RE.fullmatch(word):
+            idx += 1
+            continue
+        if word.startswith("-") and word != "-":
+            option = word.split("=", 1)[0]
+            idx += 1
+            if "=" not in word and idx < len(tokens):
+                nxt = tokens[idx]
+                nbase = _carrier_prefix_word(nxt)
+                stripped_nxt = _strip_optional_shell_quotes(
+                    _deobfuscate_shell_word_for_detection(nxt)
+                )
+                if (
+                    not stripped_nxt.startswith("-")
+                    and not _ENV_ASSIGNMENT_RE.fullmatch(stripped_nxt)
+                    and nbase not in _SHELL_C_CARRIERS
+                    and nbase not in _CARRIER_WRAPPER_WORDS
+                    and _wrapper_option_takes_operand(wrapper, option, stripped_nxt)
+                ):
+                    idx += 1
+            continue
+        # `timeout DURATION command` carries a bare duration positional before
+        # the command it runs.
+        if wrapper == "timeout" and _WRAPPER_NUMERIC_ARG_RE.fullmatch(word):
+            idx += 1
+            continue
+        break
+    return idx
+
+
+def _read_command_tokens(command: str, start: int, limit: int = 24) -> list:
+    """Read up to ``limit`` shell words of the command beginning at ``start``."""
+    tokens: list = []
+    pos = start
+    while len(tokens) < limit:
+        word_start, word_end, word = _read_shell_word(command, pos)
+        if word_start == word_end:
+            break
+        tokens.append(word)
+        pos = word_end
+    return tokens
+
+
+def _carrier_program(tokens: list) -> tuple:
+    """Return ``(program, rest_index)`` when a command starts with a carrier.
+
+    Skips any composition of the leading exec wrappers in
+    ``_CARRIER_WRAPPER_WORDS`` together with their options, option operands,
+    numeric or duration arguments, and ``NAME=VALUE`` assignments (the same
+    prefix a command-position verb is read through), so a carrier reached
+    behind `sudo -u root ...`, `env -i ...`, `nice ...`, or `timeout 5 ...`
+    still resolves. Bails on any other leading token so a payload is only ever
+    extracted when the program really is a carrier.
+    """
+    idx = 0
+    while idx < len(tokens):
+        base = _carrier_prefix_word(tokens[idx])
+        if _ENV_ASSIGNMENT_RE.fullmatch(
+            _strip_optional_shell_quotes(
+                _deobfuscate_shell_word_for_detection(tokens[idx])
+            )
+        ):
+            idx += 1
+            continue
+        if base == "env":
+            # `env` is a carrier only when it carries `-S` / `--split-string`.
+            # Otherwise it is a pass-through wrapper (`env FOO=1 sh -c ...`,
+            # `env -i sh -c ...`), so skip its options and assignments and keep
+            # looking for the real program.
+            if _env_split_string_payload(tokens[idx + 1:]) is not None:
+                return ("env", idx + 1)
+            idx = _skip_wrapper_arguments(tokens, idx + 1, "env")
+            continue
+        if base in _SHELL_C_CARRIERS:
+            return (base, idx + 1)
+        if base in _CARRIER_WRAPPER_WORDS:
+            idx = _skip_wrapper_arguments(tokens, idx + 1, base)
+            continue
+        return (None, 0)
+    return (None, 0)
+
+
+def _dash_c_payload(args: list) -> str | None:
+    """The command string a shell carrier runs via `-c`.
+
+    Handles the bare `-c cmd` form and the clustered short-option form a shell
+    accepts (`-ec cmd`, `-xc cmd`, `-exc cmd`): a run of single-letter options
+    where `c` takes the rest of the same token as its argument, or the next
+    word when `c` is the last letter in the group. Only the carrier programs in
+    `_SHELL_C_CARRIERS` reach this, so an unrelated `-c` such as `gcc -c` is
+    never inspected here.
+    """
+    for i, token in enumerate(args):
+        stripped = _strip_optional_shell_quotes(token)
+        if not stripped.startswith("-") or stripped.startswith("--"):
+            continue
+        letters = stripped[1:]
+        cut = letters.find("c")
+        if cut == -1:
+            continue
+        inline = letters[cut + 1:]
+        if inline:
+            return _strip_optional_shell_quotes(inline)
+        if i + 1 < len(args):
+            return _strip_optional_shell_quotes(args[i + 1])
+        return None
+    return None
+
+
+def _env_split_string_payload(args: list) -> str | None:
+    """The command string GNU `env` would run for `-S` / `--split-string`."""
+    for i, token in enumerate(args):
+        stripped = _strip_optional_shell_quotes(token)
+        if stripped.startswith("--split-string="):
+            return _strip_optional_shell_quotes(token.split("=", 1)[1])
+        if stripped in ("--split-string", "-S"):
+            if i + 1 < len(args):
+                return _strip_optional_shell_quotes(args[i + 1])
+            return None
+        if stripped.startswith("-S") and len(stripped) > 2:
+            return _strip_optional_shell_quotes(stripped[2:])
+    return None
+
+
+def _direct_embedded_commands(command: str):
+    """Yield the literal command strings command-carrying wrappers would run."""
+    for start in _iter_shell_command_starts(command):
+        tokens = _read_command_tokens(command, start)
+        if not tokens:
+            continue
+        program, rest = _carrier_program(tokens)
+        if program is None:
+            continue
+        args = tokens[rest:]
+        payload = (
+            _env_split_string_payload(args)
+            if program == "env"
+            else _dash_c_payload(args)
+        )
+        if payload:
+            yield payload
+
+
+def _iter_embedded_commands(command: str, _depth: int = 0):
+    """Yield carried command strings, following carriers nested in carriers."""
+    if _depth >= _EMBEDDED_COMMAND_MAX_DEPTH:
+        return
+    for payload in _direct_embedded_commands(command):
+        yield payload
+        yield from _iter_embedded_commands(payload, _depth + 1)
+
+
 def _command_detection_variants(command: str):
     normalized = _normalize_command_for_detection(command)
     seen = {normalized}
@@ -1377,6 +1626,20 @@ def _command_detection_variants(command: str):
             continue
         variant = normalized[:word_start] + deobfuscated + normalized[word_end:]
         if variant in seen:
+            continue
+        seen.add(variant)
+        yield variant
+    # A command-carrying wrapper (`sh -c 'reboot'`, `env --split-string='reboot'`)
+    # runs a command string that never sits at a shell command position, so the
+    # anchored patterns above miss the verb inside it. Re-scan each carried
+    # string as its own command. Because the re-scan keeps command-position
+    # anchoring, an arg-position verb (`sh -c 'echo reboot'`) stays runnable
+    # while a real one (`sh -c 'reboot'`) is caught. Only literal strings are
+    # reachable here: a value built at runtime (`sh -c "$(...)"`, a pipe into a
+    # shell, a variable) is arbitrary execution no static scan can resolve.
+    for embedded in _iter_embedded_commands(normalized):
+        variant = _normalize_command_for_detection(embedded)
+        if not variant or variant in seen:
             continue
         seen.add(variant)
         yield variant
