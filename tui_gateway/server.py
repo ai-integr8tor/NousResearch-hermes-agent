@@ -8538,6 +8538,23 @@ def _start_notification_poller(sid: str, session: dict) -> threading.Event:
     return stop
 
 
+def _strip_interrupt_sentinel(text: str) -> str:
+    """Drop Hermes' local "waiting for model response" cancellation sentinel.
+
+    It's cancellation metadata, not assistant prose — ACP (#41720) and the
+    gateway's chat platforms (#7921) already suppress it before delivery;
+    the dashboard/TUI websocket surface never got the same guard, so it was
+    rendered verbatim as if the agent had actually said it.
+    """
+    from agent.conversation_loop import INTERRUPT_WAITING_FOR_MODEL_PREFIX
+
+    if not text:
+        return ""
+    if str(text).strip().startswith(INTERRUPT_WAITING_FOR_MODEL_PREFIX):
+        return ""
+    return text
+
+
 def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
     with session["history_lock"]:
         history = list(session["history"])
@@ -8771,7 +8788,7 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
                     sid, session, clear_pending_title=False, restart_slash_worker=True,
                 )
 
-                raw = result.get("final_response", "")
+                raw = _strip_interrupt_sentinel(result.get("final_response", ""))
                 status = (
                     "interrupted"
                     if result.get("interrupted")
@@ -9668,7 +9685,7 @@ def _(rid, params: dict) -> dict:
                 parent,
                 {
                     "task_id": task_id,
-                    "text": (
+                    "text": _strip_interrupt_sentinel(
                         result.get("final_response", str(result))
                         if isinstance(result, dict)
                         else str(result)
@@ -9776,7 +9793,7 @@ def _(rid, params: dict) -> dict:
                 task_id=task_id,
                 conversation_history=parent_history or None,
             )
-            text = (
+            text = _strip_interrupt_sentinel(
                 result.get("final_response", str(result))
                 if isinstance(result, dict)
                 else str(result)
