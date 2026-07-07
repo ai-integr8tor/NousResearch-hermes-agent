@@ -54,6 +54,7 @@ const {
   nativeOverlayWidth: computeNativeOverlayWidth,
   macTitleBarOverlayHeight
 } = require('./titlebar-overlay-width.cjs')
+const { isBlockedUrl, MAX_DOWNLOAD_BYTES, MAX_FETCH_BYTES } = require('./url-guard.cjs')
 const { readDirForIpc } = require('./fs-read-dir.cjs')
 const { readLiveUpdateMarker, writeUpdateMarker } = require('./update-marker.cjs')
 const {
@@ -3306,9 +3307,19 @@ function fetchJson(url, token, options = {}) {
       },
       res => {
         const chunks = []
+        let received = 0
         res.on('error', reject)
-        res.on('data', chunk => chunks.push(chunk))
+        res.on('data', chunk => {
+          received += chunk.length
+          if (received > MAX_FETCH_BYTES) {
+            req.destroy()
+            reject(new Error(`Response from ${url} exceeded ${MAX_FETCH_BYTES} bytes`))
+            return
+          }
+          chunks.push(chunk)
+        })
         res.on('end', () => {
+          if (req.destroyed) return
           const text = Buffer.concat(chunks).toString('utf8')
           if ((res.statusCode || 500) >= 400) {
             reject(new Error(`${res.statusCode}: ${text || res.statusMessage}`))
@@ -3661,6 +3672,7 @@ function fetchHtmlTitleWithRenderer(rawUrl) {
 const usableTitle = value => (value && !TITLE_ERROR_RE.test(value) ? value : '')
 
 function fetchLinkTitle(rawUrl) {
+  if (isBlockedUrl(String(rawUrl || ""))) return Promise.resolve("")
   const url = String(rawUrl || '').trim()
   const key = canonicalTitleCacheKey(url)
   if (!key) return Promise.resolve('')
@@ -3699,6 +3711,7 @@ async function resourceBufferFromUrl(rawUrl) {
     return { buffer, mimeType: mimeTypeForPath(resolvedPath) }
   }
 
+  if (isBlockedUrl(rawUrl)) throw new Error("Blocked: private URL")
   const parsed = new URL(rawUrl)
   const client = parsed.protocol === 'https:' ? https : http
   return new Promise((resolve, reject) => {
@@ -3709,9 +3722,19 @@ async function resourceBufferFromUrl(rawUrl) {
         return
       }
       const chunks = []
+      let received = 0
       res.on('error', reject)
-      res.on('data', chunk => chunks.push(chunk))
+      res.on('data', chunk => {
+        received += chunk.length
+        if (received > MAX_DOWNLOAD_BYTES) {
+          req.destroy()
+          reject(new Error(`Download from ${rawUrl} exceeded ${MAX_DOWNLOAD_BYTES} bytes`))
+          return
+        }
+        chunks.push(chunk)
+      })
       res.on('end', () => {
+        if (req.destroyed) return
         resolve({
           buffer: Buffer.concat(chunks),
           mimeType: res.headers['content-type'] || 'application/octet-stream'
@@ -4536,6 +4559,18 @@ function openOauthLoginWindow(baseUrl) {
     win.webContents.on('did-navigate', () => void checkCookie())
     win.webContents.on('did-redirect-navigation', () => void checkCookie())
     win.webContents.on('did-frame-navigate', () => void checkCookie())
+    win.webContents.setWindowOpenHandler(({ url }) => {
+      openExternalUrl(url)
+      return { action: 'deny' }
+    })
+    win.webContents.on('will-navigate', (event, url) => {
+      try {
+        const parsed = new URL(url)
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+          event.preventDefault()
+        }
+      } catch { event.preventDefault() }
+    })
     pollTimer = setInterval(() => void checkCookie(), 750)
 
     win.on('closed', () => {
@@ -4778,11 +4813,22 @@ function readDesktopConnectionConfig() {
   return config
 }
 
+let _configWriteLock = Promise.resolve()
 function writeDesktopConnectionConfig(config) {
-  fs.mkdirSync(path.dirname(DESKTOP_CONNECTION_CONFIG_PATH), { recursive: true })
-  writeFileAtomic(DESKTOP_CONNECTION_CONFIG_PATH, JSON.stringify(config, null, 2))
-  connectionConfigCache = config
-  connectionConfigCacheMtime = fs.statSync(DESKTOP_CONNECTION_CONFIG_PATH).mtimeMs
+  const run = _configWriteLock.then(() => {
+    fs.mkdirSync(path.dirname(DESKTOP_CONNECTION_CONFIG_PATH), { recursive: true })
+    writeFileAtomic(DESKTOP_CONNECTION_CONFIG_PATH, JSON.stringify(config, null, 2))
+    connectionConfigCache = config
+    connectionConfigCacheMtime = fs.statSync(DESKTOP_CONNECTION_CONFIG_PATH).mtimeMs
+  })
+  // Keep the serialization chain alive even when a write fails, so one failure
+  // doesn't wedge every later write. Surface the error on the returned promise
+  // (and log it) so awaiting callers don't report a phantom success.
+  _configWriteLock = run.catch(() => {})
+  return run.catch(err => {
+    console.error('[hermes-main] Failed to persist desktop connection config:', err)
+    throw err
+  })
 }
 
 // Returns the desktop's chosen profile name, or null when unset. "default" is
@@ -5742,8 +5788,24 @@ function wireCommonWindowHandlers(win) {
     return { action: 'deny' }
   })
   win.webContents.on('will-navigate', (event, url) => {
-    if ((DEV_SERVER && url.startsWith(DEV_SERVER)) || (!DEV_SERVER && url.startsWith('file:'))) {
+    if (DEV_SERVER && url.startsWith(DEV_SERVER)) {
       return
+    }
+    if (!DEV_SERVER && url.startsWith('file:')) {
+      try {
+        // resolveRendererIndex() returns a filesystem PATH; `url` is a file://
+        // URL. Compare like-for-like by converting the renderer directory to a
+        // file: URL prefix (the previous path-vs-URL compare never matched and
+        // bounced every in-app file: navigation to the external opener).
+        const indexPath = resolveRendererIndex()
+        if (indexPath) {
+          let allowedDir = pathToFileURL(path.dirname(indexPath)).href
+          if (!allowedDir.endsWith('/')) allowedDir += '/'
+          if (url.startsWith(allowedDir)) {
+            return
+          }
+        }
+      } catch {}
     }
 
     event.preventDefault()
@@ -6358,13 +6420,15 @@ ipcMain.handle('hermes:connection-config:oauth-logout', async (_event, rawUrl) =
 })
 ipcMain.handle('hermes:connection-config:save', async (_event, payload) => {
   const config = coerceDesktopConnectionConfig(payload)
-  writeDesktopConnectionConfig(config)
+  // Await persistence so a write failure rejects the IPC call instead of
+  // reporting a phantom success while connection.json was never written.
+  await writeDesktopConnectionConfig(config)
 
   return sanitizeDesktopConnectionConfig(config, payload?.profile)
 })
 ipcMain.handle('hermes:connection-config:apply', async (_event, payload) => {
   const config = coerceDesktopConnectionConfig(payload)
-  writeDesktopConnectionConfig(config)
+  await writeDesktopConnectionConfig(config)
 
   const key = connectionScopeKey(payload?.profile)
 
@@ -7206,33 +7270,32 @@ ipcMain.handle('hermes:terminal:start', async (event, payload = {}) => {
   return { cwd, id, shell: name }
 })
 
-ipcMain.handle('hermes:terminal:write', (_event, id, data) => {
+ipcMain.handle('hermes:terminal:write', (event, id, data) => {
   const sessionInfo = terminalSessions.get(String(id || ''))
-
-  if (!sessionInfo) {
+  if (!sessionInfo || sessionInfo.webContentsId !== event.sender.id) {
     return false
   }
-
   sessionInfo.pty.write(String(data || ''))
-
   return true
 })
 
-ipcMain.handle('hermes:terminal:resize', (_event, id, size = {}) => {
+ipcMain.handle('hermes:terminal:resize', (event, id, size = {}) => {
   const sessionInfo = terminalSessions.get(String(id || ''))
-
-  if (!sessionInfo) {
+  if (!sessionInfo || sessionInfo.webContentsId !== event.sender.id) {
     return false
   }
-
   const cols = Math.max(2, Number.parseInt(String(size?.cols || 80), 10) || 80)
   const rows = Math.max(2, Number.parseInt(String(size?.rows || 24), 10) || 24)
-
   sessionInfo.pty.resize(cols, rows)
-
   return true
 })
-ipcMain.handle('hermes:terminal:dispose', (_event, id) => disposeTerminalSession(String(id || '')))
+ipcMain.handle('hermes:terminal:dispose', (event, id) => {
+  const sessionInfo = terminalSessions.get(String(id || ''))
+  if (sessionInfo && sessionInfo.webContentsId !== event.sender.id) {
+    return false
+  }
+  return disposeTerminalSession(String(id || ''))
+})
 
 ipcMain.handle('hermes:updates:check', async () =>
   checkUpdates().catch(error => ({
@@ -7256,6 +7319,11 @@ ipcMain.handle('hermes:updates:branch:get', async () => readDesktopUpdateConfig(
 
 ipcMain.handle('hermes:updates:branch:set', async (_event, name) => {
   const branch = typeof name === 'string' && name.trim() ? name.trim() : DEFAULT_UPDATE_BRANCH
+  // Reject a leading '-' (would be read as a flag by a git CLI) and any '..'
+  // sequence (ref traversal) on top of the character allowlist.
+  if (!/^[A-Za-z0-9._\/-]{1,200}$/.test(branch) || branch.startsWith('-') || branch.includes('..')) {
+    throw new Error('Invalid branch name')
+  }
   writeDesktopUpdateConfig({ branch })
   return { branch }
 })
@@ -7590,7 +7658,10 @@ const _gotSingleInstanceLock = app.requestSingleInstanceLock()
 if (!_gotSingleInstanceLock) {
   app.quit()
 } else {
-  app.on('second-instance', (_event, argv) => {
+  process.on('unhandledRejection', (err) => { console.error('[hermes-main] Unhandled rejection:', err); });
+process.on('uncaughtException', (err) => { console.error('[hermes-main] Uncaught exception:', err); });
+
+app.on('second-instance', (_event, argv) => {
     const url = _extractDeepLink(argv)
     if (url) handleDeepLink(url)
     else if (mainWindow) {
@@ -7689,6 +7760,10 @@ app.on('before-quit', () => {
   }
 
   stopBackendChild(hermesProcess)
+  if (poolIdleReaper) {
+    clearInterval(poolIdleReaper)
+    poolIdleReaper = null
+  }
   stopAllPoolBackends()
 })
 
