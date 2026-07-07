@@ -7021,6 +7021,10 @@ def _pet_reference_images_from_data_url(ref_raw: str, stage) -> list:
         raise ValueError("reference image too large")
 
     try:
+        # Auto-pad base64 before decoding for clients that strip padding
+        missing_padding = 4 - len(payload) % 4
+        if missing_padding != 4:
+            payload += "=" * missing_padding
         raw = base64.b64decode(payload, validate=True)
     except (binascii.Error, ValueError) as exc:
         raise ValueError("invalid reference image data") from exc
@@ -9145,6 +9149,10 @@ def _decode_attach_base64(raw: str, *, mime_prefix: str) -> bytes | None:
     if m:
         cleaned = m.group(1)
     cleaned = _re.sub(r"\s+", "", cleaned)
+    # Auto-pad base64 before decoding for clients that strip padding
+    missing_padding = 4 - len(cleaned) % 4
+    if missing_padding != 4:
+        cleaned += "=" * missing_padding
     try:
         return _base64.b64decode(cleaned, validate=True)
     except Exception:
