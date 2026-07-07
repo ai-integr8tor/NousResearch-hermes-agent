@@ -91,6 +91,29 @@ class TestMaxTurnsResolution:
         assert isinstance(cli.max_turns, int) and cli.max_turns == 90
 
 
+class TestSaveTrajectories:
+    """agent.save_trajectories in config.yaml must reach the CLI (issue #58200)."""
+
+    def test_default_save_trajectories_is_false(self):
+        cli = _make_cli()
+        assert cli.save_trajectories is False
+
+    def test_config_enables_save_trajectories(self):
+        cli = _make_cli(config_overrides={"agent": {"save_trajectories": True}})
+        assert cli.save_trajectories is True
+
+    def test_env_var_overrides_config(self):
+        cli = _make_cli(
+            env_overrides={"HERMES_SAVE_TRAJECTORIES": "0"},
+            config_overrides={"agent": {"save_trajectories": True}},
+        )
+        assert cli.save_trajectories is False
+
+    def test_env_var_enables_when_config_absent(self):
+        cli = _make_cli(env_overrides={"HERMES_SAVE_TRAJECTORIES": "true"})
+        assert cli.save_trajectories is True
+
+
 class TestVerboseAndToolProgress:
     def test_default_verbose_is_bool(self):
         cli = _make_cli()
