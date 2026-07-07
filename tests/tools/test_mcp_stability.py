@@ -3,6 +3,7 @@
 import asyncio
 import os
 import signal
+import threading
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -82,6 +83,63 @@ class TestMCPLoopExceptionHandler:
                 mcp_mod._servers.clear()
                 mcp_mod._server_connecting.clear()
             mcp_mod._stop_mcp_loop()
+
+    def test_stop_mcp_loop_cancels_and_drains_pending_tasks_before_close(self):
+        """Stopping the shared MCP loop must give parked tasks one final
+        cancellation cycle before closing the loop.
+
+        A parked MCPServerTask waits on child tasks inside
+        ``_wait_for_reconnect_or_shutdown``. If the loop is closed while that
+        coroutine is still pending, its ``finally`` block runs during GC and
+        ``child.cancel()`` can raise ``RuntimeError: Event loop is closed``
+        (the noisy shutdown traceback from #60032). The loop owner should
+        cancel/drain pending tasks while the loop is still open instead of
+        relying on each waiter to defensively catch a closed-loop cancel.
+        """
+        import tools.mcp_tool as mcp_mod
+
+        started = threading.Event()
+        cleanup_ran = threading.Event()
+
+        async def parked_like_task():
+            child = asyncio.create_task(asyncio.Event().wait())
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                child.cancel()
+                try:
+                    await child
+                except asyncio.CancelledError:
+                    pass
+                cleanup_ran.set()
+
+        with mcp_mod._lock:
+            mcp_mod._servers.clear()
+            mcp_mod._server_connecting.clear()
+        mcp_mod._ensure_mcp_loop()
+        with mcp_mod._lock:
+            loop = mcp_mod._mcp_loop
+        assert loop is not None
+
+        future = asyncio.run_coroutine_threadsafe(parked_like_task(), loop)
+        try:
+            assert started.wait(timeout=2), "test task never started on MCP loop"
+
+            assert mcp_mod._stop_mcp_loop() is True
+
+            assert cleanup_ran.is_set(), (
+                "pending MCP loop task was not cancelled/drained before loop close"
+            )
+            assert future.done(), "pending MCP loop task was left unfinished"
+        finally:
+            # Idempotent safety cleanup if the assertion above failed.
+            future.cancel()
+            with mcp_mod._lock:
+                mcp_mod._servers.clear()
+                mcp_mod._server_connecting.clear()
+                mcp_mod._mcp_loop = None
+                mcp_mod._mcp_thread = None
 
 
 # ---------------------------------------------------------------------------

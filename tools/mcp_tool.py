@@ -342,6 +342,12 @@ _PARKED_RETRY_INTERVAL = 300     # seconds between parked self-probes
 _DEFAULT_KEEPALIVE_INTERVAL = 180  # seconds between liveness pings
 _MIN_KEEPALIVE_INTERVAL = 5        # clamp floor for configured intervals
 
+# Final shutdown gets one bounded cancellation drain before the MCP loop is
+# closed. This lets parked/reconnect waiter coroutines run their ``finally``
+# blocks while the loop can still schedule ``Task.cancel()`` callbacks, instead
+# of relying on GC-time cleanup after ``loop.close()`` (#60032).
+_MCP_LOOP_DRAIN_TIMEOUT = 3.0
+
 # Environment variables that are safe to pass to stdio subprocesses
 _SAFE_ENV_KEYS = frozenset({
     "PATH", "HOME", "USER", "LANG", "LC_ALL", "TERM", "SHELL", "TMPDIR",
@@ -5282,6 +5288,65 @@ def _stop_mcp_loop_if_idle() -> bool:
     return _stop_mcp_loop(only_if_idle=True)
 
 
+def _drain_pending_mcp_loop_tasks(
+    loop: asyncio.AbstractEventLoop,
+    *,
+    timeout: float = _MCP_LOOP_DRAIN_TIMEOUT,
+) -> None:
+    """Cancel and briefly drain pending tasks before closing the MCP loop.
+
+    ``shutdown_mcp_servers`` asks each ``MCPServerTask`` to exit, but final
+    process teardown can still leave parked waiter tasks pending (for example a
+    failed initial MCP connection parked in ``_wait_for_reconnect_or_shutdown``).
+    Closing the event loop under those tasks defers their ``finally`` cleanup to
+    coroutine GC, where cancelling child waiters raises ``RuntimeError: Event
+    loop is closed``. Drain cancellation while the loop is still open so waiter
+    cleanup happens in the owning event loop.
+
+    The drain is intentionally bounded: cooperative parked/waiter tasks finish
+    immediately; a task that ignores cancellation should not make Hermes hang
+    forever during exit.
+    """
+    if loop.is_closed():
+        return
+
+    try:
+        pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+    except RuntimeError as exc:
+        logger.debug("Unable to inspect pending MCP loop tasks: %s", exc)
+        return
+
+    if not pending:
+        return
+
+    for task in pending:
+        task.cancel()
+
+    try:
+        done, still_pending = loop.run_until_complete(
+            asyncio.wait(pending, timeout=timeout)
+        )
+    except BaseException as exc:
+        logger.debug("Error draining pending MCP loop tasks: %s", exc)
+        return
+
+    for task in done:
+        if task.cancelled():
+            continue
+        try:
+            task.exception()
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.debug("Pending MCP loop task ended during shutdown: %s", exc)
+
+    if still_pending:
+        logger.debug(
+            "MCP loop closed with %d task(s) still pending after %.1fs drain",
+            len(still_pending), timeout,
+        )
+
+
 def _stop_mcp_loop(*, only_if_idle: bool = False) -> bool:
     """Stop the background event loop and join its thread."""
     global _mcp_loop, _mcp_thread
@@ -5297,6 +5362,7 @@ def _stop_mcp_loop(*, only_if_idle: bool = False) -> bool:
         loop.call_soon_threadsafe(loop.stop)
         if thread is not None:
             thread.join(timeout=5)
+        _drain_pending_mcp_loop_tasks(loop)
         try:
             loop.close()
         except Exception:
