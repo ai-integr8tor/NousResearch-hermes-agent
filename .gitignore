@@ -63,6 +63,7 @@ skills/.hub/
 ignored/
 .worktrees/
 environments/benchmarks/evals/
+deploy/second-brain/dist/
 
 # Web UI build output
 hermes_cli/web_dist/
