@@ -32,7 +32,8 @@ class TestWrapCommand:
         assert "cd -- /tmp" in wrapped or "cd -- '/tmp'" in wrapped
         assert "eval 'echo hello'" in wrapped
         assert "__hermes_ec=$?" in wrapped
-        assert "export -p >" in wrapped
+        # env snapshot is secret-scrubbed (export -p | grep -Eiv ...) before the redirect
+        assert "export -p |" in wrapped
         assert "pwd -P >" in wrapped
         assert env._cwd_marker in wrapped
         assert "exit $__hermes_ec" in wrapped
@@ -104,8 +105,9 @@ class TestAtomicSnapshotWrite:
         env = _TestableEnv()
         env._snapshot_ready = True
         wrapped = env._wrap_command("echo hi", "/tmp")
-        # Env dump goes to a temp file, not directly over the live snapshot.
-        assert "export -p > " in wrapped
+        # Env dump is secret-scrubbed and goes to a temp file, not directly over
+        # the live snapshot.
+        assert "export -p |" in wrapped
         assert ".tmp." in wrapped
         # Then an atomic rename onto the real snapshot path.
         assert "mv -f " in wrapped
@@ -150,7 +152,7 @@ class TestAtomicSnapshotWrite:
         env = _TestableEnv()
         env._snapshot_ready = True
         wrapped = env._wrap_command("echo hi", "/tmp")
-        assert "export -p > " in wrapped and "&& mv -f " in wrapped
+        assert "export -p |" in wrapped and "&& mv -f " in wrapped
         assert "rm -f " in wrapped  # temp cleanup on failure
 
     def test_init_session_bootstrap_also_atomic_and_bashpid(self):
