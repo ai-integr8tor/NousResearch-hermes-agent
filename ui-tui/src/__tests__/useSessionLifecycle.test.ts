@@ -61,6 +61,13 @@ describe('live session activation in-flight state', () => {
     expect(turnController.bufRef).toBe('')
     expect(getTurnState().streaming).toBe('')
   })
+
+  it('does not rehydrate a completed assistant reply as live streaming text', () => {
+    hydrateLiveSessionInflight({ assistant: 'final answer already in transcript', streaming: false, user: 'prompt' })
+
+    expect(turnController.bufRef).toBe('')
+    expect(getTurnState().streaming).toBe('')
+  })
 })
 
 describe('resume scroll settle', () => {
