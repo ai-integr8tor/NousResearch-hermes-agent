@@ -762,6 +762,7 @@ DANGEROUS_PATTERNS_COMPILED = [
     (re.compile(pattern, _RE_FLAGS), description)
     for pattern, description in DANGEROUS_PATTERNS
 ]
+_MAX_DANGEROUS_COMMAND_LENGTH = 10000  # Bound regex work and fail closed into approval.
 
 
 def _legacy_pattern_key(pattern: str) -> str:
@@ -1388,6 +1389,13 @@ def detect_dangerous_command(command: str) -> tuple:
     Returns:
         (is_dangerous, pattern_key, description) or (False, None, None)
     """
+    normalized_command = _normalize_command_for_detection(command)
+    if len(normalized_command) > _MAX_DANGEROUS_COMMAND_LENGTH:
+        return (
+            True,
+            "command length limit",
+            "command exceeds approval detection length limit",
+        )
     for command_variant in _command_detection_variants(command):
         command_lower = command_variant.lower()
         for pattern_re, description in DANGEROUS_PATTERNS_COMPILED:
