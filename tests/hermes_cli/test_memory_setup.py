@@ -82,6 +82,7 @@ def test_cmd_setup_builtin_selection_still_saves_builtin(monkeypatch):
     providers = [("fake", "local", object())]
 
     monkeypatch.setattr(memory_setup, "_get_available_providers", lambda: providers)
+    monkeypatch.setattr(memory_setup, "_get_installable_providers", lambda providers: [])
     monkeypatch.setattr(memory_setup, "_curses_select", lambda *args, **kwargs: len(providers))
     monkeypatch.setattr("hermes_cli.config.load_config", lambda: config)
     monkeypatch.setattr("hermes_cli.config.save_config", save_config)
@@ -90,6 +91,66 @@ def test_cmd_setup_builtin_selection_still_saves_builtin(monkeypatch):
 
     assert config["memory"]["provider"] == ""
     save_config.assert_called_once_with(config)
+
+
+def test_get_installable_providers_filters_catalog_entries_already_installed():
+    installed = [("openbrain", "API key / local", object())]
+
+    assert memory_setup._get_installable_providers(installed) == []
+
+
+def test_cmd_setup_lists_catalogued_provider_when_not_installed(monkeypatch):
+    captured = {}
+    save_config = MagicMock()
+
+    monkeypatch.setattr(memory_setup, "_get_available_providers", lambda: [])
+
+    def select_cancel(title, items, **kwargs):
+        captured["items"] = items
+        return kwargs["cancel_returns"]
+
+    monkeypatch.setattr(memory_setup, "_curses_select", select_cancel)
+    monkeypatch.setattr("hermes_cli.config.load_config", MagicMock())
+    monkeypatch.setattr("hermes_cli.config.save_config", save_config)
+
+    memory_setup.cmd_setup(SimpleNamespace())
+
+    assert captured["items"][0][0] == "openbrain"
+    assert "install standalone plugin" in captured["items"][0][1]
+    save_config.assert_not_called()
+
+
+def test_cmd_setup_installs_catalogued_provider_then_runs_post_setup(monkeypatch):
+    events = []
+
+    class PostSetupProvider:
+        def post_setup(self, hermes_home, config):
+            events.append(("post_setup", hermes_home, config))
+
+    provider = PostSetupProvider()
+    calls = iter([[], [("openbrain", "API key / local", provider)]])
+
+    monkeypatch.setattr(memory_setup, "_get_available_providers", lambda: next(calls))
+    monkeypatch.setattr(memory_setup, "_curses_select", lambda *args, **kwargs: 0)
+    monkeypatch.setattr(memory_setup, "_clear_interactive_transition", lambda: events.append("clear"))
+    monkeypatch.setattr(
+        memory_setup,
+        "_install_standalone_provider",
+        lambda entry: events.append(("install", entry["name"])) or "openbrain",
+    )
+    monkeypatch.setattr(memory_setup, "_install_dependencies", lambda name: events.append(("deps", name)))
+    monkeypatch.setattr(memory_setup, "get_hermes_home", lambda: "/tmp/hermes-test")
+    monkeypatch.setattr("hermes_cli.config.load_config", lambda: {"memory": {}})
+
+    memory_setup.cmd_setup(SimpleNamespace())
+
+    assert events == [
+        "clear",
+        ("install", "openbrain"),
+        "clear",
+        ("deps", "openbrain"),
+        ("post_setup", "/tmp/hermes-test", {"memory": {}}),
+    ]
 
 
 def test_cmd_setup_clears_interactive_picker_before_provider_post_setup(monkeypatch):
