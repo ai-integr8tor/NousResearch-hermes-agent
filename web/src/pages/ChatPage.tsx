@@ -25,7 +25,7 @@ import "@xterm/xterm/css/xterm.css";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { Typography } from "@nous-research/ui/ui/components/typography/index";
 import { cn } from "@/lib/utils";
-import { Copy, PanelRight, RotateCcw, X } from "lucide-react";
+import { Copy, Download, PanelRight, RotateCcw, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useSearchParams } from "react-router-dom";
@@ -128,7 +128,9 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       : null,
   );
   const [copyState, setCopyState] = useState<"idle" | "copied">("idle");
+  const [downloadState, setDownloadState] = useState<"idle" | "downloading">("idle");
   const copyResetRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const downloadResetRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectAttemptRef = useRef(0);
   const forceFreshPtyRef = useRef(false);
@@ -364,6 +366,46 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     copyResetRef.current = setTimeout(() => setCopyState("idle"), 1500);
     termRef.current?.focus();
   };
+
+  const handleDownloadTranscript = useCallback(async () => {
+    if (!resumeParam || downloadState === "downloading") return;
+    setDownloadState("downloading");
+    try {
+      const data = await api.getSessionMessages(resumeParam, scopedProfile);
+      const messages: Array<{ role: string; content: unknown }> = data.messages ?? [];
+      const lines: string[] = [];
+      for (const msg of messages) {
+        if (msg.role === "system") continue;
+        const role = msg.role === "user" ? "User" : "Assistant";
+        let text = "";
+        if (typeof msg.content === "string") {
+          text = msg.content;
+        } else if (Array.isArray(msg.content)) {
+          text = msg.content
+            .filter((c: { type?: string }) => c.type === "text")
+            .map((c: { text?: string }) => c.text ?? "")
+            .join("");
+        }
+        if (!text.trim()) continue;
+        lines.push(`--- ${role} ---`);
+        lines.push(text.trim());
+        lines.push("");
+      }
+      const blob = new Blob([lines.join("\n")], { type: "text/plain;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `transcript-${resumeParam}.txt`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      // best-effort
+    } finally {
+      if (downloadResetRef.current) clearTimeout(downloadResetRef.current);
+      downloadResetRef.current = setTimeout(() => setDownloadState("idle"), 1500);
+    }
+    termRef.current?.focus();
+  }, [resumeParam, scopedProfile, downloadState]);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -1096,6 +1138,37 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
               </span>
             </span>
           </Button>
+
+          {/* Transcript download — only shown when resuming an existing session.
+              Fetches the full message history from the backend and saves it as
+              a plain-text file, giving users access to history beyond the
+              xterm.js scrollback buffer without any scrollback size penalty. */}
+          {resumeParam && (
+            <Button
+              ghost
+              onClick={() => void handleDownloadTranscript()}
+              title="Download full transcript as plain text"
+              aria-label="Download transcript"
+              className={cn(
+                "absolute z-10",
+                "normal-case tracking-normal font-normal",
+                "rounded border border-current/30",
+                "bg-black/20",
+                "opacity-70 hover:opacity-100 hover:border-current/60",
+                "transition-opacity duration-150",
+                "bottom-2 right-32 px-2 py-1 text-xs sm:bottom-3 sm:right-36 sm:px-2.5 sm:py-1.5",
+                "lg:bottom-4 lg:right-40",
+              )}
+              style={{ color: terminalFg }}
+            >
+              <span className="inline-flex items-center gap-1.5">
+                <Download className="h-3 w-3 shrink-0" />
+                <span className="hidden min-[400px]:inline tracking-wide">
+                  {downloadState === "downloading" ? "saving…" : "download transcript"}
+                </span>
+              </span>
+            </Button>
+          )}
         </div>
 
         {!narrow && (
