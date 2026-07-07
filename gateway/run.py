@@ -6282,7 +6282,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
     # .clean_shutdown marker).  All three mean "the agent was mid-turn and
     # we killed it" — eligible for startup auto-resume.
     _AUTO_RESUME_REASONS = frozenset(
-        {"restart_timeout", "shutdown_timeout", "restart_interrupted"}
+        {"restart_timeout", "shutdown_timeout", "restart_interrupted",
+         "orphaned_tool_call"}
     )
 
     async def _run_startup_resume_event(
@@ -7175,6 +7176,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Start background session expiry watcher to finalize expired sessions
         asyncio.create_task(self._session_expiry_watcher())
 
+        # Start background session-health watcher — detects wedged sessions
+        # whose last persisted message is an unanswered assistant(tool_calls)
+        # (#58891).  The gateway is still alive but nothing wakes the session;
+        # this probe marks it resume_pending and schedules a synthetic recovery
+        # turn so the user does not have to manually restart the gateway.
+        asyncio.create_task(self._session_health_watcher())
+
         # Start background kanban notifier — delivers `completed`, `blocked`,
         # `spawn_auto_blocked`, and `crashed` events to gateway subscribers
         # so human-in-the-loop workflows hear back without polling.
@@ -7657,6 +7665,176 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 if not self._running:
                     break
                 await asyncio.sleep(1)
+
+    async def _session_health_watcher(self, interval: float = 60.0) -> None:
+        """Background task that detects and recovers wedged sessions (#58891).
+
+        A session is **wedged** when its last persisted message is an
+        ``assistant(tool_calls)`` with no matching ``tool`` result and no
+        subsequent ``user`` message — the tool call was persisted but the
+        result was never written, and the gateway process is still alive (so
+        ``resume_pending`` was never set by the restart watchdog).  The session
+        sits idle indefinitely because nothing triggers a new turn.
+
+        This watcher runs every ``interval`` seconds (default 60s).  For each
+        non-expired, non-suspended, non-``resume_pending`` session that is not
+        currently running an agent, it checks
+        ``SessionDB.has_dangling_tool_call_tail()``.  When a wedged session is
+        found, it is marked ``resume_pending`` with reason
+        ``"orphaned_tool_call"`` and a synthetic recovery turn is scheduled via
+        ``_run_startup_resume_event`` — the same machinery used for
+        restart-interrupted sessions.  The recovery turn rebuilds history
+        (``strip_dangling_tool_call_tail`` removes the orphaned call), the
+        ``_is_resume_pending`` branch injects a recovery note, and the session
+        is back online without manual intervention.
+
+        The watcher is deliberately conservative:
+        - Sessions with an active agent (``_running_agents``) are skipped —
+          the turn may still be in progress.
+        - Sessions already marked ``resume_pending`` or ``suspended`` are
+          skipped — they are handled by the existing restart-recovery or
+          forced-wipe paths.
+        - Sessions whose adapter is unavailable are skipped — they will be
+          picked up when the platform reconnects (the reconnect watcher calls
+          ``_schedule_resume_pending_sessions`` which honours the new reason).
+        - At most one recovery is scheduled per session per watcher cycle;
+          the ``resume_pending`` flag prevents re-detection in the next cycle.
+        """
+        await asyncio.sleep(90)  # initial delay — let startup restore finish
+        while self._running:
+            try:
+                await self._session_health_probe()
+            except Exception as e:
+                logger.debug("Session health watcher error: %s", e)
+            # Sleep in small increments so we can stop quickly.
+            _slept = 0.0
+            while _slept < interval and self._running:
+                await asyncio.sleep(1)
+                _slept += 1
+
+    async def _session_health_probe(self) -> int:
+        """Run one wedge-detection + recovery pass.  Returns the count of
+        sessions scheduled for recovery.
+
+        Separated from ``_session_health_watcher`` so it can be called directly
+        in tests without the 90-second initial delay or the sleep loop.
+        """
+        # Don't schedule recovery turns while the gateway is draining —
+        # they would be immediately interrupted by the shutdown sequence.
+        if getattr(self, "_draining", False):
+            return 0
+        self.session_store._ensure_loaded()  # noqa: SLF001
+        _wedged: list = []
+        for key, entry in list(self.session_store._entries.items()):  # noqa: SLF001
+            # Skip sessions that are already being handled by another
+            # path or are not candidates for health recovery.
+            if entry.suspended or entry.resume_pending:
+                continue
+            if entry.expiry_finalized:
+                continue
+            if key in self._running_agents:
+                continue
+            if entry.origin is None:
+                continue
+            # Skip sessions with a pending blocking approval — the agent
+            # is waiting for a /approve or /deny, not a recovery turn.
+            # A synthetic empty-text turn would spin up the agent only to
+            # block again on the same approval gate.
+            try:
+                from tools.approval import has_blocking_approval
+                if has_blocking_approval(key):
+                    continue
+            except Exception:
+                pass  # approval module unavailable — proceed
+            # DB check — is the last message an unanswered tool_call?
+            # Run off-loop via asyncio.to_thread because SessionDB uses a
+            # threading.Lock and a SQLite query — calling it directly would
+            # block the event loop if another thread holds the DB lock
+            # (e.g. a running agent turn persisting messages).
+            db = getattr(self.session_store, "_db", None)
+            if db is None:
+                continue
+            try:
+                is_wedged = await asyncio.to_thread(
+                    db.has_dangling_tool_call_tail, entry.session_id
+                )
+            except Exception:
+                continue
+            if not is_wedged:
+                continue
+            _wedged.append((key, entry))
+
+        scheduled = 0
+        for key, entry in _wedged:
+            source = entry.origin
+            adapter = self._adapter_for_source(source)
+            if adapter is None:
+                logger.debug(
+                    "Session health: wedged session %s has no adapter "
+                    "(platform %s) — will retry on reconnect",
+                    entry.session_id,
+                    source.platform.value if source and source.platform else "?",
+                )
+                continue
+            # Validate the session owner against the current allowlist before
+            # auto-resuming — mirrors _schedule_resume_pending_sessions (#23778).
+            # A session whose owner has been removed from the allowlist must not
+            # silently receive an agent response from the health watcher.
+            try:
+                if not self._is_user_authorized(source):
+                    logger.debug(
+                        "Session health: skipping wedged session %s — "
+                        "owner no longer authorized",
+                        entry.session_id,
+                    )
+                    continue
+            except Exception as exc:
+                logger.debug(
+                    "Session health: skipping wedged session %s — "
+                    "authorization check failed: %s",
+                    entry.session_id,
+                    exc,
+                )
+                continue
+            # Mark resume_pending so the _is_resume_pending branch in
+            # _handle_message_with_agent injects the recovery note and
+            # strip_dangling_tool_call_tail fires during history rebuild.
+            if not self.session_store.mark_resume_pending(
+                key, reason="orphaned_tool_call"
+            ):
+                continue
+            # Pre-claim the runner slot so a real inbound message
+            # arriving between mark and dispatch queues behind us
+            # instead of spinning a duplicate agent (#45456).
+            self._running_agents[key] = _AGENT_PENDING_SENTINEL
+            self._running_agents_ts[key] = time.time()
+            self._persist_active_agents()
+            event = MessageEvent(
+                text="",
+                message_type=MessageType.TEXT,
+                source=source,
+                internal=True,
+            )
+            try:
+                task = asyncio.create_task(
+                    self._run_startup_resume_event(adapter, event, key)
+                )
+            except RuntimeError:
+                # Event loop closed between probe start and task creation
+                # (gateway shutting down).  Release the sentinel so the
+                # session is not permanently stuck; resume_pending stays
+                # set so the next boot picks it up.
+                self._release_running_agent_state(key)
+                continue
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
+            logger.info(
+                "Session health: detected wedged session %s "
+                "(orphaned tool_call tail) — scheduled recovery turn",
+                entry.session_id,
+            )
+            scheduled += 1
+        return scheduled
 
     def _active_profile_name(self) -> str:
         """Return the profile name this gateway represents."""
@@ -18246,6 +18424,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
             if _is_resume_pending:
                 _reason = getattr(_resume_entry, "resume_reason", None) or "restart_timeout"
+                _is_orphaned_tool_call = _reason == "orphaned_tool_call"
                 _reason_phrase = (
                     "a gateway restart"
                     if _reason == "restart_timeout"
@@ -18268,15 +18447,28 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         "Report to the user that the session was restored "
                         "successfully and ask what they would like to do next."
                     )
-                message = (
-                    f"[System note: The previous turn was interrupted by "
-                    f"{_reason_phrase}; the gateway is now back online. "
-                    f"Any restart/shutdown command in the history has already "
-                    f"run — do NOT re-execute or verify it. {_resume_guidance} "
-                    f"Do NOT re-execute old tool calls — skip any unfinished "
-                    f"work from the conversation history.]"
-                    + (f"\n\n{message}" if message else "")
-                )
+                if _is_orphaned_tool_call:
+                    # The gateway was never down — the session was wedged by a
+                    # tool call that was persisted without its result (#58891).
+                    # Use a note that does not claim a restart happened.
+                    message = (
+                        f"[System note: The previous turn ended with a tool "
+                        f"call that was never completed. The session has been "
+                        f"automatically recovered. {_resume_guidance} "
+                        f"Do NOT re-execute old tool calls — skip any unfinished "
+                        f"work from the conversation history.]"
+                        + (f"\n\n{message}" if message else "")
+                    )
+                else:
+                    message = (
+                        f"[System note: The previous turn was interrupted by "
+                        f"{_reason_phrase}; the gateway is now back online. "
+                        f"Any restart/shutdown command in the history has already "
+                        f"run — do NOT re-execute or verify it. {_resume_guidance} "
+                        f"Do NOT re-execute old tool calls — skip any unfinished "
+                        f"work from the conversation history.]"
+                        + (f"\n\n{message}" if message else "")
+                    )
             elif _has_fresh_tool_tail:
                 _persist_user_message_override = message
                 message = (
@@ -18316,23 +18508,34 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 _sn_reason = (
                     getattr(_resume_entry, "resume_reason", None) or "restart_timeout"
                 )
-                _sn_reason_phrase = (
-                    "a gateway restart"
-                    if _sn_reason == "restart_timeout"
-                    else "a gateway shutdown"
-                    if _sn_reason == "shutdown_timeout"
-                    else "a gateway interruption"
-                )
-                message = (
-                    f"[System note: The previous turn was interrupted by "
-                    f"{_sn_reason_phrase}; the gateway is now back online. "
-                    f"Any restart/shutdown command in the history has already "
-                    f"run — do NOT re-execute or verify it. Report to the user "
-                    f"that the session was restored successfully and ask what "
-                    f"they would like to do next. Do NOT re-execute old tool "
-                    f"calls — skip any unfinished work from the conversation "
-                    f"history.]"
-                )
+                if _sn_reason == "orphaned_tool_call":
+                    message = (
+                        f"[System note: The previous turn ended with a tool "
+                        f"call that was never completed. The session has been "
+                        f"automatically recovered. Report to the user that the "
+                        f"session was restored successfully and ask what they "
+                        f"would like to do next. Do NOT re-execute old tool "
+                        f"calls — skip any unfinished work from the conversation "
+                        f"history.]"
+                    )
+                else:
+                    _sn_reason_phrase = (
+                        "a gateway restart"
+                        if _sn_reason == "restart_timeout"
+                        else "a gateway shutdown"
+                        if _sn_reason == "shutdown_timeout"
+                        else "a gateway interruption"
+                    )
+                    message = (
+                        f"[System note: The previous turn was interrupted by "
+                        f"{_sn_reason_phrase}; the gateway is now back online. "
+                        f"Any restart/shutdown command in the history has already "
+                        f"run — do NOT re-execute or verify it. Report to the user "
+                        f"that the session was restored successfully and ask what "
+                        f"they would like to do next. Do NOT re-execute old tool "
+                        f"calls — skip any unfinished work from the conversation "
+                        f"history.]"
+                    )
 
             _approval_session_key = session_key or ""
             _approval_session_token = set_current_session_key(_approval_session_key)

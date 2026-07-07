@@ -152,6 +152,7 @@ def _simulate_note_injection(
 
     if is_resume_pending:
         reason = getattr(resume_entry, "resume_reason", None) or "restart_timeout"
+        is_orphaned_tool_call = reason == "orphaned_tool_call"
         reason_phrase = (
             "a gateway restart"
             if reason == "restart_timeout"
@@ -169,15 +170,25 @@ def _simulate_note_injection(
                 "Report to the user that the session was restored "
                 "successfully and ask what they would like to do next."
             )
-        message = (
-            f"[System note: The previous turn was interrupted by "
-            f"{reason_phrase}; the gateway is now back online. "
-            f"Any restart/shutdown command in the history has already "
-            f"run — do NOT re-execute or verify it. {resume_guidance} "
-            f"Do NOT re-execute old tool calls — skip any unfinished "
-            f"work from the conversation history.]"
-            + (f"\n\n{message}" if message else "")
-        )
+        if is_orphaned_tool_call:
+            message = (
+                f"[System note: The previous turn ended with a tool "
+                f"call that was never completed. The session has been "
+                f"automatically recovered. {resume_guidance} "
+                f"Do NOT re-execute old tool calls — skip any unfinished "
+                f"work from the conversation history.]"
+                + (f"\n\n{message}" if message else "")
+            )
+        else:
+            message = (
+                f"[System note: The previous turn was interrupted by "
+                f"{reason_phrase}; the gateway is now back online. "
+                f"Any restart/shutdown command in the history has already "
+                f"run — do NOT re-execute or verify it. {resume_guidance} "
+                f"Do NOT re-execute old tool calls — skip any unfinished "
+                f"work from the conversation history.]"
+                + (f"\n\n{message}" if message else "")
+            )
     elif has_fresh_tool_tail:
         message = (
             "[System note: A new message has arrived. The conversation "
@@ -196,23 +207,34 @@ def _simulate_note_injection(
         and getattr(resume_entry, "resume_pending", False)
     ):
         sn_reason = getattr(resume_entry, "resume_reason", None) or "restart_timeout"
-        sn_reason_phrase = (
-            "a gateway restart"
-            if sn_reason == "restart_timeout"
-            else "a gateway shutdown"
-            if sn_reason == "shutdown_timeout"
-            else "a gateway interruption"
-        )
-        message = (
-            f"[System note: The previous turn was interrupted by "
-            f"{sn_reason_phrase}; the gateway is now back online. "
-            f"Any restart/shutdown command in the history has already "
-            f"run — do NOT re-execute or verify it. Report to the user "
-            f"that the session was restored successfully and ask what "
-            f"they would like to do next. Do NOT re-execute old tool "
-            f"calls — skip any unfinished work from the conversation "
-            f"history.]"
-        )
+        if sn_reason == "orphaned_tool_call":
+            message = (
+                f"[System note: The previous turn ended with a tool "
+                f"call that was never completed. The session has been "
+                f"automatically recovered. Report to the user that the "
+                f"session was restored successfully and ask what they "
+                f"would like to do next. Do NOT re-execute old tool "
+                f"calls — skip any unfinished work from the conversation "
+                f"history.]"
+            )
+        else:
+            sn_reason_phrase = (
+                "a gateway restart"
+                if sn_reason == "restart_timeout"
+                else "a gateway shutdown"
+                if sn_reason == "shutdown_timeout"
+                else "a gateway interruption"
+            )
+            message = (
+                f"[System note: The previous turn was interrupted by "
+                f"{sn_reason_phrase}; the gateway is now back online. "
+                f"Any restart/shutdown command in the history has already "
+                f"run — do NOT re-execute or verify it. Report to the user "
+                f"that the session was restored successfully and ask what "
+                f"they would like to do next. Do NOT re-execute old tool "
+                f"calls — skip any unfinished work from the conversation "
+                f"history.]"
+            )
     return message
 
 
