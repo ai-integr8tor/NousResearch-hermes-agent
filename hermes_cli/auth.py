@@ -290,6 +290,14 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
         api_key_env_vars=("GMI_API_KEY",),
         base_url_env_var="GMI_BASE_URL",
     ),
+    "routstr": ProviderConfig(
+        id="routstr",
+        name="Routstr",
+        auth_type="api_key",
+        inference_base_url="https://api.routstr.com/v1",
+        api_key_env_vars=("ROUTSTR_API_KEY",),
+        base_url_env_var="ROUTSTR_BASE_URL",
+    ),
     "minimax": ProviderConfig(
         id="minimax",
         name="MiniMax",
@@ -626,6 +634,16 @@ ZAI_ENDPOINTS = [
     ("cn",            "https://open.bigmodel.cn/api/paas/v4", ["glm-5"],   "China"),
     ("coding-global", "https://api.z.ai/api/coding/paas/v4",  ["glm-5.2", "glm-5.1", "glm-5v-turbo", "glm-4.7"], "Global (Coding Plan)"),
     ("coding-cn",     "https://open.bigmodel.cn/api/coding/paas/v4", ["glm-5.2", "glm-5.1", "glm-5v-turbo", "glm-4.7"], "China (Coding Plan)"),
+]
+
+# Routstr endpoint presets — the three public Routstr nodes.
+# Users pick one during setup; the TUI presents them as a numbered list
+# with an optional "Custom endpoint" fallback.
+ROUTSTR_ENDPOINTS = [
+    # (label, url)
+    ("https://api.routstr.com/v1", "Routstr official"),
+    ("https://api.nonkycai.com/v1", "Non-KYC AI"),
+    ("https://privateprovider.xyz/v1", "PrivateProvider"),
 ]
 
 
