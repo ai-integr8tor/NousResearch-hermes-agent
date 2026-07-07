@@ -266,7 +266,8 @@ class TestCronjobToolScript:
             script="monitor.py",
         ))
         assert result["success"] is True
-        assert result["job"]["script"] == "monitor.py"
+        expected = str(cron_env / "scripts" / "monitor.py")
+        assert result["job"]["script"] == expected
 
     def test_update_script(self, cron_env, monkeypatch):
         monkeypatch.setenv("HERMES_INTERACTIVE", "1")
@@ -285,7 +286,8 @@ class TestCronjobToolScript:
             script="new_script.py",
         ))
         assert update_result["success"] is True
-        assert update_result["job"]["script"] == "new_script.py"
+        expected = str(cron_env / "scripts" / "new_script.py")
+        assert update_result["job"]["script"] == expected
 
     def test_clear_script(self, cron_env, monkeypatch):
         monkeypatch.setenv("HERMES_INTERACTIVE", "1")
@@ -321,7 +323,8 @@ class TestCronjobToolScript:
         list_result = json.loads(cronjob(action="list"))
         assert list_result["success"] is True
         assert len(list_result["jobs"]) == 1
-        assert list_result["jobs"][0]["script"] == "data_collector.py"
+        expected = str(cron_env / "scripts" / "data_collector.py")
+        assert list_result["jobs"][0]["script"] == expected
 
 
 class TestScriptPathContainment:
@@ -485,7 +488,8 @@ class TestCronjobToolScriptValidation:
             script="monitor.py",
         ))
         assert result["success"] is True
-        assert result["job"]["script"] == "monitor.py"
+        expected = str(cron_env / "scripts" / "monitor.py")
+        assert result["job"]["script"] == expected
 
     def test_update_with_absolute_script_rejected(self, cron_env, monkeypatch):
         monkeypatch.setenv("HERMES_INTERACTIVE", "1")
