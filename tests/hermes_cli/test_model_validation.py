@@ -278,6 +278,26 @@ class TestFetchApiModels:
         with patch("hermes_cli.models.urllib.request.urlopen", side_effect=Exception("timeout")):
             assert fetch_api_models("key", "https://example.com/v1") is None
 
+    def test_rejects_metadata_url_without_network_call(self):
+        with patch(
+            "hermes_cli.models.urllib.request.urlopen",
+            side_effect=AssertionError("metadata endpoints must not be probed"),
+        ):
+            probe = probe_api_models("key", "http://169.254.169.254/latest")
+
+        assert probe["models"] is None
+        assert probe["probed_url"] is None
+
+    def test_rejects_non_http_scheme_without_network_call(self):
+        with patch(
+            "hermes_cli.models.urllib.request.urlopen",
+            side_effect=AssertionError("non-http endpoints must not be probed"),
+        ):
+            probe = probe_api_models("key", "file:///etc/passwd")
+
+        assert probe["models"] is None
+        assert probe["probed_url"] is None
+
     def test_probe_api_models_tries_v1_fallback(self):
         class _Resp:
             def __enter__(self):
