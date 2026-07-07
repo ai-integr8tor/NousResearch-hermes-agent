@@ -6665,12 +6665,35 @@ def _get_origin_url(git_cmd: list[str], cwd: Path) -> Optional[str]:
     return None
 
 
+def _strip_url_credentials(url: str) -> str:
+    """Remove embedded credentials from an HTTPS URL.
+
+    Git credentials can be embedded in clone URLs as ``https://<token>@host/...``
+    or ``https://<user>:<password>@host/...``. Strip the credentials portion
+    so the resulting URL is comparable to canonical public repo URLs.
+
+    SSH URLs (``git@github.com:owner/repo.git``) have no ``://`` scheme and
+    are returned unchanged.
+    """
+    if "://" not in url:
+        return url
+    scheme, rest = url.split("://", 1)
+    if "@" not in rest:
+        return url
+    # Per RFC 3986 the userinfo is everything before the LAST "@" before the
+    # host, so rsplit correctly handles passwords that contain "@".
+    credentials, host_and_path = rest.rsplit("@", 1)
+    return f"{scheme}://{host_and_path}"
+
+
 def _is_fork(origin_url: Optional[str]) -> bool:
     """Check if the origin remote points to a fork (not the official repo)."""
     if not origin_url:
         return False
-    # Normalize URL for comparison (strip trailing .git if present)
-    normalized = origin_url.rstrip("/")
+    # Normalize URL for comparison: strip embedded credentials, trailing
+    # slashes, and ``.git`` suffixes so token-embedded clone URLs compare
+    # equal to the canonical public repo URL. See issue #59584.
+    normalized = _strip_url_credentials(origin_url).rstrip("/")
     if normalized.endswith(".git"):
         normalized = normalized[:-4]
     for official in OFFICIAL_REPO_URLS:
