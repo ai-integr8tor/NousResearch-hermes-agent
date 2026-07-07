@@ -855,6 +855,14 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                     function_result,
                     failed=is_error,
                 )
+                # Lightweight pattern detection for successful repeated
+                # tool calls (the guardrail only catches failures).
+                if not is_error:
+                    warning = agent._pattern_detector.record(
+                        function_name, function_args,
+                    )
+                    if warning and agent._should_emit_quiet_tool_messages():
+                        agent._vprint(f"  ⚠ {warning}")
 
             if is_error:
                 _err_text = _multimodal_text_summary(function_result)
@@ -1477,6 +1485,18 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                 function_result = f"Error executing tool '{function_name}': {tool_error}"
                 logger.error("handle_function_call raised for %s: %s", function_name, tool_error, exc_info=True)
             tool_duration = time.time() - tool_start_time
+            # Mirror successful built-in skill_manage writes to external
+            # providers. All gating lives behind the manager interface
+            # (MemoryManager.notify_skill_tool_write).
+            if function_name == "skill_manage" and agent._memory_manager:
+                agent._memory_manager.notify_skill_tool_write(
+                    function_result,
+                    function_args,
+                    build_metadata=lambda: agent._build_memory_write_metadata(
+                        task_id=effective_task_id,
+                        tool_call_id=getattr(tool_call, "id", None),
+                    ),
+                )
 
         if isinstance(function_result, str):
             result_preview = function_result if agent.verbose_logging else (
@@ -1520,6 +1540,14 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                 function_result,
                 failed=_is_error_result,
             )
+            # Lightweight pattern detection for successful repeated
+            # tool calls (the guardrail only catches failures).
+            if not _is_error_result:
+                warning = agent._pattern_detector.record(
+                    function_name, function_args,
+                )
+                if warning and agent._should_emit_quiet_tool_messages():
+                    agent._vprint(f"  ⚠ {warning}")
             result_preview = function_result if agent.verbose_logging else (
                 function_result[:200] if len(function_result) > 200 else function_result
             )

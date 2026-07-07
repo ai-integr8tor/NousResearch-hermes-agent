@@ -42,6 +42,7 @@ from agent.model_metadata import (
 from agent.process_bootstrap import _install_safe_stdio
 from agent.subdirectory_hints import SubdirectoryHintTracker
 from agent.think_scrubber import StreamingThinkScrubber
+from agent.pattern_detector import ToolPatternDetector
 from agent.tool_guardrails import (
     ToolCallGuardrailConfig,
     ToolCallGuardrailController,
@@ -543,6 +544,7 @@ def init_agent(
     agent._executing_tools = False
     agent._tool_guardrails = ToolCallGuardrailController()
     agent._tool_guardrail_halt_decision: ToolGuardrailDecision | None = None
+    agent._pattern_detector = ToolPatternDetector()  # per-turn tool-call loop detection
 
     # Interrupt mechanism for breaking out of tool loops
     agent._interrupt_requested = False
