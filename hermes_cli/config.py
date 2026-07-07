@@ -3196,26 +3196,8 @@ DEFAULT_CONFIG = {
     },
 
 
-    # Google Vertex AI provider (Gemini via the OpenAI-compatible endpoint).
-    # Auth is OAuth2 (short-lived access tokens minted from a service-account
-    # JSON or Application Default Credentials) — NOT a static API key. The
-    # credential *path* is a secret-adjacent pointer and lives in .env
-    # (VERTEX_CREDENTIALS_PATH / GOOGLE_APPLICATION_CREDENTIALS); these two
-    # settings are non-secret routing config and live here. Both are bridged to
-    # the VERTEX_PROJECT_ID / VERTEX_REGION env vars the adapter reads, so an
-    # explicit env var still wins over config.yaml.
-    "vertex": {
-        # GCP project ID. Empty → use the project_id embedded in the service
-        # account JSON (or ADC-resolved project).
-        "project_id": "",
-        # Vertex region. "global" is required for the Gemini 3.x preview models
-        # (regional endpoints silently 404 them). Override to a regional value
-        # (e.g. "us-central1") only if your models are pinned to a region.
-        "region": "global",
-    },
-
     # Config schema version - bump this when adding new required fields
-    "_config_version": 33,
+    "_config_version": 27,
 }
 
 # =============================================================================
@@ -5916,41 +5898,6 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
                     "the old default was written into your config as a literal "
                     "true. Set it to true again to re-enable, or \"auto\" for the "
                     "legacy surface-aware behavior."
-                )
-
-    # ── Version 32 → 33: unify delegation concurrency caps ──
-    # delegation.max_async_children is deprecated: max_concurrent_children now
-    # caps both a single batch's parallelism and concurrent background
-    # delegation units. Fold a raised max_async_children into
-    # max_concurrent_children (take the max so nobody loses headroom), then
-    # drop the stale key.
-    if current_ver < 33:
-        config = read_raw_config()
-        raw_deleg = config.get("delegation")
-        if isinstance(raw_deleg, dict) and "max_async_children" in raw_deleg:
-            old_async = raw_deleg.pop("max_async_children")
-            try:
-                old_async_i = int(old_async)
-            except (TypeError, ValueError):
-                old_async_i = None
-            if old_async_i is not None and old_async_i > 3:
-                try:
-                    cur_children = int(raw_deleg.get("max_concurrent_children", 3))
-                except (TypeError, ValueError):
-                    cur_children = 3
-                if old_async_i > cur_children:
-                    raw_deleg["max_concurrent_children"] = old_async_i
-                    results["config_added"].append(
-                        f"delegation.max_concurrent_children={old_async_i} "
-                        f"(folded from deprecated max_async_children)"
-                    )
-            config["delegation"] = raw_deleg
-            _persist_migration(config)
-            if not quiet:
-                print(
-                    "  ✓ Removed deprecated delegation.max_async_children — "
-                    "delegation.max_concurrent_children now caps background "
-                    "delegations too."
                 )
 
     # ── Post-migration: disable exfiltration-shaped MCP stdio entries ──

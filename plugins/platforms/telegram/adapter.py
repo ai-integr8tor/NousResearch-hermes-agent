@@ -674,6 +674,27 @@ class TelegramAdapter(BasePlatformAdapter):
         """
         return bool(getattr(self, "_drop_delayed_deliveries", False))
 
+    def _mark_connected(self) -> None:
+        self._drop_delayed_deliveries = False
+        super()._mark_connected()
+
+    def _mark_disconnected(self) -> None:
+        self._drop_delayed_deliveries = True
+        super()._mark_disconnected()
+
+    def _set_fatal_error(self, code: str, message: str, *, retryable: bool) -> None:
+        self._drop_delayed_deliveries = True
+        super()._set_fatal_error(code, message, retryable=retryable)
+
+    def _should_drop_delayed_delivery(self) -> bool:
+        """True once teardown/fatal-error started — delayed flushes must drop.
+
+        Buffered text/photo/media-group flushes sit behind an asyncio.sleep().
+        If disconnect wins the race, dispatching them spawns an agent on a
+        torn-down session, producing stale/duplicate deliveries.
+        """
+        return bool(getattr(self, "_drop_delayed_deliveries", False))
+
     def _notification_kwargs(
         self, metadata: Optional[Dict[str, Any]]
     ) -> Dict[str, Any]:
@@ -1879,91 +1900,6 @@ class TelegramAdapter(BasePlatformAdapter):
                     self.name, exc_info=True,
                 )
 
-    def _schedule_polling_recovery(self, error: Exception, *, reason: str) -> None:
-        """Schedule polling recovery without failing gateway startup.
-
-        A Telegram bootstrap failure (deleteWebhook / initial start_polling)
-        caused by a transient network error should degrade only the Telegram
-        adapter: the gateway process stays alive and the existing reconnect
-        ladder (``_handle_polling_network_error``) recovers in the background.
-        """
-        if self.has_fatal_error:
-            return
-        if self._polling_error_task and not self._polling_error_task.done():
-            logger.debug(
-                "[%s] Telegram polling recovery already scheduled; ignoring %s: %s",
-                self.name, reason, error,
-            )
-            return
-        self._send_path_degraded = True
-        logger.warning(
-            "[%s] Telegram polling degraded (%s); gateway stays alive and will retry. Error: %s",
-            self.name, reason, error,
-        )
-        loop = asyncio.get_running_loop()
-        self._polling_error_task = loop.create_task(self._handle_polling_network_error(error))
-        self._background_tasks.add(self._polling_error_task)
-        self._polling_error_task.add_done_callback(self._background_tasks.discard)
-
-    async def _delete_webhook_best_effort(self) -> bool:
-        """Clear any stale webhook, but never fail polling on a network error.
-
-        Returns True when the webhook was cleared (or there was nothing to do)
-        and False when a transient network error was swallowed so bootstrap can
-        continue to polling; the reconnect ladder recovers from there.
-        """
-        if not self._bot:
-            return False
-        delete_webhook = getattr(self._bot, "delete_webhook", None)
-        if not callable(delete_webhook):
-            return True
-        try:
-            await delete_webhook(drop_pending_updates=False)
-            return True
-        except Exception as err:
-            if self._looks_like_network_error(err):
-                logger.warning(
-                    "[%s] deleteWebhook failed with a recoverable network error; "
-                    "continuing to polling so getUpdates/retry can recover: %s",
-                    self.name, err,
-                )
-                self._send_path_degraded = True
-                return False
-            raise
-
-    async def _start_polling_resilient(self, *, drop_pending_updates: bool, error_callback) -> bool:
-        """Start PTB polling; on a transient bootstrap failure, recover in background.
-
-        Returns True when polling started, False when a transient conflict or
-        network error was scheduled for background recovery instead of raising
-        (keeping the gateway process alive).
-        """
-        if not (self._app and self._app.updater):
-            raise RuntimeError("Telegram application/updater not initialized")
-        try:
-            await self._app.updater.start_polling(
-                allowed_updates=Update.ALL_TYPES,
-                drop_pending_updates=drop_pending_updates,
-                error_callback=error_callback,
-            )
-            return True
-        except Exception as err:
-            if self._looks_like_polling_conflict(err):
-                logger.warning(
-                    "[%s] Telegram polling bootstrap conflict; gateway stays alive "
-                    "while conflict retry runs: %s",
-                    self.name, err,
-                )
-                loop = asyncio.get_running_loop()
-                self._polling_error_task = loop.create_task(self._handle_polling_conflict(err))
-                self._background_tasks.add(self._polling_error_task)
-                self._polling_error_task.add_done_callback(self._background_tasks.discard)
-                return False
-            if self._looks_like_network_error(err):
-                self._schedule_polling_recovery(err, reason="polling bootstrap")
-                return False
-            raise
-
     async def _handle_polling_network_error(self, error: Exception) -> None:
         """Reconnect polling after a transient network interruption.
 
@@ -2013,25 +1949,7 @@ class TelegramAdapter(BasePlatformAdapter):
 
         try:
             if app and app.updater and app.updater.running:
-                try:
-                    # Guard stop() with a timeout: when the underlying TCP
-                    # connection is in CLOSE-WAIT the PTB polling task is
-                    # blocked on epoll on the dead socket and never wakes up,
-                    # so an unguarded stop() hangs indefinitely.  The result
-                    # is that _polling_error_task stays alive-but-blocked
-                    # forever, every subsequent heartbeat probe sees it as
-                    # "in-flight" and skips triggering a new reconnect, and
-                    # the gateway silently drops messages for hours.
-                    # Bounding stop() lets the reconnect ladder always advance.
-                    # Refs: NousResearch/hermes-agent#58270
-                    await asyncio.wait_for(app.updater.stop(), timeout=_UPDATER_STOP_TIMEOUT)
-                except asyncio.TimeoutError:
-                    logger.warning(
-                        "[%s] updater.stop() timed out during network-error "
-                        "reconnect (likely CLOSE-WAIT socket); forcing drain "
-                        "and restart without clean stop",
-                        self.name,
-                    )
+                await app.updater.stop()
         except Exception:
             pass
 
@@ -3385,16 +3303,6 @@ class TelegramAdapter(BasePlatformAdapter):
         # that wins the race against teardown and prevents new delayed tasks
         # from being scheduled by late update handlers.
         self._mark_disconnected()
-
-        # Cancel deferred post-connect housekeeping (command-menu / DM-topic /
-        # status-indicator Bot API calls) so it cannot fire into a half-torn-down
-        # bot client (#46298). getattr guards the object.__new__ test pattern
-        # where __init__ (which sets this attr) is never called.
-        post_connect_task = getattr(self, "_post_connect_task", None)
-        if post_connect_task and not post_connect_task.done():
-            post_connect_task.cancel()
-            await asyncio.gather(post_connect_task, return_exceptions=True)
-        self._post_connect_task = None
 
         # Cancel the heartbeat before tearing down the app so the probe task
         # cannot fire get_me() into a half-shutdown bot client.

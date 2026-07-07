@@ -6,7 +6,6 @@ import { formatRefValue } from '@/components/assistant-ui/directive-text'
 import { useI18n } from '@/i18n'
 import { attachmentId, contextPath, pathLabel } from '@/lib/chat-runtime'
 import { readDesktopFileDataUrl, selectDesktopPaths } from '@/lib/desktop-fs'
-import { normalize } from '@/lib/text'
 import {
   addComposerAttachment,
   type ComposerAttachment,
@@ -391,7 +390,7 @@ export function useComposerActions({ activeSessionId, currentCwd, requestGateway
       attachToMain(baseAttachment)
 
       try {
-        const previewUrl = await attachmentPreviewDataUrl(filePath)
+        const previewUrl = await readDesktopFileDataUrl(filePath)
 
         if (previewUrl) {
           addComposerAttachment({ ...baseAttachment, previewUrl })

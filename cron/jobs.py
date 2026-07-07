@@ -1172,17 +1172,8 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
                 else:
                     updates["workdir"] = _normalize_workdir(_wd)
 
-            previous_inference_axes = _normalized_inference_axes(job)
-            updated = _apply_skill_fields({**job, **updates})
-            schedule_changed = "schedule" in updates
-            inference_fields_changed = bool(
-                {"provider", "model", "base_url", "no_agent"}.intersection(updates)
-            ) and _normalized_inference_axes(updated) != previous_inference_axes
-
-            if "skills" in updates or "skill" in updates:
-                normalized_skills = _normalize_skill_list(updated.get("skill"), updated.get("skills"))
-                updated["skills"] = normalized_skills
-                updated["skill"] = normalized_skills[0] if normalized_skills else None
+        updated = _apply_skill_fields({**job, **updates})
+        schedule_changed = "schedule" in updates
 
             if schedule_changed:
                 updated_schedule = updated["schedule"]

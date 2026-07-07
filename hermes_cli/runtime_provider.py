@@ -2028,10 +2028,9 @@ def resolve_runtime_provider(
                 detected = _detect_api_mode_for_url(base_url)
                 if detected:
                     api_mode = detected
-        # Normalize the /v1 suffix for OpenCode by API mode (see comment above).
-        if provider in {"opencode-zen", "opencode-go"}:
-            from hermes_cli.models import normalize_opencode_base_url
-            base_url = normalize_opencode_base_url(provider, api_mode, base_url)
+        # Strip trailing /v1 for OpenCode Anthropic models (see comment above).
+        if api_mode == "anthropic_messages" and provider in {"opencode-zen", "opencode-go"}:
+            base_url = re.sub(r"/v1/?$", "", base_url)
         if provider == "lmstudio":
             base_url = auth_mod._normalize_lmstudio_runtime_base_url(base_url)
         return {

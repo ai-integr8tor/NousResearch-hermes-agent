@@ -574,69 +574,6 @@ else:
     cors_middleware = None  # type: ignore[assignment]
 
 
-_MEDIA_IMG_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
-_MEDIA_MIME = {
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".gif": "image/gif",
-    ".webp": "image/webp",
-    ".bmp": "image/bmp",
-}
-_MEDIA_DATA_URL_MAX_BYTES = 5 * 1024 * 1024  # skip images larger than 5MB
-
-
-def _resolve_media_to_data_urls(text: str) -> str:
-    """Replace ``MEDIA:<path>`` image tags with inline base64 data URLs.
-
-    Remote OpenAI-compatible frontends can't read local file paths, so
-    ``MEDIA:`` tags referencing images on the server are useless to them.
-    Inline small local images as markdown data URLs; non-image or unreadable
-    paths are left untouched.
-
-    Uses the same anchored ``MEDIA_TAG_CLEANUP_RE`` matcher and
-    ``validate_media_delivery_path`` safety check every other platform
-    adapter's media delivery already goes through (gateway/platforms/base.py)
-    — an absolute-path anchor plus a known-extension requirement, and a
-    resolved-path check against the credential/system-path denylist. The
-    prior pattern here matched any bare token after ``MEDIA:`` (including a
-    relative/traversal path like ``../../etc/passwd.png``) and read the file
-    directly with no denylist, so any image-suffixed, readable file the
-    process could see was base64-exfiltrated to the API caller if its path
-    merely appeared in the model's own final reply text.
-    """
-    if not text or "MEDIA:" not in text:
-        return text
-    import base64
-
-    def _to_data_url(path_str: str) -> Optional[str]:
-        # validate_media_delivery_path() strips wrapping quotes/backticks
-        # and trailing punctuation internally, same as MEDIA_TAG_CLEANUP_RE's
-        # other callers (extract_media / _strip_media_tag_directives) rely on.
-        safe_path = validate_media_delivery_path(path_str)
-        if not safe_path:
-            return None
-        p = Path(safe_path)
-        suffix = p.suffix.lower()
-        if suffix not in _MEDIA_IMG_EXT:
-            return None
-        try:
-            if p.stat().st_size > _MEDIA_DATA_URL_MAX_BYTES:
-                return None
-            b64 = base64.b64encode(p.read_bytes()).decode()
-        except OSError:
-            return None
-        return f"![image](data:{_MEDIA_MIME[suffix]};base64,{b64})"
-
-    def _repl(m: "re.Match[str]") -> str:
-        return _to_data_url(m.group("path")) or m.group(0)
-
-    try:
-        return MEDIA_TAG_CLEANUP_RE.sub(_repl, text)
-    except Exception:
-        return text
-
-
 def _redact_api_error_text(value: Any, *, limit: int | None = None) -> str:
     """Redact API-bound error text before it crosses the HTTP boundary."""
     redacted = redact_sensitive_text(str(value), force=True)
@@ -1287,51 +1224,6 @@ class APIServerAdapter(BasePlatformAdapter):
         runtime_model = runtime_kwargs.pop("model", None)
         if runtime_model:
             model = runtime_model
-
-        # Per-client model routing (model_routes config).  The route was
-        # resolved from the request's ``model`` field by the HTTP handler.
-        # Precedence (highest first): session ``/model`` override → model_routes
-        # route → global config — an explicit user-issued ``/model`` on the
-        # session always beats static per-client route config.
-        session_override = self._session_model_override_for(
-            gateway_session_key or session_id
-        )
-        if route and not session_override:
-            if route.get("provider"):
-                # Resolve real credentials for the routed provider (mirrors
-                # the channel_overrides path in gateway/run.py) so a route
-                # without an explicit api_key/base_url still gets the right
-                # provider auth instead of the default provider's key.
-                try:
-                    from gateway.run import _resolve_runtime_agent_kwargs_for_provider
-                    provider_kwargs = _resolve_runtime_agent_kwargs_for_provider(
-                        route["provider"]
-                    )
-                    provider_kwargs.pop("model", None)
-                    runtime_kwargs.update(provider_kwargs)
-                except Exception:
-                    # Fall back to just switching the provider name; explicit
-                    # per-route api_key/base_url below can still complete auth.
-                    runtime_kwargs["provider"] = route["provider"]
-            if route.get("model"):
-                model = route["model"]
-            # Per-route secrets are upstream provider credentials. Never log
-            # them (compare _check_auth: caller auth stays the global bearer
-            # key checked with hmac.compare_digest).
-            if route.get("api_key"):
-                runtime_kwargs["api_key"] = route["api_key"]
-            if route.get("base_url"):
-                runtime_kwargs["base_url"] = route["base_url"]
-            logger.debug(
-                "api_server model route applied: model=%s provider=%s",
-                model,
-                runtime_kwargs.get("provider"),
-            )
-        elif route and session_override:
-            logger.debug(
-                "api_server model route skipped: session /model override wins for %s",
-                gateway_session_key or session_id,
-            )
 
         user_config = _load_gateway_config()
         enabled_toolsets = sorted(_get_platform_tools(user_config, "api_server"))

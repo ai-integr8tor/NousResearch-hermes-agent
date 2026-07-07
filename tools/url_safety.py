@@ -29,7 +29,7 @@ import os
 import socket
 import asyncio
 from typing import Any, Optional
-from urllib.parse import parse_qsl, quote, unquote, urljoin, urlparse, urlsplit, urlunsplit
+from urllib.parse import quote, urljoin, urlparse, urlsplit, urlunsplit
 
 from utils import is_truthy_value
 

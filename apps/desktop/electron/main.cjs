@@ -470,58 +470,6 @@ function writePersistedThemeSource(mode) {
 
 nativeTheme.themeSource = readPersistedThemeSource()
 
-// Window translucency (see-through window). One lever, 0–100; 0 = off (the
-// default). Mapped to the native window opacity so the desktop shows through
-// the whole window. Persisted so a cold launch applies it at window creation,
-// before the renderer reports its value. macOS + Windows only; `setOpacity` is
-// a no-op on Linux. See store/translucency.
-const TRANSLUCENCY_CONFIG_PATH = path.join(app.getPath('userData'), 'translucency.json')
-
-function clampIntensity(value) {
-  const n = Math.round(Number(value))
-
-  return Number.isFinite(n) ? Math.min(100, Math.max(0, n)) : 0
-}
-
-function readPersistedTranslucency() {
-  try {
-    return clampIntensity(JSON.parse(fs.readFileSync(TRANSLUCENCY_CONFIG_PATH, 'utf8')).intensity)
-  } catch {
-    return 0
-  }
-}
-
-function writePersistedTranslucency(intensity) {
-  try {
-    fs.mkdirSync(path.dirname(TRANSLUCENCY_CONFIG_PATH), { recursive: true })
-    fs.writeFileSync(TRANSLUCENCY_CONFIG_PATH, JSON.stringify({ intensity }, null, 2), 'utf8')
-  } catch (error) {
-    rememberLog(`[translucency] write failed: ${error.message}`)
-  }
-}
-
-let translucencyIntensity = readPersistedTranslucency()
-
-// Map the 0–100 lever to a window opacity. Floor at 0.3 so the most see-through
-// setting is still usable rather than nearly invisible. 0 → fully opaque.
-function windowOpacity() {
-  return 1 - (translucencyIntensity / 100) * 0.7
-}
-
-// Re-apply translucency to a live window (runtime toggle, no recreation).
-// `setOpacity` is a no-op on Linux, which is fine — it just stays opaque there.
-function applyWindowTranslucency(win) {
-  if (!win || win.isDestroyed() || typeof win.setOpacity !== 'function') {
-    return
-  }
-
-  try {
-    win.setOpacity(windowOpacity())
-  } catch (error) {
-    rememberLog(`[translucency] apply failed: ${error.message}`)
-  }
-}
-
 function isHexColor(value) {
   return typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value)
 }
@@ -1397,7 +1345,10 @@ function backendSupportsServe(backend) {
   let supported = null
   if (backend.root) {
     try {
-      const src = fs.readFileSync(path.join(backend.root, 'hermes_cli', 'subcommands', 'dashboard.py'), 'utf8')
+      const src = fs.readFileSync(
+        path.join(backend.root, 'hermes_cli', 'subcommands', 'dashboard.py'),
+        'utf8'
+      )
       supported = sourceDeclaresServe(src)
     } catch {
       supported = null // source unreadable — fall through to the probe
@@ -2365,7 +2316,9 @@ async function handOffWindowsBootstrapRecovery(reason) {
   // --repair (full venv recreate) and drove reinstall loops. The venv interpreter
   // and the bootstrap-complete marker are present earlier and are better signals.
   const haveRealInstall =
-    fileExists(venvPython) || fileExists(venvHermes) || fileExists(path.join(updateRoot, '.hermes-bootstrap-complete'))
+    fileExists(venvPython) ||
+    fileExists(venvHermes) ||
+    fileExists(path.join(updateRoot, '.hermes-bootstrap-complete'))
   const updaterArgs = haveRealInstall ? ['--update', '--branch', branch] : ['--repair', '--branch', branch]
 
   await releaseBackendLockForUpdate(updateRoot)
@@ -6734,23 +6687,6 @@ ipcMain.on('hermes:native-theme', (_event, mode) => {
   if (nativeTheme.themeSource !== mode) {
     nativeTheme.themeSource = mode
     writePersistedThemeSource(mode)
-  }
-})
-
-// See-through window translucency. Persist + re-apply opacity to every open
-// window at runtime (no recreation, so caching/sessions are untouched).
-ipcMain.on('hermes:translucency', (_event, payload) => {
-  const next = clampIntensity(payload && payload.intensity)
-
-  if (next === translucencyIntensity) {
-    return
-  }
-
-  translucencyIntensity = next
-  writePersistedTranslucency(next)
-
-  for (const win of BrowserWindow.getAllWindows()) {
-    applyWindowTranslucency(win)
   }
 })
 

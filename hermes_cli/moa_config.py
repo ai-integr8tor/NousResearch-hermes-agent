@@ -21,20 +21,13 @@ DEFAULT_MOA_AGGREGATOR: dict[str, str] = {
 }
 
 
-def _coerce_float_or_none(value: Any) -> float | None:
-    """Coerce to a float, or None when unset/blank/invalid.
-
-    Used for optional sampling params (reference_temperature /
-    aggregator_temperature) where None means 'don't send the parameter —
-    provider default applies', matching how a single-model Hermes agent
-    never sends temperature unless explicitly configured.
-    """
+def _coerce_float(value: Any, default: float) -> float:
     if value is None or value == "":
-        return None
+        return default
     try:
         return float(value)
     except (TypeError, ValueError):
-        return None
+        return default
 
 
 def _coerce_int(value: Any, default: int) -> int:
@@ -47,30 +40,6 @@ def _coerce_int(value: Any, default: int) -> int:
             return int(float(value))
         except (TypeError, ValueError):
             return default
-
-
-def _coerce_int_or_none(value: Any) -> int | None:
-    """Coerce to a positive int, or None when unset/blank/invalid/non-positive.
-
-    Used for optional caps (e.g. reference_max_tokens) where None means
-    'no cap' — the safe default that preserves prior uncapped behavior.
-    """
-    if value is None or value == "":
-        return None
-    try:
-        n = int(value)
-    except (TypeError, ValueError):
-        try:
-            n = int(float(value))
-        except (TypeError, ValueError):
-            return None
-    return n if n > 0 else None
-
-
-def _coerce_fanout(value: Any) -> str:
-    """Normalize the fan-out cadence; unknown values fall back to default."""
-    mode = str(value or "").strip().lower()
-    return mode if mode in {"per_iteration", "user_turn"} else "per_iteration"
 
 
 def _clean_slot(slot: Any) -> dict[str, str] | None:
@@ -126,25 +95,9 @@ def _normalize_preset(raw: Any) -> dict[str, Any]:
         "enabled": bool(raw.get("enabled", True)),
         "reference_models": refs,
         "aggregator": aggregator,
-        "reference_temperature": _coerce_float_or_none(raw.get("reference_temperature")),
-        "aggregator_temperature": _coerce_float_or_none(raw.get("aggregator_temperature")),
+        "reference_temperature": _coerce_float(raw.get("reference_temperature"), 0.6),
+        "aggregator_temperature": _coerce_float(raw.get("aggregator_temperature"), 0.4),
         "max_tokens": _coerce_int(raw.get("max_tokens"), 4096),
-        # Optional cap on how much each reference ADVISOR may generate per turn.
-        # None (default) = uncapped: advisors write full-length advice, matching
-        # prior behavior so existing presets are unchanged. Set a value (e.g.
-        # 600) to make advisors give concise advice — the dominant MoA latency
-        # is advisor generation (turn latency correlates ~0.88 with output
-        # tokens), and the aggregator only needs the gist of each advisor's
-        # judgement, so capping roughly halves per-turn wall time. Does NOT cap
-        # the acting aggregator (its output is the user-visible answer).
-        "reference_max_tokens": _coerce_int_or_none(raw.get("reference_max_tokens")),
-        # When the reference fan-out runs. "per_iteration" (default) re-runs
-        # the advisors whenever the advisory view changes — i.e. every tool
-        # iteration, so advice tracks live task state. "user_turn" runs the
-        # advisors ONCE per user turn (the original MoA shape): the
-        # aggregator gets their upfront plan-level advice, then acts alone
-        # for the rest of the tool loop.
-        "fanout": _coerce_fanout(raw.get("fanout")),
     }
 
 

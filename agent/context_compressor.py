@@ -726,7 +726,6 @@ class ContextCompressor(ContextEngine):
         self._ineffective_compression_count = 0
         self._summary_failure_cooldown_until = 0.0  # transient errors must not block a fresh session
         self._last_summary_error = None
-        self._last_compress_aborted = False
         self.last_real_prompt_tokens = 0
         self.last_compression_rough_tokens = 0
         self.last_rough_tokens_when_real_prompt_fit = 0
@@ -767,6 +766,104 @@ class ContextCompressor(ContextEngine):
         self.last_compression_rough_tokens = 0
         self.last_rough_tokens_when_real_prompt_fit = 0
         self.awaiting_real_usage_after_compression = False
+
+    def bind_session_state(self, session_db: Any = None, session_id: str = "") -> None:
+        """Bind the current session row so durable cooldowns can round-trip."""
+        self._session_db = session_db
+        self._session_id = session_id or ""
+        self._summary_failure_cooldown_until = 0.0
+        self._last_summary_error = None
+        self.get_active_compression_failure_cooldown()
+
+    def on_session_start(self, session_id: str, **kwargs) -> None:
+        """Bind session-scoped compression state for a new or resumed session."""
+        super().on_session_start(session_id, **kwargs)
+        self.bind_session_state(kwargs.get("session_db", getattr(self, "_session_db", None)), session_id)
+
+    def get_active_compression_failure_cooldown(self) -> Optional[Dict[str, Any]]:
+        """Return the live compression-failure cooldown for the bound session."""
+        now_mono = time.monotonic()
+        if self._summary_failure_cooldown_until > now_mono:
+            return {
+                "cooldown_until": time.time() + (
+                    self._summary_failure_cooldown_until - now_mono
+                ),
+                "remaining_seconds": self._summary_failure_cooldown_until - now_mono,
+                "error": self._last_summary_error,
+            }
+
+        session_db = getattr(self, "_session_db", None)
+        session_id = getattr(self, "_session_id", "")
+        if not session_db or not session_id:
+            return None
+
+        getter = getattr(session_db, "get_compression_failure_cooldown", None)
+        if getter is None:
+            return None
+        try:
+            state = getter(session_id)
+        except sqlite3.Error as exc:
+            logger.debug("compression failure cooldown lookup failed: %s", exc)
+            return None
+        except Exception:
+            return None
+        if not state:
+            return None
+
+        remaining_seconds = float(state.get("remaining_seconds") or 0.0)
+        if remaining_seconds <= 0:
+            return None
+
+        self._summary_failure_cooldown_until = now_mono + remaining_seconds
+        self._last_summary_error = state.get("error")
+        return {
+            "cooldown_until": float(state.get("cooldown_until") or 0.0),
+            "remaining_seconds": remaining_seconds,
+            "error": self._last_summary_error,
+        }
+
+    def _record_compression_failure_cooldown(
+        self,
+        cooldown_seconds: float,
+        error: Optional[str],
+    ) -> None:
+        cooldown_until = time.time() + cooldown_seconds
+        self._summary_failure_cooldown_until = time.monotonic() + cooldown_seconds
+        self._last_summary_error = error
+
+        session_db = getattr(self, "_session_db", None)
+        session_id = getattr(self, "_session_id", "")
+        if not session_db or not session_id:
+            return
+
+        recorder = getattr(session_db, "record_compression_failure_cooldown", None)
+        if recorder is None:
+            return
+        try:
+            recorder(session_id, cooldown_until, error)
+        except sqlite3.Error as exc:
+            logger.debug("compression failure cooldown persist failed: %s", exc)
+        except Exception as exc:
+            logger.debug("compression failure cooldown persist failed (non-sqlite): %s", exc)
+
+    def _clear_compression_failure_cooldown(self) -> None:
+        self._summary_failure_cooldown_until = 0.0
+        self._last_summary_error = None
+
+        session_db = getattr(self, "_session_db", None)
+        session_id = getattr(self, "_session_id", "")
+        if not session_db or not session_id:
+            return
+
+        clearer = getattr(session_db, "clear_compression_failure_cooldown", None)
+        if clearer is None:
+            return
+        try:
+            clearer(session_id)
+        except sqlite3.Error as exc:
+            logger.debug("compression failure cooldown clear failed: %s", exc)
+        except Exception as exc:
+            logger.debug("compression failure cooldown clear failed (non-sqlite): %s", exc)
 
     def bind_session_state(self, session_db: Any = None, session_id: str = "") -> None:
         """Bind the current session row so durable cooldowns can round-trip."""
@@ -2947,33 +3044,6 @@ This compaction should PRIORITISE preserving all information related to the focu
         # is not role=user, so we must pin the summary to "user" and
         # prevent the flip logic below from reverting it (#52160).
         _force_user_leading = last_head_role == "system"
-        # Zero-user-turn guard (#58753). The #52160 guard above only fires
-        # when the system prompt sits *inside* ``messages`` (the gateway
-        # ``/compress`` path). The main auto-compression path passes the
-        # transcript WITHOUT the system prompt (it is prepended at
-        # request-build time), so ``last_head_role`` defaults to "user" and
-        # the summary is emitted as role="assistant". On a session whose only
-        # genuine user turn falls into the compressed middle — e.g. a
-        # ``hermes kanban`` worker seeded with a single short
-        # ``"work kanban task <id>"`` prompt followed by nothing but
-        # assistant/tool turns — that leaves the compressed transcript with
-        # ZERO user-role messages. OpenAI-compatible backends (vLLM/Qwen)
-        # reject such a request with a non-retryable
-        # ``400 No user query found in messages``, crashing the worker with no
-        # possible recovery (every resume replays the same poisoned history).
-        # If no user-role message survives in either the protected head or the
-        # preserved tail, the summary MUST carry role="user" so the request
-        # always has at least one user turn.
-        if not _force_user_leading:
-            _user_survives = any(
-                messages[i].get("role") == "user"
-                for i in range(0, compress_start)
-            ) or any(
-                messages[i].get("role") == "user"
-                for i in range(compress_end, n_messages)
-            )
-            if not _user_survives:
-                _force_user_leading = True
         # Pick a role that avoids consecutive same-role with both neighbors.
         # Priority: avoid colliding with head (already committed), then tail.
         if last_head_role in {"assistant", "tool"} or _force_user_leading:

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { useThemeEpoch } from '@/hooks/use-theme-epoch'
 import { createDoubleTapDetector, isSmartZoomWheel } from '@/lib/trackpad-gestures'
+import { loadStarmapGraph } from '@/store/starmap'
 import type { StarmapGraph } from '@/types/hermes'
 
 import { computePalette, memoryInkFor, resolveRgb, rgba } from './color'
@@ -928,11 +929,12 @@ export function StarMap({
       />
 
       <NodeContextMenu
-        onClose={() => setMenuTarget(null)}
-        onNodeRemoved={() => {
+        onChanged={() => {
           setMenuTarget(null)
           setSelectedId(null)
+          void loadStarmapGraph(true)
         }}
+        onClose={() => setMenuTarget(null)}
         target={menuTarget}
       />
 

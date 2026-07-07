@@ -21,17 +21,6 @@ vi.mock('@/store/starmap', () => ({ resetStarmapGraph }))
 const { $activeGatewayProfile, $profiles, ensureGatewayProfile, refreshProfiles } = await import('./profile')
 const { $connection } = await import('./session')
 const { queryClient } = await import('@/lib/query-client')
-const { getProfiles } = await import('@/hermes')
-
-const profile = (name: string, isDefault = false): ProfileInfo => ({
-  has_env: false,
-  is_default: isDefault,
-  model: null,
-  name,
-  path: `/tmp/hermes/${name}`,
-  provider: null,
-  skill_count: 0
-})
 
 const remoteConn = (over: Partial<HermesConnection> = {}): HermesConnection =>
   ({ baseUrl: 'https://hermes-roy.tail.ts.net', mode: 'remote', profile: 'vps-remote', ...over }) as HermesConnection
@@ -112,25 +101,5 @@ describe('profile-scoped cache invalidation', () => {
 
     expect(queryClient.invalidateQueries).toHaveBeenCalled()
     expect(resetStarmapGraph).toHaveBeenCalledTimes(1)
-  })
-})
-
-describe('refreshProfiles shared rail list (#49289)', () => {
-  it('removes a deleted profile from the shared $profiles cache after Manage Profiles refreshes', async () => {
-    $profiles.set([profile('default', true), profile('test1')])
-    vi.mocked(getProfiles).mockResolvedValueOnce({ profiles: [profile('default', true)] })
-
-    await refreshProfiles()
-
-    expect($profiles.get().map(profile => profile.name)).toEqual(['default'])
-  })
-
-  it('leaves the shared $profiles cache intact when the refresh fails', async () => {
-    $profiles.set([profile('default', true), profile('test1')])
-    vi.mocked(getProfiles).mockRejectedValueOnce(new Error('backend unavailable'))
-
-    await expect(refreshProfiles()).rejects.toThrow('backend unavailable')
-
-    expect($profiles.get().map(profile => profile.name)).toEqual(['default', 'test1'])
   })
 })

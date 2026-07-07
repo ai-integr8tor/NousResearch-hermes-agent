@@ -100,7 +100,7 @@ def is_partial_silence_marker(text: Any) -> bool:
     stripped = text.strip()
     if not stripped or len(stripped) > 64:
         return False
-    for candidate in _canonical_silence_candidates(stripped):
-        if candidate and any(marker.startswith(candidate) for marker in LIVE_GATEWAY_SILENT_MARKERS):
-            return True
-    return False
+    candidate = _canonical_silence_candidate(stripped)
+    if not candidate:
+        return False
+    return any(marker.startswith(candidate) for marker in LIVE_GATEWAY_SILENT_MARKERS)

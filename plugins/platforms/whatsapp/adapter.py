@@ -1385,11 +1385,11 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
                     # Local file path — bridge already downloaded the image
                     if _is_allowed_bridge_path(url):
                         cached_urls.append(url)
-                        media_types.append(bridge_mime or "image/jpeg")
+                        media_types.append("image/jpeg")
                         print(f"[{self.name}] Using bridge-cached image: {url}", flush=True)
                     else:
                         print(f"[{self.name}] Rejected bridge image path outside cache dir: {url}", flush=True)
-                elif msg_type in {MessageType.VOICE, MessageType.AUDIO} and url.startswith(("http://", "https://")):
+                elif msg_type == MessageType.VOICE and url.startswith(("http://", "https://")):
                     try:
                         cached_path = await cache_audio_from_url(url, ext=".ogg")
                         cached_urls.append(cached_path)
@@ -1403,7 +1403,7 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
                     # Local file path — bridge already downloaded the audio
                     if _is_allowed_bridge_path(url):
                         cached_urls.append(url)
-                        media_types.append(bridge_mime or ("audio/ogg" if msg_type == MessageType.VOICE else "audio/mpeg"))
+                        media_types.append("audio/ogg")
                         print(f"[{self.name}] Using bridge-cached audio: {url}", flush=True)
                     else:
                         print(f"[{self.name}] Rejected bridge audio path outside cache dir: {url}", flush=True)
@@ -1412,7 +1412,7 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
                     if _is_allowed_bridge_path(url):
                         cached_urls.append(url)
                         ext = Path(url).suffix.lower()
-                        mime = bridge_mime or SUPPORTED_DOCUMENT_TYPES.get(ext, "application/octet-stream")
+                        mime = SUPPORTED_DOCUMENT_TYPES.get(ext, "application/octet-stream")
                         media_types.append(mime)
                         print(f"[{self.name}] Using bridge-cached document: {url}", flush=True)
                     else:
@@ -1420,7 +1420,7 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
                 elif msg_type == MessageType.VIDEO and os.path.isabs(url):
                     if _is_allowed_bridge_path(url):
                         cached_urls.append(url)
-                        media_types.append(bridge_mime or "video/mp4")
+                        media_types.append("video/mp4")
                         print(f"[{self.name}] Using bridge-cached video: {url}", flush=True)
                     else:
                         print(f"[{self.name}] Rejected bridge video path outside cache dir: {url}", flush=True)
@@ -1480,12 +1480,6 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
                             print(f"[{self.name}] Failed to read document text: {e}", flush=True)
 
             metadata: Dict[str, Any] = {}
-            native_type = str(data.get("nativeType") or "").strip()
-            native_metadata = data.get("nativeMetadata")
-            if native_type:
-                metadata["whatsapp_native_type"] = native_type
-            if isinstance(native_metadata, dict) and native_metadata:
-                metadata["whatsapp_native"] = native_metadata
             # The bridge sets ``fromOwner: true`` on inbound fromMe messages
             # that look owner-typed (linked-device send, not echoed from our
             # own /send).  Surfaced under a platform-prefixed key so plugins
@@ -1510,10 +1504,6 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
                 media_urls=cached_urls,
                 media_types=media_types,
                 metadata=metadata,
-                reply_to_message_id=reply_to_message_id,
-                reply_to_text=reply_to_text,
-                reply_to_author_id=reply_to_author_id,
-                reply_to_is_own_message=reply_to_is_own_message,
             )
         except Exception as e:
             print(f"[{self.name}] Error building event: {e}")

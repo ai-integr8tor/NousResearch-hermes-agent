@@ -1171,7 +1171,7 @@ class CredentialPool:
                         )
                     removed_ids = [
                         item.id for item in self._entries
-                        if item.source == "device_code"
+                        if item.source == "loopback_pkce"
                     ]
                     self._entries = [
                         item for item in self._entries

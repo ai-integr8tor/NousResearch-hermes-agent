@@ -1100,7 +1100,6 @@ class SessionStore:
             return
 
         stale_keys: list = []
-        recovered_keys = 0
         try:
             for key, entry in self._entries.items():
                 row = db.get_session(entry.session_id)
@@ -1108,43 +1107,6 @@ class SessionStore:
                 # end_reason is None  -> session alive — keep
                 # end_reason not None -> session ended — prune
                 if row is not None and row.get("end_reason") is not None:
-                    recovered_entry = None
-                    if entry.origin is not None:
-                        try:
-                            recovered_entry = self._recover_session_from_db(
-                                session_key=key,
-                                source=entry.origin,
-                                now=_now(),
-                            )
-                        except Exception as exc:
-                            logger.debug(
-                                "gateway.session: recovery lookup failed for stale "
-                                "sessions.json entry %r -> %s: %s",
-                                key,
-                                entry.session_id,
-                                exc,
-                            )
-
-                    # If the stale entry points at a compression-ended parent but
-                    # a newer live child session exists for the exact same gateway
-                    # peer, repoint the routing index instead of dropping it. A
-                    # hard restart between compression rotation and the next clean
-                    # save otherwise leaves Telegram with no resumable mapping, so
-                    # queued/resume-pending work disappears until the user sends a
-                    # fresh message.
-                    if recovered_entry is not None and recovered_entry.session_id != entry.session_id:
-                        logger.warning(
-                            "gateway.session: repointing stale sessions.json entry "
-                            "%r from ended %s (end_reason=%r) to recovered %s",
-                            key,
-                            entry.session_id,
-                            row["end_reason"],
-                            recovered_entry.session_id,
-                        )
-                        self._entries[key] = recovered_entry
-                        recovered_keys += 1
-                        continue
-
                     logger.warning(
                         "gateway.session: pruning stale sessions.json entry "
                         "%r -> %s (end_reason=%r); left by a crashed gateway",
@@ -1161,7 +1123,7 @@ class SessionStore:
         for key in stale_keys:
             del self._entries[key]
 
-        if stale_keys or recovered_keys:
+        if stale_keys:
             self._save()
 
     def _save(self) -> None:
@@ -1450,37 +1412,6 @@ class SessionStore:
 
         return False
 
-    def is_session_finalizable(self, entry: SessionEntry) -> bool:
-        """Return True if the expiry watcher will *ever* finalize this session.
-
-        The expiry watcher (``GatewayRunner._session_expiry_watcher``) only
-        tears an agent down — and only then fires ``on_session_end`` — for
-        sessions whose reset policy eventually expires. A ``mode == "none"``
-        session never expires (``_is_session_expired`` returns ``False``
-        forever), so the watcher will never finalize it.
-
-        This distinction matters for the agent-cache idle sweep: deferring
-        idle eviction to "let the watcher finalize it later" is only correct
-        when the watcher WILL run for this session. For a ``mode == "none"``
-        session, deferring pins the cached agent in memory for the gateway's
-        entire lifetime with no finalization ever coming — the exact leak the
-        idle sweep exists to relieve. Callers use this predicate to decide
-        whether the session store owns the eviction boundary (finalizable) or
-        the idle sweep must still reap the agent itself (not finalizable).
-
-        Public wrapper so callers don't reach into policy internals. Errors
-        resolving the policy are treated as "not finalizable" (safe: the idle
-        sweep falls back to reaping the agent rather than pinning it).
-        """
-        try:
-            policy = self.config.get_reset_policy(
-                platform=entry.platform,
-                session_type=entry.chat_type,
-            )
-            return policy.mode != "none"
-        except Exception:
-            return False
-
     def _is_session_ended_in_db(self, session_id: str) -> bool:
         """Return True iff state.db has this session with a non-null end_reason.
 
@@ -1708,27 +1639,11 @@ class SessionStore:
                         # Restart-interrupted session: preserve the session_id
                         # and return the existing entry so the transcript reloads
                         # intact, but still honour normal daily/idle reset policy.
-                        #
-                        # Freshness gate (#46934): the idle/daily policy checks
-                        # ``updated_at``, which is bumped to ``now`` on every
-                        # message — so a zombie session that keeps receiving
-                        # messages never trips it and would resume stale context
-                        # forever.  ``last_resume_marked_at`` is set once when
-                        # resume was marked and never bumped per-message, so it
-                        # correctly measures how long resume has been pending.
-                        # If that exceeds the auto-continue freshness window, the
-                        # recovery turn either never ran or failed — treat the
-                        # session as a zombie and fall through to auto-reset.
                         reset_reason = self._should_reset(entry, source)
                         if not reset_reason:
-                            _fw = auto_continue_freshness_window()
-                            _ref_time = entry.last_resume_marked_at or entry.updated_at
-                            if _fw > 0 and (now - _ref_time).total_seconds() > _fw:
-                                reset_reason = "resume_pending_expired"
-                            else:
-                                entry.updated_at = now
-                                self._save()
-                                return entry
+                            entry.updated_at = now
+                            self._save()
+                            return entry
                     else:
                         reset_reason = self._should_reset(entry, source)
                     if not reset_reason:
@@ -1832,37 +1747,6 @@ class SessionStore:
                     entry.origin,
                     display_name=entry.display_name,
                 )
-
-    def set_model_override(
-        self, session_key: str, override: Optional[Dict[str, Any]]
-    ) -> None:
-        """Persist (or clear) the session-scoped /model override.
-
-        Only non-secret keys (model/provider/base_url — see
-        ``sanitize_model_override``) are written; ``api_key``/``api_mode``
-        are re-resolved at rehydration time via the normal runtime provider
-        resolution.  Pass ``None`` (or a dict with no persistable values)
-        to clear the persisted override, e.g. on /new.
-        """
-        with self._lock:
-            self._ensure_loaded_locked()
-            entry = self._entries.get(session_key)
-            if entry is None:
-                return
-            cleaned = sanitize_model_override(override)
-            if entry.model_override == cleaned:
-                return
-            entry.model_override = cleaned
-            self._save()
-
-    def get_model_override(self, session_key: str) -> Optional[Dict[str, str]]:
-        """Return the persisted /model override for *session_key*, if any."""
-        with self._lock:
-            self._ensure_loaded_locked()
-            entry = self._entries.get(session_key)
-            if entry is None:
-                return None
-            return dict(entry.model_override) if entry.model_override else None
 
     def suspend_session(self, session_key: str) -> bool:
         """Mark a session as suspended so it auto-resets on next access.

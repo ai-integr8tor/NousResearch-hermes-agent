@@ -2194,6 +2194,57 @@ def get_pre_verify_continue_message(
     return None
 
 
+def get_pre_verify_continue_message(
+    *,
+    session_id: str = "",
+    platform: str = "",
+    model: str = "",
+    coding: bool = False,
+    attempt: int = 0,
+    final_response: str = "",
+    changed_paths: Optional[List[str]] = None,
+) -> Optional[str]:
+    """Check user ``pre_verify`` hooks for a directive to keep the agent going.
+
+    Fired once per turn when the agent edited code and is about to verify/finish.
+    A hook keeps the turn going (run a check, defer it, tidy the diff) by
+    returning::
+
+        {"action": "continue", "message": "<follow-up for the model>"}
+
+    The Claude-Code Stop shape ``{"decision": "block", "reason": "..."}`` (block
+    the stop == keep going) is accepted too. The first directive carrying a
+    non-empty message wins; any other return lets the turn finish. Mirrors
+    :func:`get_pre_tool_call_block_message` — the call site stays a one-liner.
+
+    ``coding`` / ``attempt`` let a hook scope itself (``if not coding`` …) and
+    self-throttle (``if attempt`` …), the same way a ``pre_tool_call`` hook
+    scopes on ``tool_name``.
+    """
+    hook_results = invoke_hook(
+        "pre_verify",
+        session_id=session_id,
+        platform=platform,
+        model=model,
+        coding=coding,
+        attempt=attempt,
+        final_response=final_response,
+        changed_paths=list(changed_paths or []),
+    )
+
+    for result in hook_results:
+        if not isinstance(result, dict):
+            continue
+        action = str(result.get("action") or result.get("decision") or "").strip().lower()
+        if action not in ("continue", "block"):
+            continue
+        message = result.get("message") or result.get("reason")
+        if isinstance(message, str) and message.strip():
+            return message.strip()
+
+    return None
+
+
 def _ensure_plugins_discovered(force: bool = False) -> PluginManager:
     """Return the global manager after ensuring plugin discovery has run.
 

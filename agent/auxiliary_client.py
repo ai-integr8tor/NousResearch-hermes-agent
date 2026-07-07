@@ -110,63 +110,13 @@ from utils import base_url_host_matches, base_url_hostname, env_float, model_for
 logger = logging.getLogger(__name__)
 
 
-# ── resolve_provider_client fall-through dedup ───────────────────────────
-# Both fall-through warning sites in resolve_provider_client (the "unknown
-# provider" and "unhandled auth_type" branches) fire on every retry of a
-# misconfigured provider, spamming the logs. Demote them to logger.debug with
-# per-process dedup: the FIRST occurrence still surfaces (it carries real
-# diagnostic value — a provider-name typo or PROVIDER_REGISTRY/auth_type
-# drift), and identical repeats are suppressed for the lifetime of the
-# process. Two independent sets keep each branch linear and let tests clear
-# them independently.
-_LOGGED_UNKNOWN_PROVIDER_KEYS: set = set()
-_LOGGED_UNHANDLED_AUTHTYPE_KEYS: set = set()
-# Same treatment for the two "registered provider, unsupported sub-branch"
-# routing dead-ends — external-process and OAuth providers that fall through
-# with no matching handler. Keyed by provider name.
-_LOGGED_UNSUPPORTED_EXTPROC_KEYS: set = set()
-_LOGGED_UNSUPPORTED_OAUTH_KEYS: set = set()
-
-
-def _resolve_aux_verify(base_url: Optional[str]) -> Any:
-    """Resolve httpx ``verify`` for an auxiliary-client base_url.
-
-    Mirrors the main client's TLS resolution so auxiliary calls (compression,
-    vision, web_extract, title generation, etc.) honor per-provider
-    ``ssl_ca_cert`` / ``ssl_verify`` config and the ``HERMES_CA_BUNDLE`` /
-    ``SSL_CERT_FILE`` env conventions. Best-effort: any failure falls back to
-    the httpx/certifi default (``True``).
-    """
-    try:
-        from agent.ssl_verify import resolve_httpx_verify
-        from hermes_cli.config import (
-            get_custom_provider_tls_settings,
-            load_config_readonly,
-        )
-
-        tls = get_custom_provider_tls_settings(
-            str(base_url or ""), config=load_config_readonly()
-        )
-        return resolve_httpx_verify(
-            ca_bundle=tls.get("ssl_ca_cert"),
-            ssl_verify=tls.get("ssl_verify"),
-            base_url=str(base_url or ""),
-        )
-    except Exception:
-        return True
-
-
 def _openai_http_client_kwargs(
     base_url: Optional[str],
     *,
     async_mode: bool = False,
 ) -> Dict[str, Any]:
     """Inject keepalive httpx client with env-only proxy (not macOS system proxy)."""
-    client = build_keepalive_http_client(
-        str(base_url or ""),
-        async_mode=async_mode,
-        verify=_resolve_aux_verify(base_url),
-    )
+    client = build_keepalive_http_client(str(base_url or ""), async_mode=async_mode)
     if client is None:
         return {}
     return {"http_client": client}
@@ -6463,26 +6413,13 @@ def call_llm(
                     transient_err,
                 )
                 raise
-            _max_transient_retries = _transient_retry_count()
-            _last_transient = transient_err
-            for _attempt in range(1, _max_transient_retries + 1):
-                _backoff = min(_TRANSIENT_RETRY_BACKOFF_BASE * (2.0 ** (_attempt - 1)), 8.0)
-                logger.info(
-                    "Auxiliary %s: transient transport error (attempt %d/%d); "
-                    "retrying same provider after %.1fs before fallback: %s",
-                    task or "call", _attempt, _max_transient_retries, _backoff,
-                    _last_transient,
-                )
-                time.sleep(_backoff)
-                try:
-                    return _validate_llm_response(
-                        client.chat.completions.create(**kwargs), task)
-                except Exception as retry_transient:
-                    if not _is_transient_transport_error(retry_transient):
-                        raise
-                    _last_transient = retry_transient
-            # Retries exhausted — fall through to first_err fallback handling.
-            raise _last_transient
+            logger.info(
+                "Auxiliary %s: transient transport error; retrying once on "
+                "the same provider before fallback: %s",
+                task or "call", transient_err,
+            )
+            return _validate_llm_response(
+                client.chat.completions.create(**kwargs), task)
     except Exception as first_err:
         if "temperature" in kwargs and _is_unsupported_temperature_error(first_err):
             retry_kwargs = dict(kwargs)

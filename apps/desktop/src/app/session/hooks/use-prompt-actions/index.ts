@@ -2,14 +2,13 @@ import type { AppendMessage, ThreadMessage } from '@assistant-ui/react'
 import { useStore } from '@nanostores/react'
 import { type MutableRefObject, useCallback, useEffect, useRef } from 'react'
 
-import { PROMPT_SUBMIT_REQUEST_TIMEOUT_MS, transcribeAudio } from '@/hermes'
+import { transcribeAudio } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { stripAnsi } from '@/lib/ansi'
 import { branchGroupForUser, type ChatMessage, chatMessageText, textPart } from '@/lib/chat-messages'
 import { pathLabel, SLASH_COMMAND_RE } from '@/lib/chat-runtime'
 import { triggerHaptic } from '@/lib/haptics'
 import { setMutableRef } from '@/lib/mutable-ref'
-import { normalize } from '@/lib/text'
 import { clearClarifyRequest } from '@/store/clarify'
 import {
   $composerAttachments,
@@ -159,9 +158,8 @@ interface PromptActionsOptions {
   branchCurrentSession: () => Promise<boolean>
   createBackendSessionForSend: (preview?: string | null) => Promise<string | null>
   handleSkinCommand: (arg: string) => string
-  openMemoryGraph: () => void
   refreshSessions: () => Promise<void>
-  requestGateway: <T>(method: string, params?: Record<string, unknown>, timeoutMs?: number) => Promise<T>
+  requestGateway: <T>(method: string, params?: Record<string, unknown>) => Promise<T>
   resumeStoredSession: (storedSessionId: string) => Promise<void> | void
   selectedStoredSessionIdRef: MutableRefObject<string | null>
   startFreshSessionDraft: () => void
@@ -187,7 +185,6 @@ export function usePromptActions({
   branchCurrentSession,
   createBackendSessionForSend,
   handleSkinCommand,
-  openMemoryGraph,
   refreshSessions,
   requestGateway,
   resumeStoredSession,
@@ -375,7 +372,7 @@ export function usePromptActions({
         return { error: copy.sessionUnavailable, ok: false }
       }
 
-      const target = normalize(platform)
+      const target = platform.trim().toLowerCase()
 
       if (!target) {
         return { error: copy.handoff.failed(''), ok: false }
@@ -450,7 +447,6 @@ export function usePromptActions({
     createBackendSessionForSend,
     handleSkinCommand,
     handoffSession,
-    openMemoryGraph,
     refreshSessions,
     requestGateway,
     resumeStoredSession,
@@ -669,15 +665,11 @@ export function usePromptActions({
       })
 
       try {
-        await requestGateway(
-          'prompt.submit',
-          {
-            session_id: activeSessionId,
-            text: userText,
-            truncate_before_user_ordinal: truncateBeforeUserOrdinal
-          },
-          PROMPT_SUBMIT_REQUEST_TIMEOUT_MS
-        )
+        await requestGateway('prompt.submit', {
+          session_id: activeSessionId,
+          text: userText,
+          truncate_before_user_ordinal: truncateBeforeUserOrdinal
+        })
       } catch (err) {
         updateSessionState(activeSessionId, state => ({
           ...state,
@@ -710,15 +702,11 @@ export function usePromptActions({
       }
 
       const submit = () =>
-        requestGateway(
-          'prompt.submit',
-          {
-            session_id: sessionId,
-            text,
-            ...(truncateOrdinal !== undefined && { truncate_before_user_ordinal: truncateOrdinal })
-          },
-          PROMPT_SUBMIT_REQUEST_TIMEOUT_MS
-        )
+        requestGateway('prompt.submit', {
+          session_id: sessionId,
+          text,
+          ...(truncateOrdinal !== undefined && { truncate_before_user_ordinal: truncateOrdinal })
+        })
 
       if (interruptFirst) {
         await interrupt()

@@ -2814,6 +2814,11 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
         timeout=_get_open_command_timeout(first_open=is_first_nav),
     )
 
+    # Remember which session served this nav so snapshot/click/fill/...
+    # on the same task_id hit it (critical when hybrid routing has both a
+    # cloud session and a local sidecar alive concurrently).
+    _last_active_session_key[effective_task_id] = nav_session_key
+
     if result.get("success"):
         data = result.get("data", {})
         title = data.get("title", "")
@@ -3412,128 +3417,6 @@ def _current_page_private_url(effective_task_id: str) -> Optional[str]:
     return None
 
 
-_RISKY_BROWSER_EVAL_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
-    (re.compile(r"\bdocument\s*\.\s*cookie\b", re.I), "document.cookie"),
-    (re.compile(r"\b(?:localStorage|sessionStorage)\b", re.I), "web storage"),
-    (re.compile(r"\bindexedDB\b", re.I), "IndexedDB"),
-    (re.compile(r"\bcaches\s*\.\s*(?:open|match|keys)\b", re.I), "Cache Storage"),
-    (re.compile(r"\bnavigator\s*\.\s*(?:clipboard|credentials|serviceWorker)\b", re.I), "navigator sensitive API"),
-    (re.compile(r"\b(?:fetch|XMLHttpRequest|WebSocket|EventSource)\s*\(", re.I), "network request"),
-    (re.compile(r"\bnavigator\s*\.\s*sendBeacon\s*\(", re.I), "network beacon"),
-    (re.compile(r"\bdocument\s*\.\s*forms\b.*\bvalue\b", re.I | re.S), "form value extraction"),
-    (re.compile(r"\bquerySelector(?:All)?\s*\([^)]*(?:input|textarea|password)[^)]*\).*\bvalue\b", re.I | re.S), "form value extraction"),
-)
-_JS_STRING_LITERAL_RE = re.compile(
-    r"""'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"|`(?:\\.|[^`\\])*`""",
-    re.S,
-)
-_SENSITIVE_BROWSER_EVAL_TOKENS: tuple[tuple[str, str], ...] = (
-    ("cookie", "document.cookie"),
-    ("localStorage", "web storage"),
-    ("sessionStorage", "web storage"),
-    ("indexedDB", "IndexedDB"),
-    ("caches", "Cache Storage"),
-    ("clipboard", "navigator sensitive API"),
-    ("credentials", "navigator sensitive API"),
-    ("serviceWorker", "navigator sensitive API"),
-    ("fetch", "network request"),
-    ("XMLHttpRequest", "network request"),
-    ("WebSocket", "network request"),
-    ("EventSource", "network request"),
-    ("sendBeacon", "network beacon"),
-)
-
-
-def _allow_unsafe_browser_evaluate() -> bool:
-    """Return whether sensitive browser JS evaluation is explicitly allowed.
-
-    ``browser_console(expression=...)`` is useful for read-only DOM inspection,
-    but a malicious page or prompt injection can try to steer the agent into
-    evaluating code that reads cookies/storage/form values or performs network
-    exfiltration.  Keep harmless expressions (``document.title`` etc.) working,
-    while requiring a config opt-in for the dangerous primitives.
-    """
-    try:
-        from hermes_cli.config import read_raw_config
-
-        cfg = read_raw_config()
-        return is_truthy_value(cfg_get(cfg, "browser", "allow_unsafe_evaluate"), default=False)
-    except Exception as e:
-        logger.debug("Could not read browser.allow_unsafe_evaluate from config: %s", e)
-        return False
-
-
-def _decode_js_string_literal(literal: str) -> str:
-    """Best-effort decode of a JavaScript string literal for policy checks.
-
-    This is not a JS parser.  It only normalizes common escaped property names
-    such as ``document["co\\x6fkie"]`` before the fail-closed sensitive-token
-    check below.
-    """
-    if len(literal) < 2:
-        return literal
-    body = literal[1:-1]
-    try:
-        return bytes(body, "utf-8").decode("unicode_escape")
-    except Exception:
-        return body
-
-
-def _decoded_js_string_literals(expression: str) -> list[str]:
-    return [_decode_js_string_literal(match.group(0)) for match in _JS_STRING_LITERAL_RE.finditer(expression)]
-
-
-def _sensitive_browser_eval_token_reason(expression: str) -> Optional[str]:
-    """Return a risk reason for direct or quoted sensitive browser primitives.
-
-    ``browser_console(expression=...)`` executes in the page origin.  A denylist
-    that only searches direct spellings like ``document.cookie`` and ``fetch(``
-    misses equivalent JavaScript property access such as ``document["cookie"]``
-    or ``globalThis["fetch"](...)``.  Treat sensitive primitive names as risky
-    whether they appear as identifiers or decoded string-literal property names.
-    Concatenating all string literals catches simple obfuscations like
-    ``document["coo" + "kie"]`` while the config opt-in preserves the escape
-    hatch for trusted pages.
-    """
-    string_literals = _decoded_js_string_literals(expression)
-    concatenated_literals = "".join(string_literals).lower()
-    for token, reason in _SENSITIVE_BROWSER_EVAL_TOKENS:
-        if re.search(rf"\b{re.escape(token)}\b", expression, re.I):
-            return reason
-        token_lower = token.lower()
-        if any(token_lower in literal.lower() for literal in string_literals):
-            return reason
-        if token_lower in concatenated_literals:
-            return reason
-    return None
-
-
-def _risky_browser_eval_reason(expression: str) -> Optional[str]:
-    """Return a human-readable reason if a JS expression uses risky primitives."""
-    if not expression:
-        return None
-    for pattern, reason in _RISKY_BROWSER_EVAL_PATTERNS:
-        if pattern.search(expression):
-            return reason
-    return _sensitive_browser_eval_token_reason(expression)
-
-
-def _enforce_browser_eval_policy(expression: str) -> Optional[str]:
-    """Fail closed for sensitive browser JS evaluation unless config opts in."""
-    if _allow_unsafe_browser_evaluate():
-        return None
-    reason = _risky_browser_eval_reason(expression)
-    if not reason:
-        return None
-    return (
-        "Blocked: browser_console(expression=...) tried to use sensitive browser "
-        f"JavaScript primitive ({reason}). Use browser_snapshot/browser_get_images/"
-        "browser_console without expression for normal inspection, or set "
-        "browser.allow_unsafe_evaluate: true in config.yaml only for trusted pages "
-        "when this access is explicitly required."
-    )
-
-
 def _browser_eval(expression: str, task_id: Optional[str] = None) -> str:
     """Evaluate a JavaScript expression in the page context and return the result."""
     effective_task_id = _last_session_key(task_id or "default")
@@ -3563,6 +3446,27 @@ def _browser_eval(expression: str, task_id: Optional[str] = None) -> str:
     # below closes the navigate-then-read sub-path (`location.href = '...'`
     # then read the DOM) — eval returns arbitrary JS results directly, never
     # touching snapshot/vision, so both sub-paths gate on the same condition.
+
+    # ── Private-network guard (eval return-value path) ──────────────────────
+    # browser_snapshot / browser_vision re-check the page URL before returning
+    # content, but eval returns arbitrary JS results directly — an attacker can
+    # read a private page via `fetch('http://127.0.0.1/secret')` or by reading
+    # the DOM after `location.href = 'http://127.0.0.1/'`, never touching
+    # snapshot/vision.  Close both sub-paths on the same gating condition:
+    #   1. Pre-scan the expression for private-host URL literals (direct fetch).
+    #   2. After eval, re-check the page URL (navigate-then-read).
+    if _eval_ssrf_guard_active(effective_task_id):
+        blocked_literal = _expression_targets_private_url(expression)
+        if blocked_literal:
+            return json.dumps({
+                "success": False,
+                "error": (
+                    "Blocked: JavaScript expression targets a private or "
+                    f"internal address ({blocked_literal}). Reading internal "
+                    "endpoints via browser_console is not permitted in this "
+                    "browser mode."
+                ),
+            }, ensure_ascii=False)
 
     # --- Fast path: route through the supervisor's persistent CDP WS ---------
     # When a CDPSupervisor is alive for this task_id, ``Runtime.evaluate`` runs

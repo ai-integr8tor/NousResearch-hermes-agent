@@ -33,17 +33,6 @@ import qrcode from 'qrcode-terminal';
 import { matchesAllowedUser, parseAllowedUsers } from './allowlist.js';
 import { createOutboundIdTracker } from './outbound_ids.js';
 import { classifyOwnerMessageGate } from './owner_message_gate.js';
-import {
-  buildPollPayload,
-  buildLocationPayload,
-  buildTextSendPayload,
-  createBoundedMessageStore,
-  extractBridgeEvent,
-  inferMediaType,
-  mediaPayloadForFile,
-  pollCreationMessageFromPayload,
-  pollUpdateForAggregation,
-} from './bridge_helpers.js';
 
 // Parse CLI args
 const args = process.argv.slice(2);
@@ -140,7 +129,7 @@ function sendWithTimeout(chatId, payload, options = {}, timeoutMs = SEND_TIMEOUT
     );
   });
   return enqueueSend(() =>
-    Promise.race([sock.sendMessage(chatId, payload, options), timeoutPromise])
+    Promise.race([sock.sendMessage(chatId, payload), timeoutPromise])
       .finally(() => clearTimeout(timer))
   );
 }
@@ -174,18 +163,6 @@ function splitLongMessage(message, maxLength = MAX_MESSAGE_LENGTH) {
   }
   if (remaining) chunks.push(remaining);
   return chunks;
-}
-
-function rememberSentMessage(sent, payload) {
-  if (!sent?.key?.id) return;
-  if (sent.message) {
-    messageStore.remember(sent);
-    return;
-  }
-  const syntheticMessage = pollCreationMessageFromPayload(payload);
-  if (syntheticMessage) {
-    messageStore.remember({ ...sent, message: syntheticMessage });
-  }
 }
 
 function trackSentMessageId(sent) {
@@ -251,107 +228,6 @@ const MAX_QUEUE_SIZE = 100;
 // Capacity bounded (see outbound_ids.js) to keep memory flat under
 // sustained sending.
 const recentlySentIds = createOutboundIdTracker(512);
-const recentlyProcessedPollUpdates = createOutboundIdTracker(512);
-const messageStore = createBoundedMessageStore(512);
-
-function normalizePollUpdateOptions(aggregation, pollUpdateMessage, meId) {
-  const selected = [];
-  for (const option of aggregation || []) {
-    if ((option.voters || []).length > 0 && option.name && option.name !== 'Unknown') {
-      selected.push(option.name);
-    }
-  }
-  if (selected.length > 0) return selected;
-
-  // Fallback for already-decrypted pollUpdateMessage payloads where Baileys did
-  // not have the creation message available. This may only yield hashes, but
-  // keeping them in metadata is still better than dropping the vote entirely.
-  const raw = pollUpdateMessage?.vote?.selectedOptions || [];
-  return raw.map(option => String(option)).filter(Boolean);
-}
-
-function pollAggregationSummary(aggregation) {
-  return (aggregation || []).map(option => ({
-    name: option?.name || '',
-    voterCount: (option?.voters || []).length,
-  }));
-}
-
-function logPollUpdateDiagnostic({ sourcePath, pollId, pollCreation, pollUpdates, selectedOptions, aggregation }) {
-  const firstUpdate = pollUpdates?.[0] || {};
-  try {
-    console.log(JSON.stringify({
-      event: 'poll_update_decode',
-      sourcePath,
-      pollId: pollId || '',
-      pollCreationFound: !!pollCreation,
-      updateKeys: Object.keys(firstUpdate),
-      hasVote: !!firstUpdate.vote,
-      selectedOptionsLength: selectedOptions?.length || 0,
-      aggregation: pollAggregationSummary(aggregation),
-    }));
-  } catch {}
-}
-
-function enqueuePollUpdateEvent({ key, update, selectedOptions, aggregation }) {
-  const chatId = normalizeWhatsAppId(key?.remoteJid || update?.pollUpdates?.[0]?.pollUpdateMessageKey?.remoteJid || '');
-  const senderId = normalizeWhatsAppId(
-    key?.participant
-    || update?.pollUpdates?.[0]?.pollUpdateMessageKey?.participant
-    || chatId
-  );
-  const pollId = key?.id
-    || update?.pollUpdates?.[0]?.pollCreationMessageKey?.id
-    || update?.pollUpdates?.[0]?.pollUpdateMessageKey?.id
-    || '';
-  // Only surface votes on polls Hermes itself created (tracked when
-  // /send-poll returns). Arbitrary human polls in a group chat must not
-  // inject agent-visible messages on every vote.
-  if (!pollId || !recentlySentIds.has(pollId)) {
-    if (WHATSAPP_DEBUG) {
-      try { console.log(JSON.stringify({ event: 'ignored', reason: 'foreign_poll_update', pollId })); } catch {}
-    }
-    return;
-  }
-  const chosenText = selectedOptions.length ? selectedOptions.join(', ') : `[Poll update${pollId ? `: ${pollId}` : ''}]`;
-  const dedupeId = `poll:${pollId}:${senderId}:${selectedOptions.join('|')}`;
-  if (recentlyProcessedPollUpdates.has(dedupeId)) return;
-  recentlyProcessedPollUpdates.remember(dedupeId);
-  const event = {
-    messageId: `${pollId || 'poll'}:update:${Date.now()}`,
-    chatId,
-    senderId,
-    senderName: senderId.replace(/@.*/, ''),
-    chatName: chatId.replace(/@.*/, ''),
-    isGroup: chatId.endsWith('@g.us'),
-    body: chosenText,
-    hasMedia: false,
-    mediaType: 'poll_update',
-    mime: '',
-    fileName: '',
-    nativeType: 'pollUpdateMessage',
-    nativeMetadata: {
-      pollUpdate: {
-        pollId,
-        selectedOptions,
-        aggregation,
-      },
-    },
-    mediaUrls: [],
-    mentionedIds: [],
-    quotedMessageId: pollId,
-    quotedParticipant: '',
-    quotedRemoteJid: chatId,
-    quotedText: '',
-    hasQuotedMessage: !!pollId,
-    botIds: [],
-    timestamp: Math.floor(Date.now() / 1000),
-  };
-  messageQueue.push(event);
-  if (messageQueue.length > MAX_QUEUE_SIZE) {
-    messageQueue.shift();
-  }
-}
 
 function rememberSentId(id) {
   recentlySentIds.remember(id);
@@ -676,7 +552,27 @@ async function startSocket() {
         continue;
       }
 
-      messageStore.remember(msg);
+      const event = {
+        messageId: msg.key.id,
+        chatId,
+        senderId,
+        senderName: msg.pushName || senderNumber,
+        chatName: isGroup ? (chatId.split('@')[0]) : (msg.pushName || senderNumber),
+        isGroup,
+        body,
+        hasMedia,
+        mediaType,
+        mediaUrls,
+        mentionedIds,
+        quotedMessageId,
+        quotedParticipant,
+        quotedRemoteJid,
+        hasQuotedMessage,
+        botIds,
+        timestamp: msg.messageTimestamp,
+        fromOwner,
+      };
+
       messageQueue.push(event);
       if (messageQueue.length > MAX_QUEUE_SIZE) {
         messageQueue.shift();
@@ -891,7 +787,6 @@ app.post('/send-media', async (req, res) => {
 
     const sent = await sendWithTimeout(chatId, msgPayload);
     trackSentMessageId(sent);
-    messageStore.remember(sent);
     res.json({ success: true, messageId: sent?.key?.id });
   } catch (err) {
     res.status(500).json({ error: err.message });

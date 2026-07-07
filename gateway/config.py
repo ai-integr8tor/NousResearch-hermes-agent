@@ -359,40 +359,6 @@ class SessionResetPolicy:
 
 
 @dataclass
-class ChannelOverride:
-    """
-    Per-channel override for model, provider, and system prompt.
-
-    Used in config under platforms.<name>.channel_overrides[channel_id].
-    Enables different channels (e.g. Discord #daily vs #dev) to use different
-    models and personas without running separate gateway instances.
-    """
-    model: Optional[str] = None
-    provider: Optional[str] = None
-    system_prompt: Optional[str] = None
-
-    def to_dict(self) -> Dict[str, Any]:
-        out: Dict[str, Any] = {}
-        if self.model is not None:
-            out["model"] = self.model
-        if self.provider is not None:
-            out["provider"] = self.provider
-        if self.system_prompt is not None:
-            out["system_prompt"] = self.system_prompt
-        return out
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "ChannelOverride":
-        if not data:
-            return cls()
-        return cls(
-            model=data.get("model"),
-            provider=data.get("provider"),
-            system_prompt=data.get("system_prompt"),
-        )
-
-
-@dataclass
 class PlatformConfig:
     """Configuration for a single messaging platform."""
     enabled: bool = False
@@ -421,9 +387,6 @@ class PlatformConfig:
     # noisy). Drives the per-message _keep_typing refresh loop in
     # gateway/platforms/base.py.
     typing_indicator: bool = True
-
-    # Per-channel model/provider/system_prompt overrides (channel_id -> ChannelOverride)
-    channel_overrides: Dict[str, ChannelOverride] = field(default_factory=dict)
 
     # Platform-specific settings
     extra: Dict[str, Any] = field(default_factory=dict)
@@ -469,13 +432,6 @@ class PlatformConfig:
         if _typing is None:
             _typing = data.get("extra", {}).get("typing_indicator")
 
-        channel_overrides: Dict[str, ChannelOverride] = {}
-        raw_overrides = data.get("channel_overrides") or {}
-        if isinstance(raw_overrides, dict):
-            for cid, ov_data in raw_overrides.items():
-                if isinstance(ov_data, dict):
-                    channel_overrides[str(cid)] = ChannelOverride.from_dict(ov_data)
-
         return cls(
             enabled=_coerce_bool(data.get("enabled"), False),
             token=data.get("token"),
@@ -484,7 +440,6 @@ class PlatformConfig:
             reply_to_mode=data.get("reply_to_mode", "first"),
             gateway_restart_notification=_coerce_bool(_grn, True),
             typing_indicator=_coerce_bool(_typing, True),
-            channel_overrides=channel_overrides,
             extra=data.get("extra", {}),
         )
 
@@ -1169,18 +1124,6 @@ def load_gateway_config() -> GatewayConfig:
                     bridged["gateway_restart_notification"] = platform_cfg["gateway_restart_notification"]
                 if "typing_indicator" in platform_cfg:
                     bridged["typing_indicator"] = platform_cfg["typing_indicator"]
-                has_channel_overrides = "channel_overrides" in platform_cfg
-                if has_channel_overrides:
-                    raw_overrides = platform_cfg.get("channel_overrides")
-                    if isinstance(raw_overrides, dict):
-                        plat_data, _extra = _ensure_platform_extra_dict(
-                            platforms_data, plat.value
-                        )
-                        plat_data["channel_overrides"] = {
-                            str(cid): ov_data
-                            for cid, ov_data in raw_overrides.items()
-                            if isinstance(ov_data, dict)
-                        }
                 enabled_was_explicit = _cfg_toplevel and "enabled" in platform_cfg
                 if not bridged and not enabled_was_explicit and not has_channel_overrides:
                     continue

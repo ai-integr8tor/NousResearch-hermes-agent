@@ -3556,135 +3556,6 @@ def _launchctl_domain_unsupported(returncode: int) -> bool:
     return returncode in _LAUNCHCTL_DOMAIN_UNSUPPORTED_CODES
 
 
-# `launchctl bootstrap` returns this when the target label is *already*
-# registered in the domain — a stale load left by an interrupted restart or a
-# bootout that didn't fully settle. EIO here means "already loaded", which is
-# recoverable, NOT that the domain is unmanageable; only when a bootout + retry
-# also fails is the domain genuinely unsupported.
-_LAUNCHCTL_BOOTSTRAP_EIO = 5
-
-
-def _launchctl_bootstrap(
-    domain: str, plist_path, label: str, *, timeout: int = 30
-) -> None:
-    """Bootstrap a launchd job, recovering from a stale already-loaded label.
-
-    On modern macOS, ``launchctl bootstrap`` of a label that is still
-    registered in ``domain`` fails with ``5: Input/output error`` (EIO). That
-    is the *already loaded* case — distinct from the domain being unmanageable,
-    which callers handle via :func:`_launchctl_domain_unsupported`. A leftover
-    registration from an interrupted restart leaves the job
-    loaded-but-not-running, so the next bootstrap hits EIO; without this retry
-    we misclassify it as "launchd cannot manage this macOS version" and degrade
-    to a detached process, silently losing auto-start and crash-restart.
-
-    Recover by booting the stale label out and bootstrapping once more. If the
-    retry still fails, the ``CalledProcessError`` propagates so callers apply
-    their domain-unsupported fallback for a genuinely broken domain.
-    """
-    try:
-        subprocess.run(
-            ["launchctl", "bootstrap", domain, str(plist_path)],
-            check=True,
-            timeout=timeout,
-        )
-        return
-    except subprocess.CalledProcessError as exc:
-        if exc.returncode != _LAUNCHCTL_BOOTSTRAP_EIO:
-            raise
-        # Stale registration — drop the leftover label and bootstrap once more.
-        subprocess.run(
-            ["launchctl", "bootout", f"{domain}/{label}"],
-            check=False,
-            timeout=timeout,
-        )
-        subprocess.run(
-            ["launchctl", "bootstrap", domain, str(plist_path)],
-            check=True,
-            timeout=timeout,
-        )
-
-
-def _launchd_reload_log_path() -> Path:
-    """Path the launchd reload watchdog tails for persistent-orphan detection."""
-    return get_hermes_home() / "logs" / "launchd-reload.log"
-
-
-def _append_launchd_reload_log(message: str) -> None:
-    """Append a timestamped line to the launchd reload log (best-effort)."""
-    path = _launchd_reload_log_path()
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        from datetime import datetime as _dt
-
-        stamp = _dt.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
-        with path.open("a", encoding="utf-8") as fh:
-            fh.write(f"[{stamp}] {message}\n")
-    except OSError:
-        pass
-
-
-def _launchctl_label_registered(label: str) -> bool:
-    """True when ``launchctl list <label>`` reports the job as registered."""
-    try:
-        result = subprocess.run(
-            ["launchctl", "list", label],
-            check=False,
-            timeout=10,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        return result.returncode == 0
-    except (subprocess.TimeoutExpired, OSError):
-        return False
-
-
-def _retry_launchctl_bootstrap_until_registered(
-    domain: str, plist_path, label: str, *, deadline: float
-) -> bool:
-    """Bootstrap with retry until the label is registered or ``deadline`` passes.
-
-    Wraps :func:`_launchctl_bootstrap` (which already recovers the EIO
-    "already loaded" case) in a wall-clock retry loop for the *transient*
-    failure mode: under high load or a launchd race the bootstrap can fail
-    even after ``bootout`` already tore down the prior registration, leaving
-    the service orphaned from ``KeepAlive`` supervision. The reported incident
-    happened during a graceful drain (default ``agent.restart_drain_timeout``
-    = 180s), so a fixed ~10s window is too short — retry until ``deadline``.
-
-    Both ``CalledProcessError`` and ``TimeoutExpired`` are treated as
-    retryable: a ``bootstrap`` that times out after ``bootout`` still leaves
-    the service unloaded, so it must be retried, not allowed to escape. On
-    each failure a timestamped line is appended to the reload log; success is
-    confirmed with ``launchctl list`` (not merely a zero bootstrap exit).
-    Returns True once the label is registered, False if the deadline is hit.
-    """
-    attempt = 0
-    while True:
-        attempt += 1
-        try:
-            _launchctl_bootstrap(domain, plist_path, label, timeout=30)
-            if _launchctl_label_registered(label):
-                return True
-            _append_launchd_reload_log(
-                f"bootstrap attempt {attempt} exited 0 but {domain}/{label} "
-                f"is not registered (launchctl list) — retrying"
-            )
-        except subprocess.CalledProcessError as exc:
-            _append_launchd_reload_log(
-                f"bootstrap attempt {attempt} failed (rc={exc.returncode}) "
-                f"for {domain}/{label} — retrying"
-            )
-        except subprocess.TimeoutExpired:
-            _append_launchd_reload_log(
-                f"bootstrap attempt {attempt} timed out for {domain}/{label} "
-                f"— retrying"
-            )
-        if time.monotonic() >= deadline:
-            return False
-        time.sleep(2)
-
-
 # ── launchd unsupported marker ─────────────────────────────────────────────
 # When launchd can't manage the domain on this host (error 5/125, macOS 26+),
 # we write a persistent marker so `launchd_status()` can explain that launchd
@@ -4302,6 +4173,11 @@ def launchd_restart():
             # EIO on the common case. Boot the stale label out first — cheaper
             # and clearer here than routing through _launchctl_bootstrap's
             # bootstrap-first/retry-on-EIO flow. See #23387, #42914.
+            subprocess.run(
+                ["launchctl", "bootout", target],
+                check=False,
+                timeout=90,
+            )
             subprocess.run(
                 ["launchctl", "bootout", target],
                 check=False,

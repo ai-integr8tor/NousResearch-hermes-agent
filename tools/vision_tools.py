@@ -1002,6 +1002,14 @@ async def _vision_analyze_native(
             should_cleanup = True
             image_size_bytes = temp_image_path.stat().st_size
 
+        image_size_bytes = temp_image_path.stat().st_size
+        detected_mime_type = _detect_image_mime_type(temp_image_path)
+        if not detected_mime_type:
+            return tool_error(
+                "Only real image files are supported for vision analysis.",
+                success=False,
+            )
+
         image_data_url = await _run_encode_on_cpu_executor(
             _image_to_base64_data_url,
             temp_image_path, mime_type=detected_mime_type,
@@ -1488,26 +1496,15 @@ async def _handle_vision_analyze(args: Dict[str, Any], **kw: Any) -> str:
     # information loss, no extra latency.
     if _should_use_native_vision_fast_path():
         logger.info("vision_analyze: native fast path")
-        return await _vision_analyze_native(image_url, question, task_id=task_id)
+        return await _vision_analyze_native(image_url, question)
 
     # Legacy path: aux LLM describes the image and we return its text.
     full_prompt = (
         "Fully describe and explain everything about this image, then answer the "
         f"following question:\n\n{question}"
     )
-    # Prefer config.yaml auxiliary.vision.model; env var is a legacy override.
-    model = None
-    try:
-        from hermes_cli.config import cfg_get, load_config
-        _cfg = load_config()
-        _vmodel = cfg_get(_cfg, "auxiliary", "vision", "model")
-        if _vmodel:
-            model = str(_vmodel).strip() or None
-    except Exception:
-        pass
-    if not model:
-        model = os.getenv("AUXILIARY_VISION_MODEL", "").strip() or None
-    return await vision_analyze_tool(image_url, full_prompt, model, task_id=task_id)
+    model = os.getenv("AUXILIARY_VISION_MODEL", "").strip() or None
+    return await vision_analyze_tool(image_url, full_prompt, model)
 
 
 registry.register(

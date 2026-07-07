@@ -337,22 +337,6 @@ class ToolRegistry:
             return mod
         return None
 
-    @staticmethod
-    def _caller_module() -> str:
-        """Best-effort module name of whoever called the registry method that
-        invoked this helper (two frames up: this helper, then the registry
-        method itself, then the actual caller).
-
-        ``deregister()`` takes only a tool name — unlike ``register()`` it has
-        no handler argument to bind authorization to via ``_plugin_owner_of``.
-        Frame inspection is the only way to know who is asking.
-        """
-        try:
-            frame = sys._getframe(2)
-            return frame.f_globals.get("__name__", "") or ""
-        except Exception:
-            return ""
-
     def register(
         self,
         name: str,

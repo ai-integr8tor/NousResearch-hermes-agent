@@ -213,8 +213,6 @@ def _video_ref_to_xai_url(value: str) -> str:
     if not path.is_file():
         return ref
 
-    _raise_if_blocked_local_input(ref)
-
     mime = mimetypes.guess_type(path.name)[0] or "video/mp4"
     if not mime.startswith("video/"):
         return ref

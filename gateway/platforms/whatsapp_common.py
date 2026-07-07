@@ -165,11 +165,6 @@ class WhatsAppBehaviorMixin:
         return False
 
     # ------------------------------------------------------------------ gating
-    def _open_dm_opted_in(self) -> bool:
-        if os.getenv("GATEWAY_ALLOW_ALL_USERS", "").lower() in {"true", "1", "yes"}:
-            return True
-        return os.getenv("WHATSAPP_ALLOW_ALL_USERS", "").lower() in {"true", "1", "yes"}
-
     @staticmethod
     def _matches_whatsapp_allowlist(candidate: str, allow_from) -> bool:
         """Match a WhatsApp identifier against an allowlist across phone/LID forms.
@@ -215,24 +210,8 @@ class WhatsAppBehaviorMixin:
             return False
         if self._dm_policy == "allowlist":
             return self._matches_whatsapp_allowlist(sender_id, self._allow_from)
-        if self._dm_policy == "open":
-            return self._open_dm_opted_in()
-        return False
-
-    def _is_dm_intake_allowed(self, sender_id: str) -> bool:
-        """Whether a DM may reach the gateway intake (pairing handshake path)."""
-        principal = str(sender_id or "").strip()
-        if not principal:
-            return False
-        if self._dm_policy == "disabled":
-            return False
-        if self._dm_policy == "allowlist":
-            return self._matches_whatsapp_allowlist(principal, self._allow_from)
-        if self._dm_policy == "pairing":
-            return True
-        if self._dm_policy == "open":
-            return self._open_dm_opted_in()
-        return False
+        # "open" — all DMs allowed
+        return True
 
     def _is_group_allowed(self, chat_id: str) -> bool:
         """Check whether a group chat should be processed."""
@@ -240,11 +219,8 @@ class WhatsAppBehaviorMixin:
             return False
         if self._group_policy == "allowlist":
             return self._matches_whatsapp_allowlist(chat_id, self._group_allow_from)
-        if self._group_policy == "pairing":
-            return False
-        if self._group_policy == "open":
-            return True
-        return False
+        # "open" — all groups allowed
+        return True
 
     def _compile_mention_patterns(self):
         patterns = self.config.extra.get("mention_patterns")

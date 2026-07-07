@@ -183,9 +183,9 @@ class TestHandleResumeCommand:
         restored conversation, while leaving other chats' overrides intact (#10702)."""
         from hermes_state import SessionDB
         db = SessionDB(db_path=tmp_path / "state.db")
-        db.create_session("old_session_abc", "telegram", user_id="12345", chat_id="67890")
+        db.create_session("old_session_abc", "telegram")
         db.set_session_title("old_session_abc", "My Project")
-        db.create_session("current_session_001", "telegram", user_id="12345", chat_id="67890")
+        db.create_session("current_session_001", "telegram")
 
         event = _make_event(text="/resume My Project")
         runner = _make_runner(session_db=db, current_session_id="current_session_001",

@@ -53,13 +53,6 @@ def _redact_cdp_error_text(exc: object) -> str:
         return "<error redacted>"
 
 
-def _redact_supervisor_text(value: str) -> str:
-    """Redact page-originated text before exposing supervisor snapshots."""
-    from agent.redact import redact_sensitive_text
-
-    return redact_sensitive_text(value, force=True)
-
-
 # ── Config defaults ───────────────────────────────────────────────────────────
 
 DIALOG_POLICY_MUST_RESPOND = "must_respond"

@@ -3,15 +3,7 @@ import { type RefObject, useEffect } from 'react'
 import { $petMotion, $petRoamDir, type PetState } from '@/store/pet'
 
 import { chooseMove, dwellMs, PAUSE_DWELL, pickStrollTarget } from './roam-behavior'
-import {
-  GROUND_EPS,
-  groundTop,
-  type Ledge,
-  overlapsX,
-  overlayLedge,
-  resolveLedge,
-  snapshotLedges
-} from './roam-geometry'
+import { GROUND_EPS, groundTop, type Ledge, overlapsX, overlayLedge, resolveLedge, snapshotLedges } from './roam-geometry'
 
 interface Point {
   x: number

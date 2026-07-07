@@ -30,7 +30,6 @@ import {
 } from '@/hermes'
 import { type Translations, useI18n } from '@/i18n'
 import { AlertTriangle } from '@/lib/icons'
-import { asText } from '@/lib/text'
 import { $cronFocusJobId, $cronJobs, setCronFocusJobId, setCronJobs, updateCronJobs } from '@/store/cron'
 import { notify, notifyError } from '@/store/notifications'
 
@@ -79,6 +78,8 @@ const STATE_TONE: Record<string, PanelPillTone> = {
   error: 'bad',
   completed: 'muted'
 }
+
+const asText = (value: unknown): string => (typeof value === 'string' ? value : '')
 
 const truncate = (value: string, max = 80): string => (value.length > max ? `${value.slice(0, max)}…` : value)
 
@@ -431,11 +432,6 @@ export function CronView({ onClose, onOpenSession, setStatusbarItemGroup: _setSt
           <PanelBody>
             <PanelList
               onSearchChange={setQuery}
-              searchHints={jobs
-                .map(jobTitle)
-                .filter(Boolean)
-                .slice(0, 5)
-                .map(title => t.common.tryHint(title))}
               searchLabel={c.search}
               searchPlaceholder={c.search}
               searchValue={query}
@@ -681,7 +677,7 @@ function CronJobRuns({
         <div className="flex flex-col gap-px">
           {runs.map(run => (
             <button
-              className="row-hover flex items-center justify-between gap-3 rounded-md px-2 py-1 text-left text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+              className="flex items-center justify-between gap-3 rounded-md px-2 py-1 text-left text-xs transition-colors duration-100 hover:bg-(--ui-row-hover-background) focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
               key={run.id}
               onClick={() => onOpenSession?.(run.id)}
               type="button"

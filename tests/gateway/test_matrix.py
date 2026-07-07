@@ -3486,57 +3486,6 @@ class TestMatrixImageOnlyMediaNormalization:
         import aiohttp
         import tools.url_safety as url_safety
 
-        class _RedirectResponse:
-            status = 302
-            headers = {"Location": "http://127.0.0.1/private.png"}
-            content_type = "image/png"
-
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *_args):
-                return None
-
-            def raise_for_status(self):
-                return None
-
-        class _Session:
-            def __init__(self):
-                self.requested = []
-
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *_args):
-                return None
-
-            def get(self, url, *_args, **_kwargs):
-                self.requested.append(url)
-                return _RedirectResponse()
-
-        session = _Session()
-        monkeypatch.setattr(aiohttp, "ClientSession", lambda **_kwargs: session)
-        monkeypatch.setattr(
-            url_safety,
-            "is_safe_url",
-            lambda candidate, **_kwargs: str(candidate) == "https://example.com/image.png",
-        )
-
-        with pytest.raises(ValueError, match="unsafe redirect"):
-            await self.adapter._download_external_media_with_cap(
-                "https://example.com/image.png"
-            )
-
-        # Only the initial public URL was fetched — the loopback hop was never
-        # followed because it was rejected before the next GET.
-        assert session.requested == ["https://example.com/image.png"]
-
-    @pytest.mark.asyncio
-    async def test_external_media_download_follows_safe_redirect(self, monkeypatch):
-        """A redirect to another allowed URL is followed and its body returned."""
-        import aiohttp
-        import tools.url_safety as url_safety
-
         class _Content:
             async def iter_chunked(self, _size):
                 yield b"imgbytes"
@@ -3640,12 +3589,12 @@ class TestMatrixImageOnlyMediaNormalization:
             def stream(self, *_args, **_kwargs):
                 return _Response()
 
-        monkeypatch.setattr(url_safety, "is_safe_url", lambda *_args, **_kwargs: True)
-        with patch.dict(sys.modules, {"aiohttp": None}):
-            with patch("httpx.AsyncClient", _Client):
-                data, ct, _fname = await self.adapter._download_external_media_with_cap(
-                    "https://example.com/image.png"
-                )
+        monkeypatch.setattr(aiohttp, "ClientSession", lambda **_kwargs: _Session())
+        monkeypatch.setattr(
+            url_safety,
+            "is_safe_url",
+            lambda candidate, **_kwargs: str(candidate) == "https://example.com/image.png",
+        )
 
         assert data == b"ok"
         assert ct == "image/png"

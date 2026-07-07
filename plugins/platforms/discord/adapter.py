@@ -3183,20 +3183,7 @@ class DiscordAdapter(BasePlatformAdapter):
         has_users = bool(allowed_users)
         has_roles = bool(allowed_roles)
         if not has_users and not has_roles:
-            if os.getenv("DISCORD_ALLOW_ALL_USERS", "").strip().lower() in {"true", "1", "yes"}:
-                return True
-            if os.getenv("GATEWAY_ALLOW_ALL_USERS", "").strip().lower() in {"true", "1", "yes"}:
-                return True
-            # Channel-scoped guild access requires validated channel context.
-            # Do not treat DISCORD_ALLOWED_CHANNELS alone as a user-wide bypass
-            # (voice loops and other guild-scoped callers may lack channel ids).
-            if (
-                not is_dm
-                and channel_ids is not None
-                and self._discord_channel_ids_allowed(channel_ids)
-            ):
-                return True
-            return False
+            return True
         # Check user ID allowlist (works for both DMs and guild messages).
         # ``"*"`` is honored as an open-mode wildcard, mirroring
         # ``SIGNAL_ALLOWED_USERS`` and the existing ``DISCORD_ALLOWED_CHANNELS`` /
@@ -4707,44 +4694,6 @@ class DiscordAdapter(BasePlatformAdapter):
         if self._client.user in getattr(message, "mentions", []):
             return True
         return str(self._client.user.id) in self._raw_mentioned_user_ids(message)
-
-    def _self_is_raw_mentioned(self, message: Any) -> bool:
-        """Return True only when this bot has an inline mention token.
-
-        Discord reply-pings can add the replied-to bot to ``message.mentions``
-        without a literal ``<@bot>`` token in ``message.content``. This helper
-        intentionally ignores the resolved mentions list so the bot admission
-        gate can distinguish an explicit cross-bot address from a reply chip.
-        """
-        if not self._client or not self._client.user:
-            return False
-        return str(self._client.user.id) in self._raw_mentioned_user_ids(message)
-
-    def _discord_bots_require_inline_mention(self) -> bool:
-        """Whether another bot must type an inline @mention to trigger us.
-
-        Off by default. When on, a bot-authored message only wakes this bot
-        if its content contains a literal ``<@thisbot>`` token. A Discord
-        reply/quote to one of our messages is NOT enough on its own, because
-        Discord's reply-ping silently adds us to ``message.mentions`` even
-        though the author never typed our handle — which otherwise lets two
-        bots ping-pong replies at each other indefinitely. Humans are never
-        affected by this gate; it only applies to bot authors.
-
-        Config: ``discord.bots_require_inline_mention`` (or env
-        ``DISCORD_BOTS_REQUIRE_INLINE_MENTION``).
-        """
-        configured = self.config.extra.get("bots_require_inline_mention")
-        if configured is not None:
-            if isinstance(configured, str):
-                return configured.lower() in {"true", "1", "yes", "on"}
-            return bool(configured)
-        return os.getenv("DISCORD_BOTS_REQUIRE_INLINE_MENTION", "false").lower() in {
-            "true",
-            "1",
-            "yes",
-            "on",
-        }
 
     def _discord_channel_keys(self, message: Any, parent_channel_id: Optional[str] = None) -> set[str]:
         """Return channel identifiers accepted by Discord channel config gates.

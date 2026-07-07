@@ -15,8 +15,6 @@ the GUI.
 import json
 import os
 
-from utils import env_var_enabled
-
 from tools.process_registry import process_registry
 from tools.registry import registry, tool_error
 
@@ -32,7 +30,7 @@ def close_terminal_tool(process_id: str) -> str:
 
 def check_close_terminal_requirements() -> bool:
     """Desktop GUI only — HERMES_DESKTOP is set on the gateway the app spawns."""
-    return env_var_enabled("HERMES_DESKTOP")
+    return (os.getenv("HERMES_DESKTOP") or "").strip().lower() in ("1", "true", "yes")
 
 
 CLOSE_TERMINAL_SCHEMA = {

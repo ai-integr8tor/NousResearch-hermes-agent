@@ -859,9 +859,8 @@ def run_conversation(
                     api_messages=api_messages,
                     reference_models=moa_config.get("reference_models") or [],
                     aggregator=moa_config.get("aggregator") or {},
-                    temperature=_preset_temperature(moa_config, "reference_temperature"),
-                    aggregator_temperature=_preset_temperature(moa_config, "aggregator_temperature"),
-                    max_tokens=moa_config.get("reference_max_tokens"),
+                    temperature=float(moa_config.get("reference_temperature", 0.6) or 0.6),
+                    aggregator_temperature=float(moa_config.get("aggregator_temperature", 0.4) or 0.4),
                 )
                 if _moa_context:
                     for _msg in reversed(api_messages):
@@ -2070,20 +2069,10 @@ def run_conversation(
                     # Flush the full-turn MoA trace (references + aggregator I/O)
                     # to disk when moa.save_traces is on. No-op otherwise and
                     # for non-MoA clients. Uses the live session_id so traces
-                    # land in the right per-session file. On the streaming path
-                    # the aggregator's output wasn't captured inline (its raw
-                    # token stream went to the live consumer), so pass the
-                    # resolved streamed acting text as a fallback — makes the
-                    # trace self-contained instead of only pointing at state.db.
+                    # land in the right per-session file.
                     if _moa_client is not None and hasattr(_moa_client, "consume_and_save_trace"):
                         try:
-                            _agg_streamed_text = (
-                                getattr(agent, "_current_streamed_assistant_text", "") or ""
-                            )
-                            _moa_client.consume_and_save_trace(
-                                agent.session_id,
-                                aggregator_output_fallback=_agg_streamed_text or None,
-                            )
+                            _moa_client.consume_and_save_trace(agent.session_id)
                         except Exception as _moa_trace_exc:  # pragma: no cover - defensive
                             logger.debug("MoA trace flush failed: %s", _moa_trace_exc)
                     prompt_tokens = canonical_usage.prompt_tokens
@@ -2154,10 +2143,10 @@ def run_conversation(
                         _agg_cost_provider = _agg_slot.get("provider") or agent.provider
                         _agg_cost_base_url = _agg_slot.get("base_url") or agent.base_url
                     cost_result = estimate_usage_cost(
-                        _agg_cost_model,
+                        agent.model,
                         aggregator_usage,
-                        provider=_agg_cost_provider,
-                        base_url=_agg_cost_base_url,
+                        provider=agent.provider,
+                        base_url=agent.base_url,
                         api_key=getattr(agent, "api_key", ""),
                     )
                     if cost_result.amount_usd is not None:

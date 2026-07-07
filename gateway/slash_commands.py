@@ -3528,10 +3528,13 @@ class GatewaySlashCommandsMixin:
             # List recent titled sessions for this user/platform
             try:
                 titled = await _list_titled_sessions()
-                titled = [
-                    s for s in titled
-                    if await self._resume_row_visible(source, s, allow_all)
-                ]
+                if source.platform == Platform.MATRIX and not allow_all:
+                    scoped = []
+                    for s in titled:
+                        origin = self._gateway_session_origin_for_id(str(s.get("id") or ""))
+                        if self._same_matrix_room(source, origin):
+                            scoped.append(s)
+                    titled = scoped
                 if not titled:
                     if source.platform == Platform.MATRIX and not allow_all:
                         return t("gateway.resume.matrix_no_named_sessions")
@@ -3556,10 +3559,13 @@ class GatewaySlashCommandsMixin:
         if name.isdigit():
             try:
                 titled = await _list_titled_sessions()
-                titled = [
-                    s for s in titled
-                    if await self._resume_row_visible(source, s, allow_all)
-                ]
+                if source.platform == Platform.MATRIX and not allow_all:
+                    scoped = []
+                    for s in titled:
+                        origin = self._gateway_session_origin_for_id(str(s.get("id") or ""))
+                        if self._same_matrix_room(source, origin):
+                            scoped.append(s)
+                    titled = scoped
             except Exception as e:
                 logger.debug("Failed to list titled sessions for numeric resume: %s", e)
                 return t("gateway.resume.list_failed", error=e)

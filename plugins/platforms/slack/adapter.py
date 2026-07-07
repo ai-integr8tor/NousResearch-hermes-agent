@@ -1081,7 +1081,6 @@ class SlackAdapter(BasePlatformAdapter):
 
                 self._warn_if_missing_group_dm_scopes(auth_response, team_name)
                 self._warn_if_not_bot_token(auth_response, team_name)
-                self._warn_if_inchannel_without_flat_reply(team_name)
 
             # Register message event handler
             @self._app.event("message")

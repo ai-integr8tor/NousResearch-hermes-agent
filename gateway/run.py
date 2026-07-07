@@ -11361,27 +11361,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # If the agent's session_id changed during compression, update
             # session_entry so transcript writes below go to the right session.
             if agent_result.get("session_id") and agent_result["session_id"] != session_entry.session_id:
-                if session_entry.session_id == _run_start_session_id:
-                    session_entry.session_id = agent_result["session_id"]
-                    self.session_store._save()
-                    self.session_store._record_gateway_session_peer(
-                        session_entry.session_id,
-                        session_key,
-                        source,
-                    )
-                    await asyncio.to_thread(
-                        self._sync_telegram_topic_binding,
-                        source, session_entry, reason="agent-result-compression",
-                    )
-                else:
-                    logger.info(
-                        "Skipping agent-result session split sync for %s because "
-                        "the session binding moved from %s to %s before "
-                        "compression finished",
-                        session_key or "?",
-                        _run_start_session_id,
-                        session_entry.session_id,
-                    )
+                session_entry.session_id = agent_result["session_id"]
+                self.session_store._save()
+                await asyncio.to_thread(
+                    self._sync_telegram_topic_binding,
+                    source, session_entry, reason="agent-result-compression",
+                )
 
             # Prepend reasoning/thinking if display is enabled (per-platform).
             # Mattermost requires explicit per-platform opt-in because this is
@@ -14539,6 +14524,44 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             func,
             *args,
         )
+
+    def _get_executor(self) -> concurrent.futures.ThreadPoolExecutor:
+        """Return the gateway-owned executor for blocking agent work."""
+        lock = getattr(self, "_executor_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._executor_lock = lock
+
+        with lock:
+            if getattr(self, "_executor_closing", False):
+                raise RuntimeError("Gateway is shutting down; executor unavailable")
+            executor = getattr(self, "_executor", None)
+            if executor is None or getattr(executor, "_shutdown", False):
+                executor = concurrent.futures.ThreadPoolExecutor(
+                    max_workers=10,
+                    thread_name_prefix="hermes-gateway",
+                )
+                self._executor = executor
+            return executor
+
+    def _shutdown_executor(self) -> None:
+        """Stop the gateway-owned executor without touching the loop default."""
+        lock = getattr(self, "_executor_lock", None)
+        if lock is None:
+            return
+
+        with lock:
+            self._executor_closing = True
+            executor = getattr(self, "_executor", None)
+            self._executor = None
+
+        if executor is None:
+            return
+
+        try:
+            executor.shutdown(wait=False, cancel_futures=True)
+        except TypeError:
+            executor.shutdown(wait=False)
 
     def _get_executor(self) -> concurrent.futures.ThreadPoolExecutor:
         """Return the gateway-owned executor for blocking agent work."""
@@ -17831,9 +17854,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # who set thinking_progress:true but kept tool_progress:off got a
             # None callback — so _thinking scratch bubbles never relayed even
             # though the progress queue was created for them.
-            agent.tool_progress_callback = (
-                progress_callback if (needs_progress_queue or log_mode_enabled) else None
-            )
+            agent.tool_progress_callback = progress_callback if needs_progress_queue else None
             # Discord voice verbal-ack hook (fires once per turn on first tool
             # call; armed only when in a voice channel with the mixer running).
             agent.tool_start_callback = (
@@ -20433,93 +20454,21 @@ def main():
             data = yaml.safe_load(f) or {}
             config = GatewayConfig.from_dict(data)
     
-    # start_gateway() performs the full graceful teardown (adapters
-    # disconnected, sessions saved + flushed, SQLite closed, cron/MCP stopped,
-    # PID file + runtime lock released) before it returns OR raises SystemExit
-    # with an explicit code. Force-exit afterwards so a wedged non-daemon worker
-    # thread (e.g. a ThreadPoolExecutor tool/LLM call blocked with no timeout)
-    # cannot block interpreter finalization (Py_FinalizeEx joins all non-daemon
-    # threads, incl. concurrent.futures' _python_exit) and strand the gateway
-    # half-shut down with the supervisor unable to restart it (#53107).
-    #
-    # SystemExit is caught explicitly: start_gateway raises it on the
-    # clean-fatal-config (#51228), planned-restart, and service-restart paths,
-    # all of which complete teardown first. Routing those codes through the
-    # same os._exit backstop means EVERY exit path is wedge-proof, not just the
-    # boolean-return ones.
-    try:
-        success = asyncio.run(start_gateway(config))
-        exit_code = 0 if success else 1
-    except SystemExit as e:
-        # e.code may be None (→ 0), an int, or a str (→ 1, like CPython).
-        if e.code is None:
-            exit_code = 0
-        elif isinstance(e.code, int):
-            exit_code = e.code
-        else:
-            exit_code = 1
-    _exit_after_graceful_shutdown(exit_code)
+    # start_gateway() already performs graceful teardown before returning.
+    # Force-exit afterwards so a wedged non-daemon worker thread cannot block
+    # interpreter finalization and strand the gateway half-shut down.
+    success = asyncio.run(start_gateway(config))
+    _exit_after_graceful_shutdown(success)
 
 
-def _exit_after_graceful_shutdown(exit_code: int) -> None:
-    """Flush stdio, release the PID file + runtime lock, then hard-exit.
-
-    Graceful teardown is already complete by the time this runs, so there is
-    nothing left that needs a clean interpreter shutdown. We deliberately use
-    ``os._exit`` (not ``sys.exit``): ``sys.exit`` raises ``SystemExit``, which
-    triggers ``Py_FinalizeEx`` → ``wait_for_thread_shutdown`` and joins every
-    non-daemon thread — exactly the hang (#53107) a wedged tool-worker causes.
-
-    ``os._exit`` bypasses ``atexit`` handlers, so we cannot rely on the
-    ``atexit``-registered ``remove_pid_file`` / ``release_gateway_runtime_lock``
-    (registered in ``start_gateway``) to run. The full-shutdown path releases
-    both explicitly in ``_stop_impl``, but the EARLY exit paths —
-    clean-fatal-config (#51228) and startup-aborted-before-running — raise
-    ``SystemExit`` right after ``runner.start()`` without going through
-    ``_stop_impl``, so on those paths ``atexit`` was the only thing releasing
-    them. Now that those paths are routed through this backstop (#53107),
-    release both here explicitly. Both calls are idempotent —
-    ``remove_pid_file`` only unlinks a PID file that belongs to this process,
-    and ``release_gateway_runtime_lock`` no-ops when the lock is already
-    released — so this is a no-op on the normal shutdown path and the actual
-    cleanup on the early-exit paths.
-
-    Logging IS drained here: the rotating file handlers are driven by an
-    async ``QueueListener`` on a dedicated thread (see
-    ``hermes_logging._register_queued_handler``), so records emitted right
-    before shutdown may still be sitting in the in-memory queue. ``os._exit``
-    below bypasses ``atexit``, so the ``atexit``-registered listener drain
-    never runs on this path — we drain explicitly (bounded, via
-    ``drain_log_queue``) or lose the last log lines (including the shutdown
-    reason on the early-exit paths). Stdio is flushed too.
-    """
+def _exit_after_graceful_shutdown(success: bool) -> None:
+    """Flush stdio and terminate immediately after graceful shutdown."""
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.flush()
         except Exception:
             pass
-    # Release PID + runtime lock BEFORE the log drain: the drain is bounded but
-    # could still take up to its timeout on a wedged disk, and these locks must
-    # never be stranded. os._exit skips atexit, and the early SystemExit exit
-    # paths never run _stop_impl, so release here (idempotent).
-    try:
-        from gateway.status import remove_pid_file, release_gateway_runtime_lock
-        remove_pid_file()
-        release_gateway_runtime_lock()
-    except Exception:
-        pass
-    # Drain the async log queue: os._exit bypasses atexit, so the listener's
-    # atexit drain won't fire. Use drain_log_queue() (bounded, no restart), NOT
-    # flush_log_queue(): if the listener is wedged on the rotation lock — the
-    # exact failure this async-logging change survives — an unbounded stop()
-    # join would re-freeze the shutdown. drain_log_queue() no-ops when logging
-    # never initialized a queue (very early aborts), so this is always safe.
-    try:
-        from hermes_logging import drain_log_queue
-        drain_log_queue(timeout=1.0)
-    except Exception:
-        pass
-    os._exit(exit_code)
+    os._exit(0 if success else 1)
 
 
 if __name__ == "__main__":

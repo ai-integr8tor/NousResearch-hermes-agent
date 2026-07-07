@@ -1,3 +1,4 @@
+
 import type { ToolPart } from './types'
 
 export function looksLikeUrl(value: string): boolean {

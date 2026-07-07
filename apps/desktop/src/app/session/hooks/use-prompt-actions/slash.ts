@@ -54,7 +54,6 @@ interface SlashCommandDeps {
     platform: string,
     options?: { onProgress?: (state: string) => void; sessionId?: string }
   ) => Promise<{ ok: boolean; error?: string }>
-  openMemoryGraph: () => void
   refreshSessions: () => Promise<void>
   requestGateway: GatewayRequest
   resumeStoredSession: (storedSessionId: string) => Promise<void> | void
@@ -76,7 +75,6 @@ export function useSlashCommand(deps: SlashCommandDeps) {
     createBackendSessionForSend,
     handleSkinCommand,
     handoffSession,
-    openMemoryGraph,
     refreshSessions,
     requestGateway,
     resumeStoredSession,
@@ -390,13 +388,6 @@ export function useSlashCommand(deps: SlashCommandDeps) {
             renderSlashOutput(`error: ${err instanceof Error ? err.message : String(err)}`)
           }
         },
-        // /journey (aliases /learning, /memory-graph) opens the memory graph
-        // overlay — the desktop's visual counterpart of the TUI journey
-        // timeline — instead of printing a text rendering into the transcript.
-        // Args are ignored, matching the TUI overlay behavior.
-        journey: async () => {
-          openMemoryGraph()
-        },
         // /hatch opens the pet generator overlay (the desktop's rich, multi-step
         // generate→pick→hatch→adopt flow). A typed description seeds the prompt
         // so `/hatch a cyber fox` lands on the composer step prefilled.
@@ -570,14 +561,6 @@ export function useSlashCommand(deps: SlashCommandDeps) {
         const { name, arg } = parseSlashCommand(command)
 
         if (!name) {
-          // The composer draft was already cleared on submit, and slash input
-          // never lands in the Up-arrow history ring (it derives from sent user
-          // messages) — so without this restore, any payload after a degenerate
-          // slash (`/ text`, `/` + newline) is lost forever. Hand it back.
-          if (command.replace(/^\/+/, '').trim()) {
-            setComposerDraft(command)
-          }
-
           const sessionId = await ensureSessionId(sessionHint)
 
           if (sessionId) {
@@ -621,7 +604,6 @@ export function useSlashCommand(deps: SlashCommandDeps) {
       createBackendSessionForSend,
       handleSkinCommand,
       handoffSession,
-      openMemoryGraph,
       refreshSessions,
       requestGateway,
       resumeStoredSession,

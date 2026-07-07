@@ -1053,32 +1053,12 @@ def _run_cua_driver_installer(label: str = "Installing", verbose: bool = True) -
         # debuggable. Verbose installs (interactive `computer-use install`)
         # keep streaming live.
         if verbose:
-            proc = subprocess.Popen(
-                install_cmd, shell=use_shell, env=_cua_driver_env(), **popen_kwargs
-            )
-            try:
-                proc.communicate(timeout=_CUA_INSTALLER_TIMEOUT)
-            except subprocess.TimeoutExpired:
-                _kill_installer_tree(proc)
-                proc.communicate()
-                raise
-            result = subprocess.CompletedProcess(
-                install_cmd, proc.returncode, stdout=None, stderr=None
-            )
+            result = subprocess.run(install_cmd, shell=use_shell, timeout=300, env=_cua_driver_env())
         else:
-            proc = subprocess.Popen(
-                install_cmd, shell=use_shell, env=_cua_driver_env(),
+            result = subprocess.run(
+                install_cmd, shell=use_shell, timeout=300, env=_cua_driver_env(),
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, encoding="utf-8", errors="replace", **popen_kwargs
-            )
-            try:
-                out, _ = proc.communicate(timeout=_CUA_INSTALLER_TIMEOUT)
-            except subprocess.TimeoutExpired:
-                _kill_installer_tree(proc)
-                proc.communicate()
-                raise
-            result = subprocess.CompletedProcess(
-                install_cmd, proc.returncode, stdout=out, stderr=None
+                text=True, encoding="utf-8", errors="replace",
             )
             # Preserve the full installer output. During `hermes update`,
             # sys.stdout is the mirroring _UpdateOutputStream whose `_log`

@@ -223,11 +223,11 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
         "starlette==1.0.1",  # CVE-2026-48710 (BadHost) — keep lazy-install in sync with pyproject [web]
         "python-multipart==0.0.27",  # FastAPI UploadFile/Form for streaming uploads (NS-501)
     ),
-    # Vision image-resize recovery (Pillow). Pillow is now a CORE dependency
-    # (pyproject `dependencies`), so this entry is a belt-and-suspenders fallback
-    # for stripped/source-build installs that somehow dropped it. The vision
-    # call site uses prompt=False so it can never raise a blocking input()
-    # prompt mid-session (#40490).
+    # Vision image-resize recovery (Pillow). Soft dependency: vision_tools and
+    # conversation_compression degrade gracefully without it, but the byte AND
+    # pixel-dimension shrink paths no-op when it's absent, so an oversized
+    # image can brick a session on Anthropic's non-retryable 400. Keep in sync
+    # with pyproject [vision].
     "tool.vision": ("Pillow==12.2.0",),
     # Computer Use (cua-driver) — the MCP client SDK used to spawn and talk
     # to the cua-driver process over stdio. Matches the `mcp` / `computer-use`

@@ -1818,6 +1818,9 @@ class AIAgent:
                 # the synthetic pair buried mid-list, not just at the tail.
                 if _is_ephemeral_scaffolding(msg):
                     continue
+                msg_id = id(msg)
+                if msg_id in flushed_ids:
+                    continue
                 if msg.get(_DB_PERSISTED_MARKER):
                     continue
                 # Already-durable messages: either carried over from the loaded

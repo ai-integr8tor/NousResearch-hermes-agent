@@ -14,7 +14,12 @@ import {
   prettyJson,
   unwrapToolPayload
 } from './format'
-import { findFirstUrl, hostnameOf, looksLikePath, looksLikeUrl } from './targets'
+import {
+  findFirstUrl,
+  hostnameOf,
+  looksLikePath,
+  looksLikeUrl
+} from './targets'
 import type {
   CountMetric,
   MessageRunningStateSlice,

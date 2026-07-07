@@ -367,19 +367,7 @@ HARDLINE_PATTERNS = [
     # `${HOME}` brace form and quoted paths (`rm -rf "/"`, `rm -rf "$HOME"`)
     # are handled via _hardline_rm_path so the floor cannot be bypassed with
     # the ordinary quoting/brace shell idioms.
-    #
-    # The path token matches any root-anchored path whose components collapse
-    # back to "/" in the shell: a bare "/", repeated slashes ("//"), and
-    # "."/".." current/parent segments ("/.", "/./", "/..", "/../..") all
-    # resolve to root, optionally followed by a trailing glob ("/*", "//*").
-    # Each inter-slash segment must be exactly "." or "..", so a longer dot
-    # run or any real name is a literal directory, NOT root — "/tmp", "/home",
-    # "/.ssh", "/.config" and even "/..." (a dir literally named "...") fall
-    # through to the softer DANGEROUS_PATTERNS / system-directory rules
-    # instead of being unconditionally hardline-blocked. The explicit "/ \*"
-    # alt preserves the slash-space-glob spelling (`rm -rf / *`, which the
-    # shell sees as two args: "/" plus the "*" glob).
-    (_RM_FLAG_PREFIX + _hardline_rm_path(r'/(?:(?:\.\.?)?/)*(?:\.\.?)?\**|/ \*'), "recursive delete of root filesystem"),
+    (_RM_FLAG_PREFIX + _hardline_rm_path(r'/|/\*|/ \*'), "recursive delete of root filesystem"),
     (_RM_FLAG_PREFIX + _hardline_rm_path(_HARDLINE_SYSTEM_DIRS), "recursive delete of system directory"),
     (_RM_FLAG_PREFIX + _hardline_rm_path(r'(?:~|\$\{?HOME\}?)(?:/?|/\*)?'), "recursive delete of home directory"),
     # Filesystem format
@@ -703,13 +691,7 @@ DANGEROUS_PATTERNS = [
     (r'\b(bash|sh|zsh|ksh)\s+<<', "shell execution via heredoc"),
     # Git destructive operations that can lose uncommitted work or rewrite
     # shared history. Not captured by rm/chmod/etc patterns.
-    # `git reset --hard` accepts any unambiguous long-flag prefix (--h,
-    # --ha, --har, --hard) because git's own option parser resolves
-    # abbreviated long flags -- `--hard` is the only `git reset` mode
-    # starting with "h" (siblings are --soft/--mixed/--merge/--keep), so
-    # this cannot collide with another reset mode. It also does not match
-    # `--help`, which git special-cases before mode resolution.
-    (r'\bgit\s+reset\s+--h(?:a(?:r(?:d)?)?)?\b', "git reset --hard (destroys uncommitted changes)"),
+    (r'\bgit\s+reset\s+--hard\b', "git reset --hard (destroys uncommitted changes)"),
     (r'\bgit\s+push\b.*--forc[a-z]*\b', "git force push (rewrites remote history)"),
     (r'\bgit\s+push\b.*-f\b', "git force push short flag (rewrites remote history)"),
     (r'\bgit\s+clean\s+-[^\s]*f', "git clean with force (deletes untracked files)"),
@@ -1241,17 +1223,6 @@ def _iter_shell_command_starts(command: str):
             starts.append(i + 2)
             i += 2
             continue
-        # Bare subshell `(cmd)` and brace group `{ cmd; }` openers begin a new
-        # command context, just like `;` or `$(`. We only reach this branch
-        # OUTSIDE any quote (the quote arms above `continue` first), so a `(`
-        # or `{` sitting inside a quoted argument — `--title "block (reboot)"`,
-        # `echo "{ reboot; }"` — never registers a command start. That is the
-        # whole reason this lives in the quote-aware tokenizer instead of the
-        # flat `_CMDPOS` regex, which cannot tell quoted text from real syntax.
-        if ch in ("(", "{"):
-            starts.append(i + 1)
-            i += 1
-            continue
         if ch == ";":
             starts.append(i + 1)
             i += 1
@@ -1282,29 +1253,6 @@ def _iter_shell_command_starts(command: str):
         if start < len(command) and start not in seen:
             seen.add(start)
             yield start
-
-
-def _mark_command_starts(command: str) -> str:
-    """Insert a newline before each real (quote-aware) command start.
-
-    ``\\n`` is already a ``_CMDPOS`` separator, so this rewrites subshell
-    ``(cmd)`` and brace-group ``{ cmd; }`` openers — which the flat pattern
-    class deliberately omits — into a form the anchored hardline/dangerous
-    patterns recognize, WITHOUT the quoted-prose false positives that adding
-    ``(`` / ``{`` to ``_CMDPOS`` would cause. Starts inside quotes are never
-    produced by ``_iter_shell_command_starts``, so quoted arguments such as
-    ``--title "block (reboot)"`` are left exactly as-is.
-    """
-    # Collect the (whitespace-skipped) start offsets, drop 0 (already anchored
-    # by ``^``), and splice a newline in front of each — right-to-left so the
-    # earlier offsets stay valid as we mutate.
-    offsets = sorted(o for o in _iter_shell_command_starts(command) if o > 0)
-    if not offsets:
-        return command
-    out = command
-    for offset in reversed(offsets):
-        out = out[:offset] + "\n" + out[offset:]
-    return out
 
 
 def _iter_shell_command_word_spans(command: str):
@@ -1353,21 +1301,6 @@ def _command_detection_variants(command: str):
     normalized = _normalize_command_for_detection(command)
     seen = {normalized}
     yield normalized
-    # Subshell `(cmd)` and brace-group `{ cmd; }` openers put `cmd` at a real
-    # command position, but the flat `_CMDPOS`-anchored patterns can't see it:
-    # their start-position class deliberately omits `(`/`{` because a bare
-    # regex cannot tell `(reboot)` (real subshell) from `--title "(reboot)"`
-    # (quoted prose) — adding them there regresses ordinary quoted arguments.
-    # Instead, reconstruct the command with a newline (already a `_CMDPOS`
-    # separator) inserted at each command start the QUOTE-AWARE tokenizer
-    # found. Openers inside quotes never yield a start, so quoted prose is
-    # untouched, while `(reboot)` / `{ shutdown -h now; }` now anchor. This
-    # covers every `_CMDPOS` rule (shutdown/reboot/init/systemctl/telinit and
-    # the rm root/home/system floor) in one place.
-    marked = _mark_command_starts(normalized)
-    if marked != normalized and marked not in seen:
-        seen.add(marked)
-        yield marked
     # Shell quoting/escaping can spell a dangerous executable name in pieces
     # (for example r\m or r''m). Keep that deobfuscation scoped to command
     # words so similarly shaped arguments do not become false positives.

@@ -107,9 +107,7 @@ _PREFIX_PATTERNS = [
     r"brv_[A-Za-z0-9]{10,}",            # ByteRover API key
     r"xai-[A-Za-z0-9]{30,}",            # xAI (Grok) API key
     r"ntn_[A-Za-z0-9]{10,}",            # Notion internal integration token
-    r"fw-[A-Za-z0-9]{30,}",             # Fireworks AI API key
     r"fw_[A-Za-z0-9]{30,}",             # Fireworks AI API key
-    r"fpk_[A-Za-z0-9]{30,}",            # Fireworks AI project key
 ]
 
 # ENV assignment patterns: KEY=value where KEY contains a secret-like name.
@@ -139,14 +137,6 @@ _ENV_ASSIGN_RE = re.compile(
 # The colon-form URL guard (skip when ``://`` present) lives at the call site.
 _SECRET_CFG_NAMES = r"(?:api[ _.\-]?key|token|secret|passwd|password|credential|auth)"
 _CFG_VALUE = r"(['\"]?)([^\s&]+?)\2(?=[\s&]|$)"
-
-# Programmatic env lookups (``os.getenv(...)``, ``os.environ[...]``,
-# ``os.environ.get(...)``, ``process.env.X``, ``$ENV{X}``) reference variable
-# *names*, not secret values. When one appears as the VALUE of a KEY=... match
-# it's a code snippet, not a leaked secret — skip redaction (issue #2852).
-_ENV_LOOKUP_VALUE_RE = re.compile(
-    r"^(?:os\.(?:getenv|environ)|process\.env|\$ENV\{)"
-)
 # Namespaced (dotted) key: the secret word may sit anywhere in a dotted path.
 _CFG_DOTTED_RE = re.compile(
     rf"((?:[A-Za-z0-9_\-]+\.)+[A-Za-z0-9_.\-]*{_SECRET_CFG_NAMES}[A-Za-z0-9_.\-]*"
