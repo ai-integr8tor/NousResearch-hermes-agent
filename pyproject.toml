@@ -10,14 +10,15 @@ name = "hermes-agent"
 version = "0.18.0"
 description = "The self-improving AI agent — creates skills from experience, improves them during use, and runs anywhere"
 readme = "README.md"
-# Upper bound is load-bearing, not cosmetic. uv resolves the project's
+# Upper bound is load-bearing, not cosmetic.  uv resolves the project's
 # Python from `requires-python`, and an inherited `UV_PYTHON` env var (or a
 # fresh distro whose newest interpreter uv auto-picks) will otherwise select
-# 3.14, where Rust-backed transitives (e.g. pydantic-core) have no cp314
-# wheel yet and fall back to a maturin source build that fails. Capping at
-# <3.14 makes uv refuse 3.14 with a clear error instead of attempting that
-# build. Raise the ceiling once our Rust transitives ship cp314 wheels.
-requires-python = ">=3.11,<3.14"
+# 3.14+, where Rust-backed transitives (e.g. pydantic-core) historically had
+# no cp314 wheel and fell back to a maturin source build that failed.  As of
+# 2026-07 pydantic-core 2.46.4, Pillow 12.2.0, and cryptography 46.0.7 all
+# ship cp314 wheels, so the ceiling is raised to <3.15.  Bump again once
+# cp315 wheels ship for the Rust transitives.
+requires-python = ">=3.11,<3.15"
 authors = [{ name = "Nous Research" }]
 license = "MIT"
 license-files = ["LICENSE"]
