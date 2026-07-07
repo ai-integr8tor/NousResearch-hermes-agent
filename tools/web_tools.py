@@ -225,6 +225,7 @@ def _get_backend() -> str:
         ("parallel", _has_env("PARALLEL_API_KEY")),
         ("firecrawl", _has_env("FIRECRAWL_API_KEY") or _has_env("FIRECRAWL_API_URL")),
         ("firecrawl", _is_tool_gateway_ready()),
+        ("crawl4ai", _has_env("CRAWL4AI_API_TOKEN") and _has_env("CRAWL4AI_URL")),
         ("searxng", _has_env("SEARXNG_URL")),
         ("brave-free", _has_env("BRAVE_SEARCH_API_KEY")),
         ("ddgs", _ddgs_package_importable()),
@@ -330,6 +331,8 @@ def _is_backend_available(backend: str) -> bool:
             return has_xai_credentials()
         except Exception:
             return False
+    if backend == "crawl4ai":
+        return _has_env("CRAWL4AI_URL") and _has_env("CRAWL4AI_API_TOKEN")
     return False
 
 
@@ -667,6 +670,19 @@ def web_search_tool(query: str, limit: int = 5) -> str:
         backend = _get_search_backend()
         provider = _wsp_get_provider(backend) if backend else None
         if provider is None or not provider.supports_search():
+            # When the configured name IS registered but doesn't support
+            # search (extract-only providers like crawl4ai), surface that
+            # as a typed "extract-only" error rather than silently
+            # switching backends. When the name isn't registered at all
+            # (typo / uninstalled plugin), fall through to the
+            # active-provider walk.
+            if provider is not None and not provider.supports_search():
+                return tool_error(
+                    f"{provider.display_name} is an extract-only "
+                    "backend and cannot search the web. "
+                    "Set web.search_backend to firecrawl, "
+                    "tavily, exa, parallel, searxng, brave-free, or ddgs."
+                )
             # Fall back to availability-walked active provider when the
             # configured backend isn't a registered search provider (typo,
             # uninstalled plugin, or capability mismatch).
