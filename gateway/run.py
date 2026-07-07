@@ -12131,6 +12131,28 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 matches.append(key)
         return matches
 
+    def _sibling_dm_thread_run_keys(self, source: SessionSource, own_key: str) -> list:
+        """Find running-agent keys for threaded DM sessions in the same chat."""
+        chat_id = getattr(source, "chat_id", None)
+        if (
+            source.platform != Platform.MATRIX
+            or getattr(source, "chat_type", None) != "dm"
+            or getattr(source, "thread_id", None)
+            or not chat_id
+        ):
+            return []
+        platform = source.platform.value
+        prefix = ":".join(["agent:main", platform, "dm", str(chat_id)]) + ":"
+        matches = []
+        for key, agent in list(self._running_agents.items()):
+            if key == own_key:
+                continue
+            if agent is _AGENT_PENDING_SENTINEL or not agent:
+                continue
+            if key.startswith(prefix):
+                matches.append(key)
+        return matches
+
 
 
 

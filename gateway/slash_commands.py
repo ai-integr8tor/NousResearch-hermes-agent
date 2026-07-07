@@ -1087,6 +1087,27 @@ class GatewaySlashCommandsMixin:
             )
             return EphemeralReply(t("gateway.stop.stopped"))
 
+        # Matrix DM auto-threading can give each root DM message a synthetic
+        # event-id thread. A root-level /stop is a control command for the
+        # private conversation, not a new agent topic, so let it interrupt
+        # running DM-thread sessions in the same chat.
+        dm_thread_keys = self._sibling_dm_thread_run_keys(source, session_key)
+        if dm_thread_keys:
+            for sibling_key in dm_thread_keys:
+                await self._interrupt_and_clear_session(
+                    sibling_key,
+                    source,
+                    interrupt_reason=_INTERRUPT_REASON_STOP,
+                    invalidation_reason="stop_command_dm_thread_sibling",
+                )
+            logger.info(
+                "STOP (DM thread sibling) by %s — interrupted %d run(s) in DM: %s",
+                session_key,
+                len(dm_thread_keys),
+                ", ".join(dm_thread_keys),
+            )
+            return EphemeralReply(t("gateway.stop.stopped"))
+
         return t("gateway.stop.no_active")
 
     async def _handle_platform_command(self, event: MessageEvent) -> str:
