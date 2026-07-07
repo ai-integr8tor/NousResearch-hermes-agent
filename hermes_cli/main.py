@@ -57,7 +57,7 @@ Usage:
 # ``hermes update`` to recover.  Missing the bootstrap means UTF-8 stdio
 # setup is skipped on Windows — degraded, not broken.  POSIX is unaffected.
 try:
-    import hermes_bootstrap  # noqa: F401
+    import hermes_bootstrap
 except ModuleNotFoundError:
     pass
 
@@ -12030,8 +12030,8 @@ def cmd_dashboard(args):
         pass
 
     try:
-        import fastapi  # noqa: F401
-        import uvicorn  # noqa: F401
+        import fastapi
+        import uvicorn
     except ImportError as e:
         print("Web UI dependencies not installed (need fastapi + uvicorn).")
         print(
@@ -12837,7 +12837,7 @@ def main():
     _secrets_cli.register_cli(secrets_bw)
     _op_secrets_cli.register_cli(secrets_op)
 
-    def _dispatch_secrets(args):  # noqa: ANN001
+    def _dispatch_secrets(args):
         sub = getattr(args, "secrets_command", None)
         bw_sub = getattr(args, "secrets_bw_command", None)
         op_sub = getattr(args, "secrets_op_command", None)
@@ -12901,7 +12901,7 @@ def main():
     try:
         from agent.lsp.cli import register_subparser as _lsp_register
         _lsp_register(subparsers)
-    except Exception as _lsp_err:  # noqa: BLE001
+    except Exception as _lsp_err:
         # LSP is optional infrastructure — never let a registration
         # failure break the CLI overall.
         logger.debug("LSP CLI registration failed: %s", _lsp_err)
@@ -13389,7 +13389,7 @@ def main():
                 if not st["installed"]:
                     print("cua-driver: not installed. Run: hermes computer-use install")
                     sys.exit(1)
-                glyph = lambda v: "✅" if v is True else ("❌" if v is False else "•")  # noqa: E731
+                glyph = lambda v: "✅" if v is True else ("❌" if v is False else "•")
                 print(f"cua-driver: {st['version'] or 'installed'} ({st['platform']})")
                 if st["can_grant"]:  # macOS TCC permissions
                     print(f"  {glyph(st['accessibility'])} Accessibility")

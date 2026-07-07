@@ -291,7 +291,7 @@ def _apply_managed_env() -> None:
         from hermes_cli import managed_scope
 
         managed_dir = managed_scope.get_managed_dir()
-    except Exception:  # noqa: BLE001 — managed scope must never block startup
+    except Exception:
         return
     if managed_dir is None:
         return
@@ -332,7 +332,7 @@ def _apply_external_secret_sources(home_path: Path) -> None:
 
     try:
         cfg = _load_secrets_config(home_path)
-    except Exception:  # noqa: BLE001 — config errors must not block startup
+    except Exception:
         return
     if not cfg:
         return
@@ -391,6 +391,6 @@ def _load_secrets_config(home_path: Path) -> dict:
     try:
         with open(config_path, "r", encoding="utf-8") as f:
             data = fast_safe_load(f) or {}
-    except Exception:  # noqa: BLE001
+    except Exception:
         return {}
     return data.get("secrets") or {}
