@@ -317,6 +317,43 @@ class TestConfig:
         assert provider._bank_retain_mission is None
         assert provider._retain_context == "conversation between Hermes Agent and the User"
 
+    def test_cron_context_forces_tools_mode_and_disables_auto_memory(self, tmp_path, monkeypatch):
+        config = {
+            "mode": "cloud",
+            "apiKey": "test-key",
+            "api_url": "http://localhost:9999",
+            "bank_id": "test-bank",
+            "budget": "mid",
+            "memory_mode": "hybrid",
+            "auto_recall": True,
+            "auto_retain": True,
+        }
+        config_path = tmp_path / "hindsight" / "config.json"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(json.dumps(config))
+        monkeypatch.setattr(
+            "plugins.memory.hindsight.get_hermes_home", lambda: tmp_path
+        )
+
+        p = HindsightMemoryProvider()
+        p.initialize(
+            session_id="cron-session",
+            hermes_home=str(tmp_path),
+            platform="cron",
+            agent_context="cron",
+        )
+        p._client = _make_mock_client()
+
+        assert p._agent_context == "cron"
+        assert p._memory_mode == "tools"
+        assert p._auto_recall is False
+        assert p._auto_retain is False
+        assert {s["name"] for s in p.get_tool_schemas()} == {
+            "hindsight_retain",
+            "hindsight_recall",
+            "hindsight_reflect",
+        }
+
     def test_recall_types_default_is_observation_only(self, provider):
         """Auto-recall must filter to observation by default."""
         assert provider._recall_types == ["observation"]

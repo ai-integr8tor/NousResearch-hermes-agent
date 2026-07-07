@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch, MagicMock
 
 import pytest
 
-from cron.scheduler import _resolve_origin, _resolve_delivery_target, _deliver_result, _send_media_via_adapter, run_job, SILENT_MARKER, _build_job_prompt, _resolve_cron_enabled_toolsets, _merge_mcp_into_per_job_toolsets
+from cron.scheduler import _resolve_origin, _resolve_delivery_target, _deliver_result, _send_media_via_adapter, run_job, SILENT_MARKER, _build_job_prompt, _resolve_cron_enabled_toolsets, _merge_mcp_into_per_job_toolsets, _configure_cron_memory_surface
 from tools.env_passthrough import clear_env_passthrough
 from tools.credential_files import clear_credential_files
 
@@ -994,6 +994,9 @@ class TestRunJobSessionPersistence:
         kwargs = mock_agent_cls.call_args.kwargs
         assert kwargs["session_db"] is fake_db
         assert kwargs["platform"] == "cron"
+        assert kwargs["skip_memory"] is True
+        assert kwargs["enable_memory_provider_tools"] is True
+        assert kwargs["memory_provider_agent_context"] == "cron"
         assert kwargs["session_id"].startswith("cron_test-job_")
         fake_db.end_session.assert_called_once()
         call_args = fake_db.end_session.call_args
@@ -1251,6 +1254,25 @@ class TestRunJobSessionPersistence:
 
         kwargs = mock_agent_cls.call_args.kwargs
         assert kwargs["enabled_toolsets"] == ["web", "terminal", "file"]
+
+    def test_configure_cron_memory_surface_removes_builtin_memory_tool(self):
+        agent = MagicMock()
+        agent.tools = [
+            {"type": "function", "function": {"name": "memory"}},
+            {"type": "function", "function": {"name": "hindsight_recall"}},
+            {"type": "function", "function": {"name": "terminal"}},
+        ]
+        agent.valid_tool_names = {"memory", "hindsight_recall", "terminal"}
+        agent._memory_nudge_interval = 10
+
+        _configure_cron_memory_surface(agent)
+
+        assert [tool["function"]["name"] for tool in agent.tools] == [
+            "hindsight_recall",
+            "terminal",
+        ]
+        assert agent.valid_tool_names == {"hindsight_recall", "terminal"}
+        assert agent._memory_nudge_interval == 0
 
     def test_run_job_disabled_toolsets_layer_user_config_on_baseline(self, tmp_path):
         """agent.disabled_toolsets must be honoured in cron — issue #25752.
