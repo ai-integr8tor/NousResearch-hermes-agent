@@ -94,8 +94,8 @@ REASONING_SCHEMA = {
         "Ask Honcho a natural language question and get a synthesized answer. "
         "Uses Honcho's LLM (dialectic reasoning) — higher cost than honcho_profile or honcho_search. "
         "Can query about any peer via alias or explicit peer ID. "
-        "Pass reasoning_level to control depth: minimal (fast/cheap), low (default), "
-        "medium, high, max (deep/expensive). Omit for configured default."
+        "Pass reasoning_level to control depth: minimal (fast/cheap, 250-token cap — single facts only), "
+        "low (default), medium, high, max (deep/expensive). Omit for configured default."
     ),
     "parameters": {
         "type": "object",
@@ -110,7 +110,8 @@ REASONING_SCHEMA = {
                     "Override the default reasoning depth. "
                     "Omit to use the configured default (typically low). "
                     "Guide:\n"
-                    "- minimal: quick factual lookups (name, role, simple preference)\n"
+                    "- minimal: quick factual lookups ONLY (name, role, single preference). "
+                    "Hard 250-token output cap — will truncate multi-fact or synthesis queries.\n"
                     "- low: straightforward questions with clear answers\n"
                     "- medium: multi-aspect questions requiring synthesis across observations\n"
                     "- high: complex behavioral patterns, contradictions, deep analysis\n"
